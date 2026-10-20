@@ -143,7 +143,6 @@ html.dark .switch input:checked + span::after { background: var(--primary-foregr
 
 /* 设置项一行：左侧名称与说明，右侧控件 */
 .setting-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
-@media (min-width: 1280px) { .setting-list.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .setting {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   border-radius: 16px; background: color-mix(in oklab, var(--background) 60%, transparent); padding: 10px 12px;
@@ -153,10 +152,10 @@ html.dark .switch input:checked + span::after { background: var(--primary-foregr
 .setting-desc { font-size: 11px; line-height: 16px; color: var(--muted-foreground); margin-top: 2px; }
 .setting-control { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .setting-unit { font-size: 11px; color: var(--muted-foreground); }
-/* 接口测试模型：两个出口的下拉在同一个设置格里纵向排列，不占整行。 */
-.test-model-row { flex-direction: column; align-items: stretch; gap: 6px; }
-.test-model-cell { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.test-model-head { display: flex; align-items: baseline; gap: 6px; }
+/* 接口测试模型：两个出口的下拉并排，与其它设置项保持同样的行高。 */
+.test-model-row { flex-direction: row; align-items: center; gap: 12px; }
+.test-model-cell { display: flex; flex-direction: row; align-items: center; gap: 8px; min-width: 0; }
+.test-model-head { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
 .test-model-realm { font-size: 11px; color: var(--muted-foreground); }
 
 /* 提示条 */

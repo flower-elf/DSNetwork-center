@@ -82,7 +82,7 @@ REQUIRED_FILES = (
     "Lib/uuid.py", "Lib/secrets.py",
     "Lib/argparse.py", "Lib/base64.py", "Lib/bisect.py", "Lib/copy.py",
     "Lib/datetime.py",
-    "Lib/difflib.py", "Lib/fnmatch.py", "Lib/getpass.py", "Lib/gzip.py", "Lib/heapq.py",
+    "Lib/difflib.py", "Lib/fnmatch.py", "Lib/functools.py", "Lib/getpass.py", "Lib/gzip.py", "Lib/heapq.py",
     "Lib/ipaddress.py", "Lib/queue.py", "Lib/shutil.py", "Lib/random.py",
     "Lib/subprocess.py", "Lib/threading.py", "Lib/sqlite3/__init__.py",
     "Lib/html/__init__.py", "Lib/http/__init__.py", "Lib/http/client.py",

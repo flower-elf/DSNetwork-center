@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# 反代代跑 web_search 与 web_fetch，开关在 wb_proxy.LOCAL_WEB_TOOLS。
+# 反向代理代为执行 web_search 与 web_fetch，开关在 wb_proxy.LOCAL_WEB_TOOLS。
 #
 # 搜索按引擎链自动轮换：duckduckgo、bing 失败时依次换 wikipedia、
 # stackoverflow、news；非常规来源的结果会标明来源，全部失败时回明确的错误，

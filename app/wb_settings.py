@@ -10,6 +10,8 @@ import secrets
 import threading
 import time
 
+import wb_cost
+
 DEFAULT_PANEL_PASSWORD = "admin"
 PBKDF2_ROUNDS = 120_000
 # 存进 settings.json 的 cost 只接受这个区间：更低的哈希形同虚设，更高的值能把
@@ -74,17 +76,16 @@ UI_LANGUAGE_KEY = "ui_language"
 UI_LANGUAGE_DEFAULT = "zh"
 UI_LANGUAGE_VALUES = ("zh", "zh-Hant", "en")
 
-# 网关是否每天检查一次 GitHub 新版本。缺失键读作关，与上面几个开关相反，
+# 网关是否按间隔自动检查 GitHub 新版本。缺失键读作关，与上面几个开关相反，
 # 因为开启后网关会按自己的计划发送请求。
 UPDATE_CHECK_ENABLED_KEY = "update_check_enabled"
+# 自动检查的间隔（小时）：1～720，默认每天一次。
+UPDATE_CHECK_INTERVAL_KEY = "update_check_interval_hours"
+UPDATE_CHECK_INTERVAL_DEFAULT = 24
+UPDATE_CHECK_INTERVAL_MAX = 720
 # 该每日检查的记账数据，只有一个小对象，不做通用更新状态存储，详见
 # update_check_state()。
 UPDATE_CHECK_STATE_KEY = "update_check"
-
-# 剩余用量优先调度：把估计剩余快耗尽的账号与模型组合先交出去，剩余越少权重
-# 越高。缺失键读作关：估算本身从撞线样本反推，优先它是一次刻意的取舍，那些
-# 组合会明显多接流量，所以未设置过的安装保持纯轮询。
-REMAINING_PRIORITY_ENABLED_KEY = "remaining_priority_enabled"
 
 # 出口级瞬时失败退避，见 issue #271：传输类失败与 502/503/504 不再计入账号级
 # 熔断，改记在出口上，退避降到秒级，见 wb_egress。缺失键读作关：它改变的是
@@ -92,7 +93,7 @@ REMAINING_PRIORITY_ENABLED_KEY = "remaining_priority_enabled"
 # 账号熔断。
 EGRESS_BACKOFF_ENABLED_KEY = "egress_backoff_enabled"
 
-# 日志落库：把运行日志追加写进 usage/logs.sqlite3，重启后仍能回看，方便事后
+# 日志写入数据库：把运行日志追加写进 usage/logs.sqlite3，重启后仍能回看，方便事后
 # 排查。缺失键读作关：关闭时日志只留在内存环形缓冲里，与上游一致；只有显式
 # true 才建库并落盘。
 LOG_DB_ENABLED_KEY = "log_db_enabled"
@@ -1250,6 +1251,30 @@ def set_pricing_enabled(accounts_dir, enabled):
     return enabled
 
 
+COST_ESTIMATE_KEY = "cost_estimate"
+
+
+def cost_estimate(accounts_dir):
+    """费用估算使用的官方价格表与积分折算单价。
+
+    没有这个键的安装使用内置价格表，默认只有 deepseek-v4.1-flash 一项。
+    设置文件损坏时向上抛出 SettingsError，由调用方显示读取失败，避免用内置
+    价格掩盖损坏的配置。
+    """
+    stored = load(accounts_dir).get(COST_ESTIMATE_KEY)
+    return wb_cost.normalise(stored)
+
+
+def set_cost_estimate(accounts_dir, raw):
+    """保存校验过的费用估算设置，返回存储的形状。"""
+    value = wb_cost.clean(raw)
+    with _lock:
+        data = load(accounts_dir)
+        data[COST_ESTIMATE_KEY] = value
+        save(accounts_dir, data)
+    return value
+
+
 def ui_language(accounts_dir):
     """实例级默认界面语言，取值为 zh、zh-Hant 或 en。"""
     value = load(accounts_dir).get(UI_LANGUAGE_KEY)
@@ -1409,6 +1434,56 @@ def usage_config(accounts_dir):
         out[key] = value
     return out
 
+
+def usage_keep_value(accounts_dir, key):
+    """实际生效的聚合保留值；环境变量优先，其次面板显式保存，都没有返回 None。"""
+    raw = os.environ.get(USAGE_ENV.get(key, ""))
+    try:
+        env_value = int(raw)
+    except (TypeError, ValueError):
+        env_value = 0
+    if env_value >= 1:
+        return min(env_value, USAGE_LIMITS.get(key, 1 << 30))
+    stored = load(accounts_dir).get("usage")
+    if not isinstance(stored, dict):
+        return None
+    value = stored.get(key)
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 1 or value > USAGE_LIMITS.get(key, 1 << 30)):
+        return None
+    return value
+
+
+USAGE_ENV = {
+    "hour_keep_hours": "WB_USAGE_HOUR_KEEP_HOURS",
+    "day_keep_days": "WB_USAGE_DAY_KEEP_DAYS",
+}
+
+
+def usage_effective(accounts_dir):
+    """面板显示与实际生效的聚合保留值；环境变量优先于面板值。"""
+    stored = load(accounts_dir).get("usage")
+    stored = stored if isinstance(stored, dict) else {}
+    out = {}
+    for key, default in USAGE_DEFAULTS.items():
+        raw = os.environ.get(USAGE_ENV.get(key, ""))
+        if raw is not None:
+            try:
+                env_value = int(raw)
+            except (TypeError, ValueError):
+                env_value = 0
+            if env_value >= 1:
+                out[key] = min(env_value, USAGE_LIMITS[key])
+                continue
+        value = stored.get(key)
+        if (not isinstance(value, bool) and isinstance(value, int)
+                and 1 <= value <= USAGE_LIMITS[key]):
+            out[key] = value
+            continue
+        out[key] = default
+    return out
+
+
 def set_usage_config(accounts_dir, patch):
     """保存校验过的聚合保留窗口补丁。"""
     clean = validate_usage_patch(patch)
@@ -1475,7 +1550,8 @@ def set_prompt_config(accounts_dir, cfg):
 
 def enable_anthropic_messages(accounts_dir):
     """面板设置是否启用了 Anthropic Messages 兼容层。"""
-    return load(accounts_dir).get("enable_anthropic_messages") is True
+    return _flag(accounts_dir, "enable_anthropic_messages", False,
+                 "WB_ENABLE_ANTHROPIC_MESSAGES")
 
 
 def set_enable_anthropic_messages(accounts_dir, enabled):
@@ -1488,10 +1564,197 @@ def set_enable_anthropic_messages(accounts_dir, enabled):
     return enabled
 
 
+def _env_flag_value(name):
+    """环境变量的布尔值：返回 (是否设置, 值)。
+
+    只认 1/true/yes/on 与 0/false/no/off；空串、拼错的值与未知值都不算设置，
+    避免把 WB_ENABLE_ANTHROPIC_MESSAGES=maybe 当成开启高风险入口。
+    """
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return False, False
+    value = str(raw).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True, True
+    if value in ("0", "false", "no", "off"):
+        return True, False
+    return False, False
+
+
+def _env_flag(name, default):
+    """环境变量的布尔值；没有设置或值非法时回到默认。"""
+    present, value = _env_flag_value(name)
+    return value if present else default
+
+
+def _flag(accounts_dir, key, default=False, env=""):
+    """读取一个布尔功能开关：环境变量优先于面板值，都没有时用默认值。
+
+    环境变量存在时面板上的保存不生效，面板会显示一项黄色提示说明这一点。
+    """
+    if env:
+        present, value = _env_flag_value(env)
+        if present:
+            return value
+    value = load(accounts_dir).get(key)
+    if isinstance(value, bool):
+        return value
+    return default
+
+
+def _set_flag(accounts_dir, key, enabled):
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data[key] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
+def prompt_cache_key(accounts_dir):
+    """是否向上游附带 prompt_cache_key；默认关闭，等待实测收益。"""
+    return _flag(accounts_dir, "prompt_cache_key", False, "WB_PROMPT_CACHE_KEY")
+
+
+def set_prompt_cache_key(accounts_dir, enabled):
+    return _set_flag(accounts_dir, "prompt_cache_key", enabled)
+
+
+def affinity_debug(accounts_dir):
+    """是否输出会话标识派生的调试日志；默认关闭。"""
+    return _flag(accounts_dir, "affinity_debug", False, "WB_AFFINITY_DEBUG")
+
+
+def set_affinity_debug(accounts_dir, enabled):
+    return _set_flag(accounts_dir, "affinity_debug", enabled)
+
+
+def upstream_keepalive(accounts_dir):
+    """是否复用上游 HTTP 连接；默认开启。"""
+    return _flag(accounts_dir, "upstream_keepalive", True, "WB_UPSTREAM_KEEPALIVE")
+
+
+def set_upstream_keepalive(accounts_dir, enabled):
+    return _set_flag(accounts_dir, "upstream_keepalive", enabled)
+
+
+def usage_cache(accounts_dir):
+    """是否把用量聚合状态写入磁盘；默认开启。"""
+    return _flag(accounts_dir, "usage_cache", True, "WB_USAGE_CACHE")
+
+
+def set_usage_cache(accounts_dir, enabled):
+    return _set_flag(accounts_dir, "usage_cache", enabled)
+
+
+def usage_day_buckets(accounts_dir):
+    """窗口统计是否使用日/小时分桶；默认开启。"""
+    return _flag(accounts_dir, "usage_day_buckets", True, "WB_USAGE_DAY_BUCKETS")
+
+
+def set_usage_day_buckets(accounts_dir, enabled):
+    return _set_flag(accounts_dir, "usage_day_buckets", enabled)
+
+
+def recent_index(accounts_dir):
+    """请求日志深分页是否使用索引；默认关闭。"""
+    return _flag(accounts_dir, "recent_index", False, "WB_RECENT_INDEX")
+
+
+def set_recent_index(accounts_dir, enabled):
+    return _set_flag(accounts_dir, "recent_index", enabled)
+
+
+def trusted_proxies(accounts_dir):
+    """可信反向代理的 IP 或 CIDR 列表，逗号分隔；环境变量优先于面板值。"""
+    env = os.environ.get("WB_TRUSTED_PROXIES")
+    if env is not None and env.strip():
+        return env.strip()
+    value = load(accounts_dir).get("trusted_proxies")
+    if isinstance(value, str):
+        return value
+    return ""
+
+
+def set_trusted_proxies(accounts_dir, value):
+    value = str(value or "").strip()
+    with _lock:
+        data = load(accounts_dir)
+        data["trusted_proxies"] = value
+        save(accounts_dir, data)
+    return value
+
+
+#: 面板字段 -> 控制它的环境变量。存在时面板值不生效，面板显示黄色提示。
+ENV_OVERRIDE_FIELDS = (
+    ("enable_anthropic_messages", "WB_ENABLE_ANTHROPIC_MESSAGES"),
+    ("free_model_credit_fallback", "WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK"),
+    ("prompt_cache_key", "WB_PROMPT_CACHE_KEY"),
+    ("affinity_debug", "WB_AFFINITY_DEBUG"),
+    ("upstream_keepalive", "WB_UPSTREAM_KEEPALIVE"),
+    ("usage_cache", "WB_USAGE_CACHE"),
+    ("usage_day_buckets", "WB_USAGE_DAY_BUCKETS"),
+    ("recent_index", "WB_RECENT_INDEX"),
+    ("trusted_proxies", "WB_TRUSTED_PROXIES"),
+    ("update_check_enabled", "WB_UPDATE_CHECK_ENABLED"),
+    ("update_check_interval_hours", "WB_UPDATE_CHECK_INTERVAL_HOURS"),
+)
+
+
+def panel_flag(accounts_dir, key, default=False):
+    """面板保存的布尔开关值；没保存或不是布尔时用默认值，不读环境变量。"""
+    value = load(accounts_dir).get(key)
+    return value if isinstance(value, bool) else default
+
+
+def panel_trusted_proxies(accounts_dir):
+    """面板保存的可信反向代理列表；没保存时为空串，不读环境变量。"""
+    value = load(accounts_dir).get("trusted_proxies")
+    return value if isinstance(value, str) else ""
+
+
+def env_overrides():
+    """当前被环境变量控制的设置项：字段名 -> {"name": 变量名, "value": 生效值}。
+
+    只供面板展示：控件显示面板自己的值，黄色提示说明环境变量此刻的取值。
+    """
+    out = {}
+    for field, name in ENV_OVERRIDE_FIELDS:
+        if name == "WB_TRUSTED_PROXIES":
+            raw = str(os.environ.get(name) or "").strip()
+            if raw:
+                out[field] = {"name": name, "value": raw}
+            continue
+        if name == "WB_UPDATE_CHECK_INTERVAL_HOURS":
+            try:
+                hours = int(os.environ.get(name))
+            except (TypeError, ValueError):
+                hours = 0
+            if 1 <= hours <= UPDATE_CHECK_INTERVAL_MAX:
+                out[field] = {"name": name, "value": str(hours)}
+            continue
+        present, value = _env_flag_value(name)
+        if present:
+            out[field] = {"name": name, "value": "开启" if value else "关闭"}
+    usage = {}
+    for key, name in USAGE_ENV.items():
+        raw = os.environ.get(name)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 0
+        if value >= 1:
+            usage[key] = {"name": name, "value": str(min(value, USAGE_LIMITS[key]))}
+    if usage:
+        out["usage"] = usage
+    return out
+
+
 def free_model_credit_fallback(accounts_dir):
     """免费模型如 deepseek-v4.1-flash 额度耗尽时，是否可回退到同系列付费
     模型。"""
-    return load(accounts_dir).get("free_model_credit_fallback") is True
+    return _flag(accounts_dir, "free_model_credit_fallback", False,
+                 "WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK")
 
 
 def set_free_model_credit_fallback(accounts_dir, enabled):
@@ -1518,27 +1781,6 @@ def set_auto_switch_product(accounts_dir, enabled):
     with _lock:
         data = load(accounts_dir)
         data["auto_switch_product"] = enabled
-        save(accounts_dir, data)
-    return enabled
-
-
-def remaining_priority_enabled(accounts_dir):
-    """估计剩余额度临近耗尽的账号与模型组合是否优先派发。
-
-    默认关闭，除非操作者打开。剩余用量从撞线事件与用量日志推断，优先接近
-    估计上限的组合是一次刻意的取舍：它们会明显多接流量，这正是该偏好的
-    目的，把本会随窗口过期的额度用掉。未设置该开关的安装保持纯轮询，只有
-    显式打开才改变行为。
-    """
-    return load(accounts_dir).get(REMAINING_PRIORITY_ENABLED_KEY) is True
-
-
-def set_remaining_priority_enabled(accounts_dir, enabled):
-    """保存剩余用量优先开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[REMAINING_PRIORITY_ENABLED_KEY] = enabled
         save(accounts_dir, data)
     return enabled
 
@@ -2194,23 +2436,63 @@ def set_accounts_separate_tab(accounts_dir, separate):
 
 
 def update_check_enabled(accounts_dir):
-    """网关是否每天检查一次新版本。
+    """网关是否按间隔自动检查新版本；环境变量优先于面板设置。
 
     默认关闭，除非操作者打开；没有该键的安装也读作关闭。这是这里唯一缺失值
     表示“否”的设置，因为开启后网关会按自己的计划访问 GitHub。面板的手动
     检查完全不受该开关影响。
     """
+    present, value = _env_flag_value("WB_UPDATE_CHECK_ENABLED")
+    if present:
+        return value
     return load(accounts_dir).get(UPDATE_CHECK_ENABLED_KEY) is True
 
 
 def set_update_check_enabled(accounts_dir, enabled):
-    """保存每日检查开关，返回存储的布尔值。"""
+    """保存自动检查开关，返回存储的布尔值。"""
     enabled = bool(enabled)
     with _lock:
         data = load(accounts_dir)
         data[UPDATE_CHECK_ENABLED_KEY] = enabled
         save(accounts_dir, data)
     return enabled
+
+
+def update_check_interval_hours(accounts_dir):
+    """自动检查的间隔（小时）；环境变量优先，其次面板值，默认 24。"""
+    raw = os.environ.get("WB_UPDATE_CHECK_INTERVAL_HOURS")
+    try:
+        env_hours = int(raw)
+    except (TypeError, ValueError):
+        env_hours = 0
+    if 1 <= env_hours <= UPDATE_CHECK_INTERVAL_MAX:
+        return env_hours
+    return panel_update_check_interval_hours(accounts_dir)
+
+
+def panel_update_check_interval_hours(accounts_dir):
+    """面板保存的检查间隔；缺失或越界读作默认值，不读环境变量。"""
+    value = load(accounts_dir).get(UPDATE_CHECK_INTERVAL_KEY)
+    try:
+        hours = int(value)
+    except (TypeError, ValueError):
+        return UPDATE_CHECK_INTERVAL_DEFAULT
+    if hours < 1 or hours > UPDATE_CHECK_INTERVAL_MAX:
+        return UPDATE_CHECK_INTERVAL_DEFAULT
+    return hours
+
+
+def set_update_check_interval_hours(accounts_dir, hours):
+    """保存自动检查间隔（小时），返回存储的整数值。"""
+    hours = int(hours)
+    if hours < 1 or hours > UPDATE_CHECK_INTERVAL_MAX:
+        raise ValueError("interval must be between 1 and %d hours"
+                         % UPDATE_CHECK_INTERVAL_MAX)
+    with _lock:
+        data = load(accounts_dir)
+        data[UPDATE_CHECK_INTERVAL_KEY] = hours
+        save(accounts_dir, data)
+    return hours
 
 
 def update_check_state(accounts_dir):

@@ -27,6 +27,13 @@ export function createGatewayTab(page) {
   const form = {
     reserve: '0',
     dailyLimit: '0',
+    dailyCreditLimit: '0',
+    modelDailyTokenLimit: '0',
+    expiringWindow: '7',
+    dailyWebRetry: true,
+    dailyWebAttempts: '3',
+    dailyWebTimeout: '120',
+    dailyChatModel: '',
     taskJitter: '5',
     schedule: { checkin: '9, 21', travel: '9, 21', keepalive: '22', cat: '1' },
     smartRouting: true,
@@ -37,7 +44,10 @@ export function createGatewayTab(page) {
     messagesFormat: 'openai-completions',
     testModel: { intl: '', cn: '' },
   };
-  const errors = { reserve: '', dailyLimit: '', taskJitter: '',
+  const errors = { reserve: '', dailyLimit: '', dailyCreditLimit: '',
+                   modelDailyTokenLimit: '', expiringWindow: '',
+                   dailyWebAttempts: '', dailyWebTimeout: '', dailyChatModel: '',
+                   taskJitter: '',
                    schedule: { checkin: '', travel: '', keepalive: '', cat: '' },
                    testModel: { intl: '', cn: '' } };
   // 服务端最后一次给出的设置：撤销回到这里，也是「有未保存的改动」的对照。
@@ -48,10 +58,25 @@ export function createGatewayTab(page) {
   let catalogs = { intl: [], cn: [] };
   let catalogError = '';
 
+  function expiringWindowValue(view) {
+    const flat = view && view.expiring_window_days;
+    const nested = (((view || {}).limits || {}).expiring_window_days || {}).global;
+    const raw = flat !== undefined && flat !== null ? flat : nested;
+    const number = Number(raw);
+    return String(Number.isFinite(number) ? number : 7);
+  }
+
   function stateOf(view) {
     return {
       reserve: String(Number(view.reserve_credits) || 0),
       dailyLimit: String(Number(view.daily_token_limit) || 0),
+      dailyCreditLimit: String(Number(view.daily_credit_limit) || 0),
+      modelDailyTokenLimit: String(Number(view.model_daily_token_limit) || 0),
+      expiringWindow: expiringWindowValue(view),
+      dailyWebRetry: view.daily_chat_web_retry !== false,
+      dailyWebAttempts: String(Number(view.daily_chat_web_attempts) || 3),
+      dailyWebTimeout: String(Number(view.daily_chat_web_timeout) || 120),
+      dailyChatModel: String(view.daily_chat_model || ''),
       taskJitter: String(Number(view.task_jitter_max) || 5),
       schedule: Object.fromEntries(SCHEDULE_FIELDS.map((field) => [
         field, hoursText((view.scheduler_hours || {})[field]),
@@ -72,6 +97,13 @@ export function createGatewayTab(page) {
   function applyState(state) {
     form.reserve = state.reserve;
     form.dailyLimit = state.dailyLimit;
+    form.dailyCreditLimit = state.dailyCreditLimit;
+    form.modelDailyTokenLimit = state.modelDailyTokenLimit;
+    form.expiringWindow = state.expiringWindow;
+    form.dailyWebRetry = state.dailyWebRetry;
+    form.dailyWebAttempts = state.dailyWebAttempts;
+    form.dailyWebTimeout = state.dailyWebTimeout;
+    form.dailyChatModel = state.dailyChatModel;
     form.taskJitter = state.taskJitter;
     for (const field of SCHEDULE_FIELDS) form.schedule[field] = state.schedule[field];
     form.smartRouting = state.smartRouting;
@@ -84,6 +116,12 @@ export function createGatewayTab(page) {
     form.testModel.cn = state.testModel.cn;
     errors.reserve = '';
     errors.dailyLimit = '';
+    errors.dailyCreditLimit = '';
+    errors.modelDailyTokenLimit = '';
+    errors.dailyWebAttempts = '';
+    errors.dailyWebTimeout = '';
+    errors.dailyChatModel = '';
+    errors.expiringWindow = '';
     errors.taskJitter = '';
     for (const field of SCHEDULE_FIELDS) errors.schedule[field] = '';
     errors.testModel.intl = '';
@@ -101,6 +139,13 @@ export function createGatewayTab(page) {
     if (!baseline) return false;
     return String(form.reserve).trim() !== baseline.reserve
       || String(form.dailyLimit).trim() !== baseline.dailyLimit
+      || String(form.dailyCreditLimit).trim() !== baseline.dailyCreditLimit
+      || String(form.modelDailyTokenLimit).trim() !== baseline.modelDailyTokenLimit
+      || String(form.expiringWindow).trim() !== baseline.expiringWindow
+      || form.dailyWebRetry !== baseline.dailyWebRetry
+      || String(form.dailyWebAttempts).trim() !== baseline.dailyWebAttempts
+      || String(form.dailyWebTimeout).trim() !== baseline.dailyWebTimeout
+      || String(form.dailyChatModel).trim() !== baseline.dailyChatModel
       || String(form.taskJitter).trim() !== baseline.taskJitter
       || SCHEDULE_FIELDS.some((field) =>
         String(form.schedule[field]).trim() !== baseline.schedule[field])
@@ -145,11 +190,34 @@ export function createGatewayTab(page) {
 
   /** 校验并提交整张卡片；返回是否保存成功。 */
   async function saveAll() {
+    const settingsView = page.state.view || {};
     const reserve = parseNonNegativeInteger(form.reserve, { label: '保留积分' });
     const dailyLimit = parseNonNegativeInteger(form.dailyLimit, { label: '每日 Token 限额' });
+    const dailyCredit = parseNonNegativeInteger(form.dailyCreditLimit, { label: '每日积分限额' });
+    const modelDaily = parseNonNegativeInteger(form.modelDailyTokenLimit, { label: '单模型每日 Token 限额' });
+    const expiring = parseNonNegativeInteger(form.expiringWindow, {
+      label: '临期积分优先窗口', max: 365,
+    });
+    const webAttempts = parseNonNegativeInteger(form.dailyWebAttempts, {
+      label: '网页通道尝试次数',
+      max: Number(settingsView.daily_chat_web_attempts_max) || 10,
+    });
+    const webTimeout = parseNonNegativeInteger(form.dailyWebTimeout, {
+      label: '网页通道单轮超时',
+      max: Number(settingsView.daily_chat_web_timeout_max) || 600,
+    });
     const jitter = parseNonNegativeInteger(form.taskJitter, { label: '任务随机间隔', max: 600 });
     errors.reserve = reserve.ok ? '' : reserve.error;
     errors.dailyLimit = dailyLimit.ok ? '' : dailyLimit.error;
+    errors.dailyCreditLimit = dailyCredit.ok ? '' : dailyCredit.error;
+    errors.modelDailyTokenLimit = modelDaily.ok ? '' : modelDaily.error;
+    errors.expiringWindow = expiring.ok ? '' : expiring.error;
+    errors.dailyWebAttempts = !webAttempts.ok ? webAttempts.error
+      : (webAttempts.value < 1 ? '网页通道尝试次数不能小于 1' : '');
+    errors.dailyWebTimeout = !webTimeout.ok ? webTimeout.error
+      : (webTimeout.value < 1 ? '网页通道单轮超时不能小于 1 秒' : '');
+    form.dailyChatModel = String(form.dailyChatModel || '').trim();
+    errors.dailyChatModel = validateTestModel(form.dailyChatModel);
     errors.taskJitter = !jitter.ok ? jitter.error
       : (jitter.value < 2 ? '任务随机间隔不能小于 2 秒' : '');
     const schedule = {};
@@ -162,7 +230,10 @@ export function createGatewayTab(page) {
       form.testModel[realm] = String(form.testModel[realm] || '').trim();
       errors.testModel[realm] = validateTestModel(form.testModel[realm]);
     }
-    if (errors.reserve || errors.dailyLimit || errors.taskJitter
+    if (errors.reserve || errors.dailyLimit || errors.dailyCreditLimit
+        || errors.modelDailyTokenLimit || errors.expiringWindow
+        || errors.dailyWebAttempts || errors.dailyWebTimeout || errors.dailyChatModel
+        || errors.taskJitter
         || SCHEDULE_FIELDS.some((field) => errors.schedule[field])
         || errors.testModel.intl || errors.testModel.cn) {
       page.draw();
@@ -174,6 +245,13 @@ export function createGatewayTab(page) {
       const view = await page.save({
         reserve_credits: reserve.value,
         daily_token_limit: dailyLimit.value,
+        daily_credit_limit: dailyCredit.value,
+        model_daily_token_limit: modelDaily.value,
+        expiring_window_days: expiring.value,
+        daily_chat_web_retry: form.dailyWebRetry,
+        daily_chat_web_attempts: webAttempts.value,
+        daily_chat_web_timeout: webTimeout.value,
+        daily_chat_model: form.dailyChatModel,
         task_jitter_max: jitter.value,
         scheduler_hours: schedule,
         smart_routing: form.smartRouting,
@@ -274,7 +352,7 @@ export function createGatewayTab(page) {
         <div class="setting-main">
           <div class="setting-name">接口测试模型</div>
           <div class="setting-desc">
-            账号行的「测试」按钮发送一条 hi 对话时使用哪个模型；「默认」表示由网关按该出口的默认模型请求。
+            「测试」按钮发送 hi 对话时使用的模型；「默认」由网关按出口选择。
           </div>
         </div>
         <div class="setting-control test-model-row">
@@ -309,7 +387,8 @@ export function createGatewayTab(page) {
               </button>
             </div>
           </div>
-          <div class="setting-list cols-2">
+          <div class="setting-list">
+            <div class="section-label">限额与配额</div>
             ${numberRow({
               name: '保留积分', field: 'reserve', suffix: '积分',
               desc: '账号余额低于或等于该值时暂停接单，填写 0 表示关闭。与每日 Token 限额各自独立，任一命中都会暂停接单。',
@@ -319,16 +398,58 @@ export function createGatewayTab(page) {
               desc: '账号当日消耗的 token 达到该值后暂停接单，请求自动切到其他账号，本地时间 0 点后恢复。填写 0 表示不限额。',
             })}
             ${numberRow({
+              name: '每日积分限额', field: 'dailyCreditLimit', suffix: '积分',
+              desc: '账号当日消耗的积分达到该值后，付费模型暂停接单；免费模型照常服务。填写 0 表示不限额。',
+            })}
+            ${numberRow({
+              name: '单模型每日 Token 限额', field: 'modelDailyTokenLimit', suffix: 'token', step: '1000',
+              desc: '同一账号在同一模型上当日消耗的 token 达到该值后，只暂停这个模型，账号的其他模型照常接单。填写 0 表示不限额。',
+            })}
+            ${numberRow({
+              name: '临期积分优先窗口',
+              field: 'expiringWindow',
+              suffix: '天',
+              desc: '积分在这个天数内到期时优先分配请求，默认 7 天；填写 0 表示关闭。智能分配与轮询都使用这个窗口。',
+            })}
+            <div class="section-label">定时任务</div>
+            ${numberRow({
               name: '任务随机间隔',
               field: 'taskJitter',
               suffix: '秒',
               min: 2,
               desc: '定时巡检在处理每个账号前随机等待 2 秒到这个值之间的时间，避免同一批请求同时发出。默认 5 秒，最大 600 秒。',
             })}
+            ${numberRow({
+              name: '网页通道尝试次数',
+              field: 'dailyWebAttempts',
+              suffix: '次',
+              min: 1,
+              desc: '国际版网页通道打卡一轮最多尝试几次。默认 3 次；失败后会重新创建会话。',
+            })}
+            ${numberRow({
+              name: '网页通道单轮超时',
+              field: 'dailyWebTimeout',
+              suffix: '秒',
+              min: 1,
+              desc: '国际版网页通道打卡一轮最多等待多少秒。默认 120 秒。',
+            })}
+            <div class="setting">
+              <div class="setting-main">
+                <div class="setting-name">国际版每日活跃模型</div>
+                <div class="setting-desc">网页通道打卡使用哪个模型。留空使用内置模型；只影响每日活跃打卡。</div>
+                ${errors.dailyChatModel ? html`<div class="field-error">${errors.dailyChatModel}</div>` : nothing}
+              </div>
+              <div class="setting-control">
+                <input class="input input-sm" type="text" placeholder="留空使用内置模型"
+                       aria-label="国际版每日活跃模型"
+                       .value=${live(form.dailyChatModel)} ?disabled=${saving}
+                       @input=${(e) => { form.dailyChatModel = e.target.value; errors.dailyChatModel = ''; structChanged(); }}>
+              </div>
+            </div>
             ${hoursRow({
               name: '签到与活跃上报时段',
               field: 'checkin',
-              desc: '国内版签到与对话活跃上报的整点，默认 9, 21。填 0 到 23，用逗号分隔；留空表示这组不跑。',
+              desc: '国内版签到与对话活跃上报的整点，默认 9, 21。填写 0 到 23，用逗号分隔；留空表示这组不跑。',
             })}
             ${hoursRow({
               name: '猫猫旅行时段',
@@ -345,15 +466,16 @@ export function createGatewayTab(page) {
               field: 'cat',
               desc: '夜猫子专属任务的上报整点，默认 1。',
             })}
+            <div class="section-label">调度</div>
             ${switchRow({
               name: '会话粘性',
-              desc: '同一段对话固定使用同一个账号，复用上游的前缀缓存；账号不能接单时才换号。关闭后每一轮请求都重新选择账号。',
+              desc: '同一段对话固定使用同一个账号，复用上游的前缀缓存；账号不能接单时才换号。客户端没有会话标识时按对话开头识别。关闭后每一轮请求都重新选择账号。',
               checked: form.sessionAffinity,
               onChange: (value) => { form.sessionAffinity = value; structChanged(); },
             })}
             ${switchRow({
               name: '智能分配',
-              desc: '关闭时按轮询顺序分配新对话；打开时优先把快要过期的积分用掉。已在服务的对话不受影响。',
+              desc: '关闭时按轮询顺序分配新对话。打开时按积分到期节奏与最近一小时忙闲分配，剩余额度接近耗尽的账号与模型组合会略优先。已在服务的对话不受影响。',
               checked: form.smartRouting,
               onChange: (value) => { form.smartRouting = value; structChanged(); },
             })}
@@ -363,6 +485,7 @@ export function createGatewayTab(page) {
               checked: form.autoSwitch,
               onChange: (value) => { form.autoSwitch = value; structChanged(); },
             })}
+            <div class="section-label">每日活跃</div>
             ${switchRow({
               name: '国际版每日活跃打卡网页通道',
               desc: '国际版账号每日打卡时，除桌面端身份的轻量对话外，再走一次网页通道的会话。只有网页端对话计入官方的每日活跃奖励，开启后会消耗账号少量积分。',
@@ -370,11 +493,19 @@ export function createGatewayTab(page) {
               onChange: (value) => { form.dailyWeb = value; structChanged(); },
             })}
             ${switchRow({
+              name: '网页通道失败后重试',
+              desc: '网页通道打卡一轮失败时，重新创建会话再试。关闭后只尝试一次。',
+              checked: form.dailyWebRetry,
+              onChange: (value) => { form.dailyWebRetry = value; structChanged(); },
+            })}
+            <div class="section-label">网络工具</div>
+            ${switchRow({
               name: '本地网络工具（web_search / web_fetch）',
               desc: '客户端声明的 web_search / web_fetch 服务端工具在本网关代为执行：搜索走 DuckDuckGo，抓取页面时读取模型给出的 URL。开启后网关会主动出网，每轮多请求一次上游。',
               checked: form.localWeb,
               onChange: (value) => { form.localWeb = value; structChanged(); },
             })}
+            <div class="section-label">接口</div>
             <div class="setting">
               <div class="setting-main">
                 <div class="setting-name">Messages 接口翻译</div>

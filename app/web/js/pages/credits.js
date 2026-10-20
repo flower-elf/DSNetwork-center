@@ -11,7 +11,7 @@ import { toast, toastError } from '../ui/toast.js';
 import * as acct from './accounts/actions.js';
 import { accountsForRealm } from './accounts/logic.js';
 import {
-  accountCredits, creditRowKey, cycleText, dueForRefresh, expiryChip, groupSubText, nextExpiry, packageState, pageTotals, stateBadge, unqueriedAccounts,
+  accountCredits, creditRowKey, cycleText, dueForRefresh, expiryChip, expiringTotal, groupSubText, nextExpiry, packageState, pageTotals, stateBadge, unqueriedAccounts,
 } from './credits/logic.js';
 
 // 本会话里最近一次成功读取的时间与结果，供「打开本页是否要重新读取」判断。
@@ -165,6 +165,7 @@ export function mount(host) {
 
   function accountCard(account, now) {
     const data = accountCredits(account, now);
+    const expiring = expiringTotal([account], 15, now);
     const name = account.nickname || String(account.uid || '').slice(0, 8) || '账号';
     return html`
       <div class="card card-flush">
@@ -173,7 +174,7 @@ export function mount(host) {
             <h2 class="card-title">${name}${realmBadge(account.realm)}</h2>
             <p class="card-sub">
               ${data.queried
-                ? html`剩余 ${fmtNumber(data.remain)} · 共 ${fmtNumber(data.size)} · 已用 ${fmtNumber(data.used)} · ${data.count} 笔套餐${data.age ? ' · ' + data.age : ''}`
+                ? html`剩余 ${fmtNumber(data.remain)} · 共 ${fmtNumber(data.size)} · 已用 ${fmtNumber(data.used)} · 15 天内到期 ${fmtNumber(expiring)}${data.age ? ' · ' + data.age : ''}`
                 : '还没有查询过这个账号的余额'}
             </p>
           </div>
@@ -206,11 +207,12 @@ export function mount(host) {
   function summaryCards(now) {
     const totals = pageTotals(realmAccounts());
     const expiry = nextExpiry(realmAccounts(), now);
+    const expiring = expiringTotal(realmAccounts(), 15, now);
     return html`
       <div class="grid-stats cols-4">
         ${statCard({ label: '积分余额', value: fmtNumber(totals.remain), icon: 'Coins', tone: 'success', hint: totals.queried + ' 个账号已查到余额' })}
         ${statCard({ label: '已用积分', value: fmtNumber(totals.used), icon: 'TrendingDown', hint: '按上游返回的累计用量' })}
-        ${statCard({ label: '套餐笔数', value: fmtNumber(totals.packages), icon: 'Package', hint: '不同来源的到账分开计数' })}
+        ${statCard({ label: '15 天内到期积分', value: fmtNumber(expiring), icon: 'CalendarClock', tone: expiring ? 'warning' : '', hint: '按套餐剩余额度统计，不含已过期与无到期时间的额度' })}
         ${statCard({ label: '最近到期', value: expiry ? fmtNumber(expiry.amount) : '—', icon: 'CalendarClock', tone: expiry ? 'warning' : '',
           hint: expiry ? expiry.name + ' · ' + expiry.account + ' · ' + fmtNumber(expiry.amount) + ' 积分' : '没有带到期时间的额度' })}
       </div>`;

@@ -282,10 +282,9 @@ class SwitchOnTests(_OpenUpstreamHarness):
                 raise error
             return _Response(_Sock())
 
-        with mock.patch.dict(os.environ, {"WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK": "1"}), \
+        with mock.patch.object(wb_settings, "free_model_credit_fallback", return_value=True), \
                 mock.patch.object(wb_proxy, "parse_rate_limit_reset", return_value=reset), \
                 mock.patch.object(wb_proxy, "apply_daily_guards", return_value=0), \
-                mock.patch.object(wb_proxy, "remaining_priority_enabled", return_value=False), \
                 mock.patch.object(wb_proxy, "upstream_timeouts", return_value=(2, 2)):
             raised, result = self.run_request(urlopen)
 
@@ -336,10 +335,8 @@ class SwitchOnTests(_OpenUpstreamHarness):
         old_pool, old_urlopen = wb_proxy.POOL, A.urlopen
         wb_proxy.POOL, A.urlopen = pool, urlopen
         try:
-            with mock.patch.dict(os.environ,
-                                 {"WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK": "1"}), \
+            with mock.patch.object(wb_settings, "free_model_credit_fallback", return_value=True), \
                     mock.patch.object(wb_proxy, "apply_daily_guards", return_value=0), \
-                    mock.patch.object(wb_proxy, "remaining_priority_enabled", return_value=False), \
                     mock.patch.object(wb_proxy, "upstream_timeouts", return_value=(2, 2)), \
                     mock.patch.object(wb_proxy, "auto_switch_product_enabled", return_value=True), \
                     mock.patch.object(wb_proxy, "_try_switch_product",

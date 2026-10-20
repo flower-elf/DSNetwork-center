@@ -91,11 +91,11 @@ export function parseHours(text, { label = '时段' } = {}) {
   const out = [];
   for (const part of parts) {
     if (!/^\d{1,2}$/.test(part)) {
-      return { ok: false, error: label + '只能填 0 到 23 的整点，用逗号分隔。' };
+      return { ok: false, error: label + '只能填写 0 到 23 的整点，用逗号分隔。' };
     }
     const hour = Number(part);
     if (hour < 0 || hour > 23) {
-      return { ok: false, error: label + '只能填 0 到 23 的整点，用逗号分隔。' };
+      return { ok: false, error: label + '只能填写 0 到 23 的整点，用逗号分隔。' };
     }
     if (!out.includes(hour)) out.push(hour);
   }
@@ -105,6 +105,106 @@ export function parseHours(text, { label = '时段' } = {}) {
 /** 时段数组的展示文本。 */
 export function hoursText(hours) {
   return (hours || []).map((hour) => String(hour)).join(', ');
+}
+
+// ---------------------------------------------------------------------------
+// 费用估算
+// ---------------------------------------------------------------------------
+
+export const COST_PRICE_FIELDS = [
+  { key: 'input', label: '输入价格' },
+  { key: 'cached_input', label: '缓存命中价格' },
+  { key: 'output', label: '输出价格' },
+];
+
+function numberText(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? String(n) : '0';
+}
+
+/** 服务端的费用估算设置 → 表单草稿。 */
+export function costEstimateState(config) {
+  const conf = config && typeof config === 'object' ? config : {};
+  const rows = Array.isArray(conf.models) ? conf.models : [];
+  return {
+    creditPrice: numberText(conf.credit_price),
+    rows: rows.map((row) => ({
+      model: String((row && row.model) || ''),
+      input: numberText(row && row.input),
+      cached_input: numberText(row && row.cached_input),
+      output: numberText(row && row.output),
+    })),
+  };
+}
+
+function costEstimateShape(form) {
+  const rows = ((form && form.rows) || []).map((row) => ({
+    model: String((row && row.model) || '').trim(),
+    input: String((row && row.input) == null ? '' : row.input).trim(),
+    cached_input: String((row && row.cached_input) == null ? '' : row.cached_input).trim(),
+    output: String((row && row.output) == null ? '' : row.output).trim(),
+  }));
+  return JSON.stringify({
+    creditPrice: String((form && form.creditPrice) == null ? '' : form.creditPrice).trim(),
+    rows,
+  });
+}
+
+/** 表单草稿有没有未保存的改动。 */
+export function costEstimateDirty(form, baseline) {
+  if (!baseline) return false;
+  return costEstimateShape(form) !== costEstimateShape(baseline);
+}
+
+/**
+ * 校验并组装保存载荷。空模型名且价格全为 0 的行丢掉；价格全为 0 的模型行
+ * 不存储，与后端按未定价处理的口径一致。模型名重复或缺少模型名时返回错误。
+ */
+export function costEstimatePayload(form) {
+  const errors = { creditPrice: '', rows: [] };
+  const credit = parseNonNegativeNumber(form.creditPrice, { label: '积分折算单价', max: 1e6 });
+  if (!credit.ok) errors.creditPrice = credit.error;
+  const rows = [];
+  const seen = new Set();
+  (form.rows || []).forEach((row, index) => {
+    const model = String((row && row.model) || '').trim();
+    const rawCached = String((row && row.cached_input) == null ? '' : row.cached_input).trim();
+    const prices = {};
+    let error = '';
+    for (const field of COST_PRICE_FIELDS) {
+      const parsed = parseNonNegativeNumber(row && row[field.key], { label: field.label, max: 1e6 });
+      if (!parsed.ok) {
+        error = parsed.error;
+        break;
+      }
+      prices[field.key] = parsed.value;
+    }
+    if (!error && rawCached === '') {
+      prices.cached_input = prices.input;
+    }
+    if (!error && !model && Object.values(prices).some((value) => value > 0)) {
+      error = '这一行还没有填写模型名称。';
+    }
+    if (!error && model) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(model)) {
+        error = '模型名称只能包含字母、数字、点、连字符、冒号、下划线与斜线，并以字母或数字开头。';
+      } else if (seen.has(model.toLowerCase())) {
+        error = '模型名称重复了。';
+      }
+    }
+    errors.rows[index] = error;
+    if (error) return;
+    if (!model) return;
+    if (!Object.values(prices).some((value) => value > 0)) return;
+    seen.add(model.toLowerCase());
+    rows.push({ model, ...prices });
+  });
+  const ok = !errors.creditPrice && !errors.rows.some(Boolean);
+  return {
+    ok,
+    errors,
+    payload: ok ? { cost_estimate: { credit_price: credit.value, models: rows } } : null,
+  };
 }
 
 /** 面板密码修改前的本地校验；错误文案为空串表示通过。 */

@@ -144,7 +144,10 @@ export function mount(host) {
       if (S.growthUid && S.growthUid !== 'all') payload.uid = S.growthUid;
       const result = await postJSON('/tasks/run', payload);
       S.runLogs = result.logs || [];
-      if (result.credit_added) toast.success('成长任务执行完成', '本次共增加 ' + fmtNumber(result.credit_added) + ' 积分');
+      if (result.ok === false) toast.warn('成长任务没有执行', result.msg || '目标账号正在执行其他任务');
+      else if (result.busy_accounts && result.busy_accounts.length) {
+        toast.warn('部分账号已跳过', result.msg || ('有 ' + result.busy_accounts.length + ' 个账号正在执行其他任务'));
+      } else if (result.credit_added) toast.success('成长任务执行完成', '本次共增加 ' + fmtNumber(result.credit_added) + ' 积分');
       else toast.success('成长任务执行完成', result.msg || '没有新的积分变化');
       await refresh();
     } catch (err) {
@@ -161,7 +164,9 @@ export function mount(host) {
       const payload = {};
       if (S.growthUid && S.growthUid !== 'all') payload.uid = S.growthUid;
       const result = await postJSON('/tasks/travel', payload);
-      if (result.ok) toast.success('猫猫旅行结算完成', result.msg || '');
+      if (result.busy_accounts && result.busy_accounts.length) {
+        toast.warn('猫猫旅行部分跳过', result.msg || ('有 ' + result.busy_accounts.length + ' 个账号正在执行其他任务'));
+      } else if (result.ok) toast.success('猫猫旅行结算完成', result.msg || '');
       else toast.warn('猫猫旅行没有完成', result.msg || '上游没有返回结果');
       await refresh();
     } catch (err) {
@@ -198,19 +203,6 @@ export function mount(host) {
       if (!results.length) toast.warn('名单里的账号没有执行');
       else if (anyOk(results)) toast.success('未活跃打卡', summarizeResults(results, { okText: '打卡成功' }));
       else toast.warn('未活跃打卡', summarizeResults(results));
-      await refresh();
-    } catch (err) {
-      toastError('打卡失败', err);
-    }
-  }
-
-  async function doDailyChat() {
-    try {
-      const result = await acct.dailyChat();
-      const results = result.results || [];
-      if (!results.length) toast.warn('没有可打卡的国际版账号');
-      else if (anyOk(results)) toast.success('每日活跃打卡', summarizeResults(results, { okText: '活跃打卡成功' }));
-      else toast.warn('每日活跃打卡', summarizeResults(results));
       await refresh();
     } catch (err) {
       toastError('打卡失败', err);
@@ -325,6 +317,7 @@ export function mount(host) {
                 <th>任务说明</th>
                 <th>进度</th>
                 <th>奖励</th>
+                <th>执行方式</th>
                 <th>状态</th>
               </tr>
             </thead>
@@ -338,10 +331,14 @@ export function mount(host) {
                       <td class="cell-sub">${row.description}</td>
                       <td class="nums">${row.progress}</td>
                       <td class="nums">${row.rewards}</td>
+                      <td>
+                        ${badge(row.mode.text, row.mode.tone)}
+                        ${row.mode.hint ? html`<div class="cell-sub">${row.mode.hint}</div>` : nothing}
+                      </td>
                       <td>${badge(row.badge.text, row.badge.tone)}</td>
                     </tr>`;
                 })
-                : html`<tr><td colspan="5">${emptyState({ icon: 'Inbox', title: '没有读到成长任务', desc: logic.growthEmptyText(realm) })}</td></tr>`}
+                : html`<tr><td colspan="6">${emptyState({ icon: 'Inbox', title: '没有读到成长任务', desc: logic.growthEmptyText(realm) })}</td></tr>`}
             </tbody>
           </table>
         </div>
@@ -401,9 +398,7 @@ export function mount(host) {
             <p class="card-sub">每日活跃只认网页端对话：桌面身份打卡发送一条轻量对话，网页通道打卡只建立一个网页端会话。两者都会消耗少量积分，用于计入官方「每日活跃」。</p>
           </div>
           <div class="row-wrap">
-            <button class="btn btn-primary btn-sm" title="为每个已启用的国际版账号发送一条轻量对话"
-                    @click=${busyClick(doDailyChat)}>${icon('CalendarCheck')}每日活跃打卡</button>
-            <button class="btn btn-outline btn-sm" title="今天还没打卡的已启用国际版账号；已经打过的不再打第二遍"
+            <button class="btn btn-primary btn-sm" title="今天还没打卡的已启用国际版账号；已经打过的不再打第二遍"
                     @click=${busyClick(doDailyChatPending)}>${icon('CalendarCheck')}未活跃打卡一键打卡</button>
             <button class="btn btn-outline btn-sm" title="只建网页端会话，不发送桌面端对话；会消耗少量积分"
                     @click=${doDailyChatWeb}>${icon('Globe')}网页通道打卡</button>

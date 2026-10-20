@@ -47,10 +47,6 @@ export function checkin(uid) {
   return postJSON('/accounts/checkin', uid ? { uid } : {});
 }
 
-export function dailyChat(uid) {
-  return postJSON('/accounts/daily-chat', uid ? { uid } : {});
-}
-
 /** 只给名单里的账号打卡：今天已经打过的不再打第二遍。 */
 export function dailyChatPending(uids) {
   return postJSON('/accounts/daily-chat', { uids });

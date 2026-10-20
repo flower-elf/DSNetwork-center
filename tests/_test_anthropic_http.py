@@ -32,7 +32,6 @@ os.makedirs(os.environ["WB_PROXY_USAGE_DIR"], exist_ok=True)
 os.environ["HOME"] = WORK
 os.environ["USERPROFILE"] = WORK
 os.environ["WB_PROXY_KEY"] = "TESTKEY"
-os.environ.pop("WB_ENABLE_ANTHROPIC_MESSAGES", None)
 
 
 def jwt(uid="acct-http-1"):
@@ -125,6 +124,7 @@ threading.Thread(target=upstream.serve_forever, daemon=True).start()
 
 import wb_identity
 import wb_proxy as P
+import wb_settings
 
 _ENDPOINTS = dict(wb_identity._ENDPOINTS)
 for key in list(_ENDPOINTS):
@@ -250,13 +250,14 @@ try:
         check("blocked %s -> non-retryable Anthropic 400" % path,
               code == 400 and payload.get("type") == "error"
               and error.get("type") == "invalid_request_error"
-              and "WB_ENABLE_ANTHROPIC_MESSAGES" in error.get("message", ""),
+              and ("Advanced" in error.get("message", "")
+                   or "高级" in error.get("message", "")),
               (code, payload))
     check("disabled requests never reach the upstream", not MOCK["requests"],
           MOCK["requests"])
 
     # Existing protocol tests below explicitly exercise the risky opt-in path.
-    os.environ["WB_ENABLE_ANTHROPIC_MESSAGES"] = "1"
+    wb_settings.set_enable_anthropic_messages(P.ACCOUNTS_DIR, True)
 
     print("[1] auth uses the Anthropic error envelope")
     code, headers, body = request(

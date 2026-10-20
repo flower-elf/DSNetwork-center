@@ -167,6 +167,11 @@ class FetchExpiryTests(unittest.TestCase):
             package("没有到期时间", 4),
             package("到期最早", 2, end=stamp(early)),
         ])
+        acc.credits["packages"].extend([
+            {"name": "免费包", "remain": 7, "expireAt": late, "no_expiry": True},
+            {"name": "企业额度", "remain": 9, "expireAt": early,
+             "package_code": "enterprise"},
+        ])
         self.assertEqual(acc.public()["creditExpiries"], [
             {"at": early, "amount": 2, "name": "到期最早"},
             {"at": late, "amount": 5, "name": "到期较晚"},

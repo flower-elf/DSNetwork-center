@@ -208,7 +208,7 @@ export function mount(host, ctx) {
         ${emptyState({
           icon: 'MessageSquare',
           title: '开始调试',
-          desc: '在下方输入内容并回车即可。请求会经本网关转给上游账号，回答支持流式输出，每条回答的实际消耗积分会标在气泡下方。',
+          desc: '请求会经本网关转给上游账号，回答支持流式输出，每条回答的消耗积分标在气泡下方。',
         })}
         <div class="pg-footnotes">
           <div>${icon('Info')}<span>这一页供调试使用：走管理端登录态，不受 API Key 与来源 IP 管控。</span></div>

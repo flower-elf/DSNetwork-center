@@ -4,7 +4,9 @@
 """
 import os
 import sys
+import time
 import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -90,6 +92,75 @@ class SchedulerHoursTests(unittest.TestCase):
                                   "keepalive": [23], "cat": [0]})
         self.assertEqual(scheduler.all_hours, [0, 6, 7, 23])
         self.assertEqual(scheduler.next_run_time is not None, True)
+
+
+class _ScheduledAccount(object):
+    """只记录调用次数的国内版账号，不联网。"""
+
+    def __init__(self):
+        self.uid = "sched-uid-0001"
+        self.realm = "cn"
+        self.enabled = True
+        self.expires_at = 0.0
+        self.last_error = ""
+        self.checkins = 0
+        self.reports = 0
+
+    def can_checkin(self):
+        return True
+
+    def checkin(self, trigger=""):
+        self.checkins += 1
+        return {"ok": True, "msg": "签到完成"}
+
+    def can_report_activity(self):
+        return True
+
+    def report_activity(self):
+        self.reports += 1
+        return {"ok": True, "msg": "活跃上报完成"}
+
+    def refresh(self):
+        return True
+
+
+class SchedulerGroupTests(unittest.TestCase):
+    """每个任务只在自己的配置整点执行；手动触发强制跑完整轮。"""
+
+    def setUp(self):
+        self.directory = os.environ["ACCOUNTS_DIR"]
+        wb_settings.set_scheduler_hours(self.directory, {
+            "checkin": [10], "travel": [9], "keepalive": [22], "cat": [1],
+        })
+
+    def _run(self, hour, force=False, calls=None):
+        account = _ScheduledAccount()
+        pool = FakePool(self.directory)
+        pool.accounts = [account]
+        scheduler = wb_scheduler.Scheduler(pool)
+        calls = calls if calls is not None else []
+        stamp = time.struct_time((2026, 10, 20, hour, 0, 0, 0, 0, -1))
+        with mock.patch.object(wb_scheduler.wb_tasks, "cst_now", return_value=stamp), \
+                mock.patch.object(wb_scheduler, "do_cat_travel",
+                                  lambda acc: calls.append("travel") or
+                                  {"ok": True, "msg": "猫猫状态正常"}), \
+                mock.patch.object(wb_scheduler.wb_tasks, "run_streak_bonus",
+                                  lambda acc: calls.append("streak") or {"logs": []}), \
+                mock.patch.object(wb_scheduler.wb_tasks, "run_night_growth",
+                                  lambda acc: calls.append("night") or {"logs": []}):
+            scheduler._run_cycle(force=force)
+        return account, calls
+
+    def test_only_the_checkin_group_runs_at_its_hour(self):
+        account, calls = self._run(10)
+        self.assertEqual(account.checkins, 1)
+        self.assertEqual(account.reports, 1)
+        self.assertEqual(calls, [], "签到小时不该顺带跑猫猫旅行与夜猫任务")
+
+    def test_manual_trigger_runs_every_group(self):
+        account, calls = self._run(10, force=True)
+        self.assertEqual(account.checkins, 1)
+        self.assertEqual(calls, ["travel", "streak", "night"])
 
 
 if __name__ == "__main__":

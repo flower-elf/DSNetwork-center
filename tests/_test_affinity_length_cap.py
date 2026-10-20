@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 _startup_dir = tempfile.TemporaryDirectory(prefix="affinity-cap-")
 os.environ["ACCOUNTS_DIR"] = _startup_dir.name
@@ -110,13 +111,11 @@ class AffinityPageTests(unittest.TestCase):
     def setUp(self):
         self._saved_msgs = wb_proxy.AFFINITY_MAX_MSGS
         self._saved_page = wb_proxy.AFFINITY_PAGE_SIZE
-        self._saved_prefix = wb_proxy.AFFINITY_BY_PREFIX
         wb_proxy.AFFINITY_MAX_MSGS = 400
 
     def tearDown(self):
         wb_proxy.AFFINITY_MAX_MSGS = self._saved_msgs
         wb_proxy.AFFINITY_PAGE_SIZE = self._saved_page
-        wb_proxy.AFFINITY_BY_PREFIX = self._saved_prefix
 
     def test_a_long_conversation_gets_a_key_and_a_page(self):
         wb_proxy.AFFINITY_PAGE_SIZE = 3
@@ -170,12 +169,13 @@ class AffinityPageTests(unittest.TestCase):
             self.assertEqual(wb_proxy.derive_affinity_key(msgs),
                              wb_proxy.affinity_route(msgs)[0])
 
-    def test_switching_prefix_affinity_off_releases_everything(self):
+    def test_switching_session_stickiness_off_releases_everything(self):
         wb_proxy.AFFINITY_PAGE_SIZE = 3
-        wb_proxy.AFFINITY_BY_PREFIX = False
-        for length in (10, 500):
-            self.assertEqual(wb_proxy.affinity_route(conversation(length)),
-                             (None, None))
+        with mock.patch.object(wb_proxy.wb_settings, "session_affinity",
+                               return_value=False):
+            for length in (10, 500):
+                self.assertEqual(wb_proxy.affinity_route(conversation(length)),
+                                 (None, None))
 
     def test_degenerate_inputs_are_safe(self):
         wb_proxy.AFFINITY_PAGE_SIZE = 3

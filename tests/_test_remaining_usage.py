@@ -802,7 +802,8 @@ class RemainingUsageTests(unittest.TestCase):
             P.USAGE_LOG, saved = P.USAGE_LOG + ".gone", P.USAGE_LOG
             try:
                 # refresh=True 绕开计数器的 TTL，确保这次真的去读（读不到）。
-                self.assertEqual(P.apply_daily_guards(refresh=True), 2)
+                # 设置保存路径会把三条护栏都推一次，值为 0 的也推。
+                self.assertEqual(P.apply_daily_guards(refresh=True), 3)
             finally:
                 P.USAGE_LOG = saved
             self.assertTrue(all(c[2] is None for c in calls),
@@ -812,7 +813,7 @@ class RemainingUsageTests(unittest.TestCase):
             real_pool = wb_accounts.AccountPool(ACCOUNTS_DIR, log=None)
             real_pool.accounts = [account("acct-A")]
             P.POOL = real_pool
-            self.assertEqual(P.apply_daily_guards(refresh=True), 2)
+            self.assertEqual(P.apply_daily_guards(refresh=True), 3)
             self.assertEqual(real_pool.accounts[0].daily_token_limit, 1000)
 
             # 一次读取多键：逐值与单键入口一致，且只读一次限额表。
@@ -1257,46 +1258,24 @@ class RemainingUsageTests(unittest.TestCase):
         self.assertEqual(data["budgets"][0]["avg"], 1200)
 
 
-class RemainingPrioritySettingTests(unittest.TestCase):
-    """优先调度开关：默认关，只有真正的布尔 true 才算开。"""
-
-    def test_default_is_off(self):
-        with tempfile.TemporaryDirectory(prefix="remaining-priority-setting-") as directory:
-            self.assertFalse(wb_settings.remaining_priority_enabled(directory))
-
-    def test_round_trip(self):
-        with tempfile.TemporaryDirectory(prefix="remaining-priority-setting-") as directory:
-            self.assertTrue(wb_settings.set_remaining_priority_enabled(directory, True))
-            self.assertTrue(wb_settings.remaining_priority_enabled(directory))
-            self.assertFalse(wb_settings.set_remaining_priority_enabled(directory, False))
-            self.assertFalse(wb_settings.remaining_priority_enabled(directory))
-
-    def test_a_hand_edited_string_does_not_read_as_enabled(self):
-        with tempfile.TemporaryDirectory(prefix="remaining-priority-setting-") as directory:
-            data = wb_settings.load(directory)
-            data[wb_settings.REMAINING_PRIORITY_ENABLED_KEY] = "true"
-            wb_settings.save(directory, data)
-            self.assertFalse(wb_settings.remaining_priority_enabled(directory))
-
-
 class RemainingPriorityTests(unittest.TestCase):
-    """优先调度：估计剩余越少的 (账号, 模型) 权重越高、先被交出。
+    """剩余用量估计并入智能分配：越接近限额的组合在评分里越靠前。
 
     权重表由 wb_proxy 从剩余估算载荷算出（_remaining_schedule_weight /
     remaining_schedule_weights），池只消费（apply_remaining_weights 推表、
-    _pick_remaining_first 加权轮询）。这里同时钉住：分档边界、无预算样本 /
-    剩余为 0 不加权、开关关（表为空）时与纯轮询逐字节一致、冷却或被排除的
-    加权组合不参与、权重只在同一模型内生效、临期积分那条仍然优先。
+    _pick_scored 把权重折进评分）。这里钉住：分档边界、无预算样本 / 剩余为 0
+    不加权、只在智能分配且同一模型内生效、没有组合独占流量、临期积分层仍优先。
     """
 
     def setUp(self):
         clear_events()
         restart_fold()
 
-    def _pool(self, accounts, weights=None):
+    def _pool(self, accounts, weights=None, smart=True):
         directory = tempfile.mkdtemp(prefix="remaining-priority-")
         pool = wb_accounts.AccountPool(directory, log=lambda _m: None)
         pool.accounts = accounts
+        pool.smart_routing = smart
         if weights is not None:
             pool.apply_remaining_weights(weights)
         return pool
@@ -1361,32 +1340,34 @@ class RemainingPriorityTests(unittest.TestCase):
         finally:
             P.POOL = old_pool
 
-    def test_pool_serves_the_weighted_pair_first(self):
+    def test_the_tight_pair_gets_more_picks(self):
+        # 倾斜而不是独占：接近限额的账号多接单，另一个账号仍有单可接。
         pool = self._pool([account("acct-A"), account("acct-B")],
                           weights={("acct-A", MODEL): 4})
-        picked = {pool.pick(realm="intl", model=MODEL).uid for _ in range(6)}
-        self.assertEqual(picked, {"acct-A"})
+        picks = [pool.pick(realm="intl", model=MODEL).uid for _ in range(20)]
+        self.assertGreater(picks.count("acct-A"), picks.count("acct-B"), picks)
+        self.assertGreater(picks.count("acct-B"), 0, picks)
 
-    def test_two_weighted_pairs_share_by_weight(self):
+    def test_two_weighted_pairs_rank_by_urgency(self):
         pool = self._pool([account("acct-A"), account("acct-B")],
                           weights={("acct-A", MODEL): 4, ("acct-B", MODEL): 2})
-        picks = [pool.pick(realm="intl", model=MODEL).uid for _ in range(60)]
-        # 4:2 的平滑加权轮询是 2:1 的份额，且谁都不独占。
-        self.assertEqual((picks.count("acct-A"), picks.count("acct-B")), (40, 20))
+        picks = [pool.pick(realm="intl", model=MODEL).uid for _ in range(30)]
+        self.assertGreater(picks.count("acct-A"), picks.count("acct-B"), picks)
 
-    def test_switch_off_keeps_the_plain_round_robin(self):
-        pool = self._pool([account("acct-A"), account("acct-B")])
+    def test_without_smart_routing_the_table_is_ignored(self):
+        pool = self._pool([account("acct-A"), account("acct-B")],
+                          weights={("acct-A", MODEL): 4}, smart=False)
         picked = [pool.pick(realm="intl", model=MODEL).uid for _ in range(4)]
         self.assertEqual(picked, ["acct-A", "acct-B", "acct-A", "acct-B"])
 
-    def test_clearing_the_table_restores_the_plain_rotation(self):
+    def test_clearing_the_table_removes_the_bonus(self):
         pool = self._pool([account("acct-A"), account("acct-B")],
                           weights={("acct-A", MODEL): 4})
         pool.pick(realm="intl", model=MODEL)
         self.assertEqual(pool.apply_remaining_weights(None), {})
         self.assertEqual(pool._remaining_weights, {})
-        picked = [pool.pick(realm="intl", model=MODEL).uid for _ in range(2)]
-        self.assertEqual(picked, ["acct-A", "acct-B"])
+        picks = [pool.pick(realm="intl", model=MODEL).uid for _ in range(20)]
+        self.assertEqual(picks.count("acct-A"), picks.count("acct-B"), picks)
 
     def test_the_table_only_keeps_boosted_pairs(self):
         pool = self._pool([account("acct-A")])
@@ -1416,38 +1397,12 @@ class RemainingPriorityTests(unittest.TestCase):
     def test_weights_are_scoped_to_their_model(self):
         pool = self._pool([account("acct-A"), account("acct-B")],
                           weights={("acct-A", MODEL): 4})
-        picked = [pool.pick(realm="intl", model="hy4-preview-f").uid
-                  for _ in range(4)]
-        self.assertEqual(picked, ["acct-A", "acct-B", "acct-A", "acct-B"])
-
-    def test_rotation_state_is_bounded_to_the_live_pairs(self):
-        pool = self._pool([account("acct-A"), account("acct-B")],
-                          weights={("acct-A", MODEL): 4, ("acct-B", MODEL): 2})
-        for _ in range(6):
-            pool.pick(realm="intl", model=MODEL)
-        self.assertTrue(set(pool._remaining_pick_state)
-                        <= {("acct-A", MODEL), ("acct-B", MODEL)})
-        pool.accounts = pool.accounts[:1]
-        pool.pick(realm="intl", model=MODEL)
-        self.assertEqual(set(pool._remaining_pick_state), {("acct-A", MODEL)})
-
-    def test_a_pick_for_one_model_keeps_another_models_rotation(self):
-        # 换一个模型分派不能把这条偏好的轮次清零：轮次一清零权重就退化成
-        # 「总是轮到的第一个」。两个模型都加权、交替分派，各自都保持 2:1。
-        other = "hy4-preview-f"
-        pool = self._pool([account("acct-A"), account("acct-B")],
-                          weights={("acct-A", MODEL): 4, ("acct-B", MODEL): 2,
-                                   ("acct-A", other): 4, ("acct-B", other): 2})
-        picks = []
-        for _ in range(30):
-            picks.append(pool.pick(realm="intl", model=MODEL).uid)
-            picks.append(pool.pick(realm="intl", model=other).uid)
-        first, second = picks[0::2], picks[1::2]
-        self.assertEqual((first.count("acct-A"), first.count("acct-B")), (20, 10))
-        self.assertEqual((second.count("acct-A"), second.count("acct-B")), (20, 10))
+        picks = [pool.pick(realm="intl", model="hy4-preview-f").uid
+                 for _ in range(20)]
+        self.assertEqual(picks.count("acct-A"), picks.count("acct-B"), picks)
 
     def test_the_expiring_window_still_wins_over_the_remaining_weights(self):
-        # 层序：临期积分那条先跑，它在窗口里有人可交时剩余权重不参与。
+        # 临期积分层先跑：它在窗口里有人可交时，剩余权重不参与。
         urgent = account("acct-A")
         urgent.in_expiring_window = lambda: True
         pool = self._pool([urgent, account("acct-B")],
@@ -1484,11 +1439,13 @@ class RemainingPriorityTests(unittest.TestCase):
 
         self.assertEqual(errors, [])
         self.assertEqual(len(results), 6 * 50)
-        # 权重 4:2 在并发下也按 2:1 出账（每次分派在池锁里完成，总数是确定的）；
-        # 两个加权组合都可用时其余账号不会被轮到，它们只在加权组合不可用时兜底。
-        self.assertEqual(results.count("acct-00"), 200)
-        self.assertEqual(results.count("acct-01"), 100)
-        self.assertEqual(results.count("acct-02"), 0)
+        # 评分倾斜在并发下同样成立：两个有加权的组合多接单，其余账号仍有单可接。
+        tight, medium, plain = (results.count("acct-00"),
+                                results.count("acct-01"),
+                                results.count("acct-02"))
+        self.assertGreater(tight, plain, results)
+        self.assertGreater(medium, plain, results)
+        self.assertGreater(plain, 0, results)
 
 
 if __name__ == "__main__":

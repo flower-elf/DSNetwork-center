@@ -367,13 +367,11 @@ check("the injection is opt-in, not always-on",
       P.prompt_cache_key_enabled() is False,
       P.prompt_cache_key_enabled())
 
-import os as _os
-_os.environ["WB_PROMPT_CACHE_KEY"] = "1"
-check("it can be switched on with WB_PROMPT_CACHE_KEY=1",
+P.wb_settings.set_prompt_cache_key(P.ACCOUNTS_DIR, True)
+check("it can be switched on in settings",
       P.prompt_cache_key_enabled() is True)
-_os.environ["WB_PROMPT_CACHE_KEY"] = "0"
+P.wb_settings.set_prompt_cache_key(P.ACCOUNTS_DIR, False)
 check("and switched back off", P.prompt_cache_key_enabled() is False)
-del _os.environ["WB_PROMPT_CACHE_KEY"]
 
 print()
 print("PASS=%d FAIL=%d" % (PASS, FAIL))

@@ -1,12 +1,8 @@
-"""面板登录限流的键：反代下按真实客户端 IP 分桶，公网伪造头无效。
+"""面板登录限流的键：反向代理下按真实客户端 IP 分桶，公网伪造头无效。
 
-回归背景（真机实测）：路由器上 nginx 把 ai.home 反代到 127.0.0.1:8788，
-nginx 已经发了 X-Real-IP / X-Forwarded-For，但限流只认 socket 对端地址——
-于是所有经反代的请求都落进同一个 "127.0.0.1" 桶：任意一个客户端连发 5 次
-错密码，第 6 次用正确密码经 nginx 也被 429（同一密码直连 8788、对端算另一
-来源的请求却正常）。同一台机器上的缓存预热器也被连坐打成 429，日志里是
-"登录失败（http=429），跳过本轮"——缓存转冷，用户点开统计页要等一次全表
-扫描。这就是本套件要钉住的故障。
+面板登录限流按客户端真实地址分桶。反向代理已经发来 X-Real-IP 或
+X-Forwarded-For 时，只有可信对端才读取这些头；否则所有经代理的请求都会
+落进同一个代理地址桶，一个客户端连错 5 次就会把其他客户端一起锁住。
 
 套件钉两件事：
 
@@ -14,12 +10,11 @@ nginx 已经发了 X-Real-IP / X-Forwarded-For，但限流只认 socket 对端�
      WB_TRUSTED_PROXIES 的代理）才读代理头，X-Real-IP 优先、X-Forwarded-For
      取链上第一个；其余对端一律退回 socket 对端地址，且任何多值/带端口/
      非法/超长的头都必须安静地退避，不能抛异常。
-  2. 限流语义本身没有被动过：仍是每 IP 5 次失败 / 60 秒，成功即清桶，
-     裁剪逻辑原样。放宽阈值或改窗口都会让这个修复变成另一个 bug。
+  2. 限流语义：仍是每 IP 5 次失败 / 60 秒，成功即清桶，裁剪逻辑保持原样。
 
 前半是纯函数用例；后半把真实的 do_POST 拉起来跑一遍（键算在处理器里，只有
-走分发器才算数），并复现"一个客户端连错 5 次、其他客户端不受影响"的反代
-现场，以及"预热器不再被 429 连坐"的真机后果。
+走分发器才算数），验证一个客户端连错 5 次、其他客户端不受影响，以及缓存
+预热器不被 429 连带锁住。
 
     python tests/_test_login_ratelimit_proxy.py
 """
@@ -220,10 +215,9 @@ class LoginFlowTests(unittest.TestCase):
             return request.dispatch()
 
     def test_a_locked_out_client_does_not_lock_others_behind_the_proxy(self):
-        """反代现场：同一对端（nginx）下 A 连错 5 次，B 不受影响。
+        """反向代理现场：同一对端（nginx）下 A 连错 5 次，B 不受影响。
 
-        修复前的真机行为：第 6 次即使密码正确、经 nginx 也是 429；直连
-        8788 的另一来源却 200。修复后 A 锁在 A 的真实 IP 桶里。
+        失败次数落在 A 的真实 IP 桶里；B 使用另一个真实 IP，仍能正常登录。
         """
         nginx = ("127.0.0.1", 40000)
         client_a = {"X-Real-IP": "203.0.113.7"}
@@ -262,7 +256,7 @@ class LoginFlowTests(unittest.TestCase):
         self.assertEqual(status, 429)
 
     def test_forwarded_for_first_hop_is_the_bucket(self):
-        """只有 X-Forwarded-For 时（部分反代形态）按链上第一个地址分桶。"""
+        """只有 X-Forwarded-For 时（部分反向代理形态）按链上第一个地址分桶。"""
         chain_a = {"X-Forwarded-For": "203.0.113.7, 10.0.0.1"}
         chain_b = {"X-Forwarded-For": "203.0.113.8, 10.0.0.1"}
         for _ in range(5):
@@ -306,9 +300,9 @@ class LoginFlowTests(unittest.TestCase):
     def test_the_cache_warmer_is_not_locked_out_by_a_remote_clients_failures(self):
         """预热器视角：远程客户端连错 5 次，本机来源的登录照常。
 
-        真机上预热器与 nginx 同机：走 nginx 时 nginx 给本机来源也写
-        X-Real-IP（127.0.0.1），或预热器直连 8788；修复前两种走法都和远程
-        客户端共用 "127.0.0.1" 一把锁，被 429 连坐（"跳过本轮"，缓存转冷）。
+        预热器与 nginx 同机：走 nginx 时 nginx 给本机来源也写
+        X-Real-IP（127.0.0.1），或预热器直连 8788。两种走法都按本机来源
+        分桶，不会与远程客户端共用 "127.0.0.1" 一把锁。
         """
         remote = {"X-Real-IP": "203.0.113.7"}
         for _ in range(5):

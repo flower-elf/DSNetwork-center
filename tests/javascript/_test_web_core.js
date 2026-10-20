@@ -25,9 +25,16 @@ let server = { status: 200, body: {} };
 const requests = [];
 globalThis.fetch = async (url, init = {}) => {
   requests.push({ url, init });
-  const { status, body } = typeof server === 'function' ? server(url, init) : server;
+  const reply = typeof server === 'function' ? await server(url, init) : server;
+  const { status, body, headers = {} } = reply;
   const text = typeof body === 'string' ? body : JSON.stringify(body);
-  return { status, ok: status >= 200 && status < 300, text: async () => text, json: async () => JSON.parse(text) };
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    text: async () => text,
+    json: async () => JSON.parse(text),
+    headers: { get: (name) => headers[name] ?? headers[name.toLowerCase()] ?? null },
+  };
 };
 
 const storage = await import('../../app/web/js/core/storage.js');
@@ -95,6 +102,74 @@ server = { status: 200, body: { ok: true } };
 assert.deepEqual(await api.postJSON('/x', { a: 1 }), { ok: true });
 assert.equal(requests.at(-1).init.headers['Content-Type'], 'application/json');
 assert.equal(requests.at(-1).init.body, '{"a":1}');
+
+// ---- 条件请求：第二轮带 If-None-Match，304 复用上次解析结果
+api.clearResponseCache();
+let etagCalls = 0;
+server = (_url, init) => {
+  etagCalls += 1;
+  if (init.headers['If-None-Match'] === '"v1"') {
+    return { status: 304, body: '', headers: { ETag: '"v1"' } };
+  }
+  return { status: 200, body: { value: 1 }, headers: { ETag: '"v1"' } };
+};
+assert.deepEqual(await api.getJSON('/etag'), { value: 1 });
+assert.deepEqual(await api.getJSON('/etag'), { value: 1 }, '304 要交回上次的对象');
+assert.equal(etagCalls, 2);
+assert.equal(requests.at(-1).init.headers['If-None-Match'], '"v1"');
+
+// ---- 写请求成功后作废旧 ETag，下一轮必须重新取全量
+api.clearResponseCache();
+server = (_url, init) => {
+  if (init.method === 'POST') return { status: 200, body: { ok: true } };
+  if (init.headers['If-None-Match'] === '"v2"') {
+    return { status: 304, body: '', headers: { ETag: '"v2"' } };
+  }
+  return { status: 200, body: { value: 2 }, headers: { ETag: '"v2"' } };
+};
+await api.getJSON('/etag-post');
+await api.postJSON('/etag-post', {});
+await api.getJSON('/etag-post');
+assert.equal(requests.at(-1).init.headers['If-None-Match'], undefined,
+  'POST 之后不能继续用旧校验符');
+
+// ---- POST 清缓存时，正在途中的 304 不能交回旧对象
+api.clearResponseCache();
+let raceCalls = 0;
+let releaseRace;
+const raceGate = new Promise((resolve) => { releaseRace = resolve; });
+server = async (url) => {
+  if (url === '/race-post') return { status: 200, body: { ok: true } };
+  raceCalls += 1;
+  if (raceCalls === 1) return { status: 200, body: { n: 1 }, headers: { ETag: '"r1"' } };
+  if (raceCalls === 2) {
+    await raceGate;
+    return { status: 304, body: '', headers: { ETag: '"r1"' } };
+  }
+  return { status: 200, body: { n: 2 }, headers: { ETag: '"r2"' } };
+};
+await api.getJSON('/race');
+const pendingRace = api.getJSON('/race');
+await new Promise((resolve) => setTimeout(resolve, 10));
+await api.postJSON('/race-post', {});
+releaseRace();
+assert.deepEqual(await pendingRace, { n: 2 }, '清缓存后的 304 要重取');
+assert.equal(requests.filter((x) => x.url === '/race').at(-1).init.headers['If-None-Match'],
+  undefined, '重取时不能再带旧校验符');
+
+// ---- 同一 URL 的并发 GET 只发一次请求
+api.clearResponseCache();
+let dedupeCalls = 0;
+server = async () => {
+  dedupeCalls += 1;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  return { status: 200, body: { shared: true } };
+};
+const [sharedA, sharedB] = await Promise.all([
+  api.getJSON('/dedupe'), api.getJSON('/dedupe'),
+]);
+assert.equal(dedupeCalls, 1, '并发 GET 要合并成一次');
+assert.equal(sharedA, sharedB, '两个调用方拿到同一份结果');
 
 // 非 ASCII 的 Key 放不进请求头，必须忽略，否则 fetch 会在发出前抛错
 api.setApiKey('密钥');

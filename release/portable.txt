@@ -45,6 +45,7 @@ app/wb_activity.py
 app/wb_agents.py
 app/wb_atrest.py
 app/wb_catalog.py
+app/wb_cost.py
 app/wb_egress.py
 app/wb_fingerprint.py
 app/wb_identity.py
@@ -101,6 +102,7 @@ app/web/js/pages/credits.js
 app/web/js/pages/credits/logic.js
 app/web/js/pages/dashboard.js
 app/web/js/pages/dashboard/logic.js
+app/web/js/pages/estimate.js
 app/web/js/pages/keys.js
 app/web/js/pages/keys/dialogs.js
 app/web/js/pages/keys/logic.js
@@ -116,8 +118,11 @@ app/web/js/pages/requests.js
 app/web/js/pages/requests/logic.js
 app/web/js/pages/settings.js
 app/web/js/pages/settings/about.js
+app/web/js/pages/settings/advanced.js
+app/web/js/pages/settings/estimate.js
 app/web/js/pages/settings/gateway.js
 app/web/js/pages/settings/logic.js
+app/web/js/pages/settings/maintenance.js
 app/web/js/pages/settings/proxy.js
 app/web/js/pages/settings/security.js
 app/web/js/pages/stats.js

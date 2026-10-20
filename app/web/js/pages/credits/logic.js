@@ -27,6 +27,8 @@ function normalisePackage(raw) {
   return {
     name: String(raw.name || '').trim() || '套餐',
     subProduct: String(raw.subProduct || '').trim(),
+    packageCode: String(raw.package_code || '').trim(),
+    noExpiry: Boolean(raw.no_expiry),
     size, remain, used,
     startAt: millis(raw.startAt),
     expireAt: millis(raw.expireAt),
@@ -62,6 +64,12 @@ export function stateBadge(state) {
   return { text: '可用', tone: 'success' };
 }
 
+/** 单笔套餐是否代表会作废的积分。企业额度的周期结束只是重置，免费包的
+ * 抵扣截止远在数年后，两者都不进入临期统计。 */
+function hasCreditExpiry(item) {
+  return !item.noExpiry && item.packageCode !== 'enterprise';
+}
+
 /** 按来源归并套餐：同一来源的多笔到账合成一行，便于看该来源一共给了多少、剩下多少。 */
 export function groupPackages(packages, now = Date.now()) {
   const groups = new Map();
@@ -90,6 +98,7 @@ export function groupPackages(packages, now = Date.now()) {
     let last = 0;
     for (const item of group.packages) {
       if (item.remain <= 0) continue;
+      if (!hasCreditExpiry(item)) continue;
       if (item.expireAt > now) {
         if (!next || item.expireAt < next) next = item.expireAt;
       } else if (item.expireAt > last) {
@@ -99,7 +108,8 @@ export function groupPackages(packages, now = Date.now()) {
     group.nextExpireAt = next;
     group.lastExpireAt = last;
     if (group.remain <= 0) group.state = 'used';
-    else if (!next && group.packages.some((item) => item.remain > 0 && item.expireAt > 0)) group.state = 'expired';
+    else if (!next && group.packages.some((item) => item.remain > 0
+      && item.expireAt > 0 && hasCreditExpiry(item))) group.state = 'expired';
     else group.state = 'active';
   }
   return [...groups.values()].sort((x, y) => STATE_ORDER[x.state] - STATE_ORDER[y.state]
@@ -125,6 +135,7 @@ export function accountCredits(account, now = Date.now()) {
   let nextExpireAmount = 0;
   for (const item of packages) {
     if (item.remain <= 0 || item.expireAt <= now) continue;
+    if (!hasCreditExpiry(item)) continue;
     if (!nextExpireAt || item.expireAt < nextExpireAt) {
       nextExpireAt = item.expireAt;
       nextExpireAmount = item.remain;
@@ -134,7 +145,6 @@ export function accountCredits(account, now = Date.now()) {
     queried: Boolean(credits),
     remain, used, size,
     sizeText: fmtNumber(size),
-    count: packages.length,
     groups,
     nextExpireAt,
     nextExpireAmount,
@@ -142,21 +152,32 @@ export function accountCredits(account, now = Date.now()) {
   };
 }
 
-/** 页头汇总：只统计已经查到余额的账号。 */
+/** 页头汇总：未查询账号不计入汇总。 */
 export function pageTotals(accounts) {
-  const totals = { remain: 0, used: 0, packages: 0, queried: 0, missing: 0 };
+  const totals = { remain: 0, used: 0, queried: 0 };
   for (const account of accounts || []) {
-    if (!account || !account.credits) {
-      if (account) totals.missing += 1;
-      continue;
-    }
+    if (!account || !account.credits) continue;
     const credits = account.credits;
     totals.queried += 1;
     totals.remain += numberOrZero(credits.remain);
     totals.used += numberOrZero(credits.used);
-    totals.packages += packagesOf(account).length;
   }
   return totals;
+}
+
+/** 指定天数内到期的剩余积分合计：只算还有额度、带到期时间且尚未过期的套餐。 */
+export function expiringTotal(accounts, days = 15, now = Date.now()) {
+  const cutoff = now + days * 86400000;
+  let total = 0;
+  for (const account of accounts || []) {
+    for (const item of packagesOf(account)) {
+      if (item.remain <= 0 || !item.expireAt) continue;
+      if (!hasCreditExpiry(item)) continue;
+      if (item.expireAt <= now || item.expireAt > cutoff) continue;
+      total += item.remain;
+    }
+  }
+  return total;
 }
 
 /** 全部账号里最早到期、且还有额度的一笔；没有时返回 null。 */
@@ -165,6 +186,7 @@ export function nextExpiry(accounts, now = Date.now()) {
   for (const account of accounts || []) {
     for (const item of packagesOf(account)) {
       if (item.remain <= 0 || item.expireAt <= now) continue;
+      if (!hasCreditExpiry(item)) continue;
       if (hit && item.expireAt >= hit.at) continue;
       hit = {
         at: item.expireAt,

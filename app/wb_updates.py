@@ -43,8 +43,8 @@ REQUEST_TIMEOUT = 5
 # 一份 releases 文档几十 KB；给足余量但设上限，坏响应不能把内存拉满。
 MAX_BODY = 2 * 1024 * 1024
 
-# 每日检查的节流窗口。约 24 小时：重启不会让检查变得频繁，也不会因为一次
-# 失败就整天不再试。
+# 自动检查的默认节流窗口（24 小时），面板可改成 1 小时到 30 天。重启不会让
+# 检查变得频繁，也不会因为一次失败就整天不再试。
 SCHEDULED_INTERVAL_SECONDS = 24 * 3600
 # 启动后先等一会儿再花掉这个请求，让监听端口和账号池先就绪。
 FIRST_DELAY_SECONDS = 30
@@ -241,18 +241,26 @@ class UpdateChecker(threading.Thread):
             pass
 
     def enabled(self):
-        """每日检查的偏好；缺键或 false 都是关闭。"""
+        """自动检查的偏好；缺键或 false 都是关闭。"""
         try:
             return wb_settings.update_check_enabled(self.settings_dir)
         except Exception:
             return False
 
+    def interval_seconds(self):
+        """自动检查的节流窗口，来自面板设置；读取失败按每天一次。"""
+        try:
+            hours = wb_settings.update_check_interval_hours(self.settings_dir)
+        except Exception:
+            return SCHEDULED_INTERVAL_SECONDS
+        return max(3600, int(hours) * 3600)
+
     def due(self, now=None):
-        """约 24 小时的节流窗口是否已经放行。"""
+        """节流窗口是否已经放行。"""
         now = time.time() if now is None else float(now)
         if not self._last_attempt:
             return True
-        return (now - self._last_attempt) >= SCHEDULED_INTERVAL_SECONDS
+        return (now - self._last_attempt) >= self.interval_seconds()
 
     def status(self):
         picked = self._latest or {}
@@ -262,6 +270,7 @@ class UpdateChecker(threading.Thread):
             "latest_version": latest or None,
             "update_available": is_newer(latest, self.current_version),
             "enabled": self.enabled(),
+            "interval_hours": self.interval_seconds() // 3600,
             "checking": self._checking,
             "last_attempt": _stamp(self._last_attempt),
             "last_success": _stamp(self._last_success),

@@ -146,12 +146,12 @@ class SchedulerActivityReportTests(unittest.TestCase):
         with mock.patch.object(wb_accounts.Account, "report_activity", fake_report), \
              mock.patch.object(wb_scheduler, "do_cat_travel", lambda acc: {"action": None}), \
              mock.patch.object(wb_scheduler.time, "sleep", lambda *_: None):
-            scheduler._run_cycle("测试第一轮")
+            scheduler._run_cycle("测试第一轮", True)
             self.assertEqual(report_calls, ["cn-due"])
             self.assertTrue(any("活跃上报 1 个" in log for log in scheduler.logs))
 
             # 第二轮不重复跑
-            scheduler._run_cycle("测试第二轮")
+            scheduler._run_cycle("测试第二轮", True)
             self.assertEqual(report_calls, ["cn-due"])
             self.assertTrue(any("活跃上报 0 个" in log for log in scheduler.logs))
 

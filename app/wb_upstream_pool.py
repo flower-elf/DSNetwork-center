@@ -18,7 +18,7 @@ Connection: keep-alive 这一处，见下面各函数的注释。
   - 上游回了 3xx：重定向跟随（含相对 Location、换主机、POST 降级 GET）是
     urllib 一整条 HTTPRedirectHandler 的职责，不在这里重写，交回原路径处理。
 
-总开关：WB_UPSTREAM_KEEPALIVE=0 关闭（默认开）。
+总开关：面板「高级」设置里的「上游连接复用」，默认开启。
 容量/回收：WB_UPSTREAM_POOL_SIZE（默认每键 2 条）、WB_UPSTREAM_POOL_IDLE（空闲
 秒数，默认 90）。超龄回收在每次取用/归还时对**所有**池键各扫一遍（见
 _KeepAlivePool._sweep_locked）：只回收被碰到过的那个键的话，一个之后再没人用过
@@ -35,24 +35,28 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-#: 关闭开关认这些值；其余（含未设置）都视为开启。
-_KEEPALIVE_OFF = ("0", "off", "false", "no")
-
 #: 错误响应体的读取上限。上游的错误体都是几百字节的小 JSON，调用方最多读 600 字节；
 #: 这个上限只是防止一个异常大的 body 把内存吃掉。超限的部分不读、连接直接丢弃。
 _ERROR_BODY_MAX = 1024 * 1024
 
+_SETTINGS_DIR = None
+
+
+def set_settings_dir(path):
+    """让连接池读取面板设置里的总开关。"""
+    global _SETTINGS_DIR
+    _SETTINGS_DIR = path
+
 
 def enabled():
-    """连接池是否启用（默认启用，WB_UPSTREAM_KEEPALIVE=0 关闭）。
-
-    每次调用都读环境变量而不是导入时读一次：现场排障改 env 重启即生效，测试也
-    不用 reload 模块。热路径上就是一次 dict 查询，可以忽略。
-    """
-    raw = os.environ.get("WB_UPSTREAM_KEEPALIVE")
-    if raw is None:
-        return True
-    return str(raw).strip().lower() not in _KEEPALIVE_OFF
+    """连接池是否启用（默认启用，跟随面板设置）。"""
+    if _SETTINGS_DIR:
+        try:
+            import wb_settings
+            return wb_settings.upstream_keepalive(_SETTINGS_DIR)
+        except Exception:
+            return True
+    return True
 
 
 def _pool_size():

@@ -13,6 +13,7 @@
 
     python tests/_test_breaker_fairness.py
 """
+import io
 import os
 import socket
 import sys
@@ -178,6 +179,94 @@ class ChatPathTests(unittest.TestCase):
             self._run(urllib.error.HTTPError("https://up", 502, "bad gateway", {}, None))
         self.assertNotIsInstance(ctx.exception, P.LocalNetworkError)
         self.assertGreaterEqual(self.account.fails, 1)
+
+    def test_model_scoped_500_does_not_charge_the_account(self):
+        body = io.BytesIO(b'{"code":11134,"msg":"model provider is temporarily unavailable"}')
+        failure = urllib.error.HTTPError("https://up", 500, "Internal Server Error", {}, body)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._run(failure)
+        self.assertEqual(self.account.fails, 0, "模型级 5xx 不该记在账号头上")
+        self.assertEqual(self.account.breaker_until, 0.0)
+        self.assertIn("11134", bytes(ctx.exception.wb_body or b"").decode("utf-8"))
+
+    def test_plain_500_still_charges_the_account(self):
+        body = io.BytesIO(b'{"code":99999,"msg":"boom"}')
+        failure = urllib.error.HTTPError("https://up", 500, "Internal Server Error", {}, body)
+        with self.assertRaises(urllib.error.HTTPError):
+            self._run(failure)
+        self.assertGreaterEqual(self.account.fails, 1)
+
+    def test_model_scoped_penalty_escape_hatch(self):
+        body = io.BytesIO(b'{"code":11134,"msg":"model unavailable"}')
+        failure = urllib.error.HTTPError("https://up", 500, "Internal Server Error", {}, body)
+        with mock.patch.dict(os.environ, {"WB_MODEL_SCOPED_ERRORS_PENALIZE": "1"}):
+            with self.assertRaises(urllib.error.HTTPError):
+                self._run(failure)
+        self.assertGreaterEqual(self.account.fails, 1)
+
+    def test_401_refreshes_once_then_retries_the_same_account(self):
+        calls = []
+
+        def fake_urlopen(req, timeout=30, proxy=""):
+            calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {},
+                                         io.BytesIO(b'{"code":401}'))
+        A.urlopen = fake_urlopen
+        with mock.patch.object(self.account, "refresh", return_value=True) as refresh, \
+                mock.patch.object(P.time, "sleep", lambda *_: None):
+            with self.assertRaises(urllib.error.HTTPError):
+                P.open_upstream({"model": "deepseek-v4.1-flash",
+                                 "messages": [{"role": "user", "content": "hi"}]},
+                                target_realm="intl")
+        self.assertEqual(refresh.call_count, 1, "同一次请求只刷新一次")
+        self.assertGreaterEqual(len(calls), 2, "刷新成功后应重试同一个账号")
+
+    def test_401_with_failed_refresh_rotates_immediately(self):
+        calls = []
+
+        def fake_urlopen(req, timeout=30, proxy=""):
+            calls.append(req.full_url)
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {},
+                                         io.BytesIO(b'{"code":401}'))
+        A.urlopen = fake_urlopen
+        with mock.patch.object(self.account, "refresh", return_value=False) as refresh, \
+                mock.patch.object(P.time, "sleep", lambda *_: None):
+            with self.assertRaises(urllib.error.HTTPError):
+                P.open_upstream({"model": "deepseek-v4.1-flash",
+                                 "messages": [{"role": "user", "content": "hi"}]},
+                                target_realm="intl")
+        self.assertEqual(refresh.call_count, 1)
+        self.assertEqual(len(calls), 1, "刷新失败时不再重试同一个号")
+
+    def test_html_401_from_a_proxy_does_not_cool_the_account(self):
+        def fake_urlopen(req, timeout=30, proxy=""):
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Unauthorized", {},
+                io.BytesIO(b"<html><title>401 Authorization Required</title></html>"))
+        A.urlopen = fake_urlopen
+        with mock.patch.object(self.account, "refresh", return_value=False), \
+                mock.patch.object(P.time, "sleep", lambda *_: None):
+            with self.assertRaises(urllib.error.HTTPError):
+                P.open_upstream({"model": "deepseek-v4.1-flash",
+                                 "messages": [{"role": "user", "content": "hi"}]},
+                                target_realm="intl")
+        self.assertEqual(self.account.fails, 0, "中间层 HTML 401 不该记在账号头上")
+        self.assertEqual(self.account.cooldown_until, 0.0)
+
+    def test_credential_shaped_401_still_cools_the_account(self):
+        def fake_urlopen(req, timeout=30, proxy=""):
+            raise urllib.error.HTTPError(
+                req.full_url, 401, "Unauthorized", {},
+                io.BytesIO(b'{"code":401,"msg":"token expired"}'))
+        A.urlopen = fake_urlopen
+        with mock.patch.object(self.account, "refresh", return_value=False), \
+                mock.patch.object(P.time, "sleep", lambda *_: None):
+            with self.assertRaises(urllib.error.HTTPError):
+                P.open_upstream({"model": "deepseek-v4.1-flash",
+                                 "messages": [{"role": "user", "content": "hi"}]},
+                                target_realm="intl")
+        self.assertGreater(self.account.cooldown_until, time.time(),
+                           "凭据型 401 仍然冷却账号")
 
     def test_generic_failure_is_logged_with_the_account(self):
         """通用失败分支以前不写日志：账号被冷却，可事后查不到是谁、为什么。"""

@@ -26,6 +26,8 @@ let onAction = () => {};
 let listenersInstalled = false;
 let mobileOpen = false;
 let suppressClickUntil = 0;
+let magnifyFrame = 0;
+let magnifyX = 0;
 
 export function dockMode() {
   return readStore(MODE_KEY) === 'pinned' ? 'pinned' : 'floating';
@@ -97,24 +99,53 @@ function draw() {
   root.classList.toggle('open', mobileOpen);
 }
 
+function applyMagnify(clientX) {
+  const items = root.querySelectorAll('.dock .dock-item');
+  // 先读完所有几何信息，再统一写样式：读写交替会让每次 mousemove 触发多轮布局。
+  const sizes = [];
+  for (const el of items) {
+    const rect = el.getBoundingClientRect();
+    const distance = Math.abs(clientX - (rect.left + rect.width / 2));
+    sizes.push((BASE + GROW * Math.max(0, 1 - distance / REACH)).toFixed(1));
+  }
+  items.forEach((el, index) => {
+    el.style.width = sizes[index] + 'px';
+    el.style.height = sizes[index] + 'px';
+  });
+}
+
 function magnify(event) {
   if (window.innerWidth < 768) return;
-  for (const el of root.querySelectorAll('.dock .dock-item')) {
-    const rect = el.getBoundingClientRect();
-    const distance = Math.abs(event.clientX - (rect.left + rect.width / 2));
-    const size = BASE + GROW * Math.max(0, 1 - distance / REACH);
-    el.style.width = el.style.height = size.toFixed(1) + 'px';
-  }
+  magnifyX = event.clientX;
+  if (magnifyFrame) return;
+  magnifyFrame = requestAnimationFrame(() => {
+    magnifyFrame = 0;
+    applyMagnify(magnifyX);
+  });
 }
 
 function resetMagnify() {
+  if (magnifyFrame) {
+    cancelAnimationFrame(magnifyFrame);
+    magnifyFrame = 0;
+  }
   for (const el of root.querySelectorAll('.dock .dock-item')) el.style.width = el.style.height = '';
 }
 
 function savedPosition() {
   const raw = readStore(POSITION_KEY);
   if (!raw) return null;
-  const pos = JSON.parse(raw);
+  let pos;
+  try {
+    pos = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y)
+      || !Number.isFinite(pos.vw) || !Number.isFinite(pos.vh)
+      || pos.vw <= 0 || pos.vh <= 0) {
+    return null;
+  }
   // 视口尺寸变化后按比例换算，保持在原来的相对位置
   const x = pos.x * (window.innerWidth / pos.vw);
   const y = pos.y * (window.innerHeight / pos.vh);

@@ -83,8 +83,8 @@ export function mount(host, ctx) {
       let reply = null;
       try {
         reply = await postJSON('/settings/save', { disabled_models: disabledIds(state.data) });
-        if (enabled) toast.success('已开始处理 ' + id, '网关会把这个模型的请求转给上游账号');
-        else toast.warn('已停止处理 ' + id, '这个模型的请求会被直接拒绝');
+        if (enabled) toast.success('已开始处理 ' + id);
+        else toast.warn('已停止处理 ' + id);
       } catch (err) {
         state.data = withEnabled(state.data, id, !enabled);
         toastError('保存模型处理状态失败', err);
@@ -211,7 +211,7 @@ export function mount(host, ctx) {
     return switchControl({
       checked: !!m.enabled,
       disabled: busy,
-      label: m.enabled ? '已开启处理，取消勾选后请求会被直接拒绝' : '未处理，这个模型的请求会被直接拒绝',
+      label: m.enabled ? '已开启处理' : '未处理',
       onChange: (value) => toggleModel(m.id, value),
     });
   }

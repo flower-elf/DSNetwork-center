@@ -6,7 +6,8 @@ import { getJSON } from '../core/api.js';
 import { getState } from '../core/store.js';
 import { fmtNumber, fmtCompact, fmtCredit, fmtPercent, fmtLatency, fmtDateTime, toLocalInputValue, fromLocalInputValue } from '../core/format.js';
 import { pageHeader, statCard, segmented, chip, realmBadge, emptyState, loadErrorPage, loadErrorInline, skeletonStats, skeletonBlock } from '../ui/widgets.js';
-import { createTrendChart } from '../ui/chart.js';
+import { createTrendChart, ensureChart } from '../ui/chart.js';
+import { toastError } from '../ui/toast.js';
 import {
   RANGES, rangeLabel, scopeRealm, scopeText, buildQuery, trendGranularity, TREND_MODES, trendSeries,
   accountRows, keyRows, idleKeyNames, matrixOptions, reconcileFilters, buildMatrix,
@@ -20,6 +21,8 @@ export function mount(host) {
   const chartCanvas = createRef();
   let chart = null;
   let chartCanvasEl = null; // 建图时用的画布节点，用于识别节点被重建的情况
+  let chartPending = false;
+  let chartErrorShown = false;
   let range = 'today';
   let trendMode = 'both';
   let sinceInput = '';
@@ -30,6 +33,7 @@ export function mount(host) {
   let usage = null;
   let perf = null;
   let trend = null;
+  let month = null;
   let missing = [];
   let fatal = '';
   let phase = 'loading';
@@ -37,7 +41,11 @@ export function mount(host) {
 
   function draw() {
     render(view(), host);
-    syncChart();
+    syncChart().catch((err) => {
+      if (chartErrorShown) return;
+      chartErrorShown = true;
+      toastError('趋势图渲染失败', err);
+    });
   }
 
   /** 任何一项取数失败都不清空已有内容：下游按 null 渲染破折号或空态。 */
@@ -46,6 +54,7 @@ export function mount(host) {
     else if (key === 'usage') usage = value;
     else if (key === 'perf') perf = value;
     else if (key === 'trend') trend = value;
+    else if (key === 'month') month = value;
   }
 
   function query() {
@@ -65,6 +74,11 @@ export function mount(host) {
       { key: 'usage', label: '账号与模型用量', url: '/usage' + suffix },
       { key: 'perf', label: '性能指标', url: '/usage/perf' + suffix },
       { key: 'trend', label: '调用趋势', url: '/usage/trend' + suffix },
+      {
+        key: 'month',
+        label: '本月积分',
+        url: '/usage/month-credit?realm=' + encodeURIComponent(scopeRealm(getState().viewRealm, includeAll)),
+      },
     ];
     const settled = await Promise.allSettled(jobs.map((job) => getJSON(job.url)));
     if (mine !== seq) return;
@@ -96,7 +110,12 @@ export function mount(host) {
     return load();
   }
 
-  function syncChart() {
+  function chartPoints() {
+    if (!trend) return null;
+    return trendSeries(trendMode, trend.buckets || [], fmtNumber, fmtCompact, { errors: true });
+  }
+
+  async function syncChart() {
     const canvas = chartCanvas.value;
     if (!canvas) return;
     // 首屏失败视图上没有画布；恢复后 lit-html 会新建一个节点，旧的图表必须重建。
@@ -104,17 +123,35 @@ export function mount(host) {
       chart.destroy();
       chart = null;
     }
-    const buckets = trend ? trend.buckets || [] : null;
-    if (!buckets) {
+    const points = chartPoints();
+    if (!points) {
       if (chart) { chart.destroy(); chart = null; }
       return;
     }
-    const next = trendSeries(trendMode, buckets, fmtNumber, fmtCompact, { errors: true });
-    if (chart) chart.update(next);
-    else {
-      chart = createTrendChart(canvas, next);
-      chartCanvasEl = canvas;
+    if (chart) {
+      chart.update(points);
+      return;
     }
+    if (chartPending) return;
+    chartPending = true;
+    try {
+      await ensureChart();
+    } catch (err) {
+      if (!chartErrorShown) {
+        chartErrorShown = true;
+        toastError('图表库加载失败', err);
+      }
+      return;
+    } finally {
+      chartPending = false;
+    }
+    // 等加载期间页面可能已经卸载，或数据又换了一轮；用当前节点与当前数据建图。
+    const current = chartCanvas.value;
+    if (!current || !current.isConnected) return;
+    const latest = chartPoints();
+    if (!latest) return;
+    chart = createTrendChart(current, latest);
+    chartCanvasEl = current;
   }
 
   function selectTrendMode(id) {
@@ -188,7 +225,12 @@ export function mount(host) {
         ${statCard({ label: rangeLabel(range) + ' Token 消耗', value: win ? fmtCompact(win.total_tokens || 0) : '—', icon: 'Zap', hint: tokenHint, delay: 0.05 })}
         ${statCard({ label: rangeLabel(range) + ' 积分消耗', value: win ? fmtCredit(win.credit || 0) : '—', icon: 'Coins', hint: creditHint, delay: 0.1 })}
         ${statCard({ label: '缓存命中率', value: win ? fmtPercent(win.cache_hit_pct || 0) : '—', icon: 'Database', tone: 'info', hint: cacheHint, delay: 0.15 })}
-      </div>`;
+      </div>
+      ${month
+        ? (month.ok === false
+          ? html`<div class="text-xs tone-danger">本月消耗积分读取失败</div>`
+          : html`<div class="text-xs muted">本月消耗了积分 ${fmtCredit(month.credit || 0)}</div>`)
+        : nothing}`;
   }
 
   function trendCard() {

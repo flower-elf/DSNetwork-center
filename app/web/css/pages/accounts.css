@@ -48,6 +48,22 @@
 .table-accounts .credit-cell, .table-accounts .token-cell { align-items: center; }
 .table-accounts .row-actions { justify-content: center; }
 
+/* 表格里的下拉框收进列宽，不按最长选项撑宽：min-width:0 允许它随列收缩，
+   选中项过长时由浏览器自身省略。身份列否则会被长标签撑宽、带偏整张表。 */
+.table-accounts td .select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 账号表有十列，比其他表宽，收窄下拉框后最小宽度约 894px。视口不足 1024px
+   时改用卡片列表，避免表格出现左右滚动条。其他页面的表格更窄，沿用全局的
+   768px 断点。 */
+@media (max-width: 1023px) {
+  .accounts-list .table-wrap.desktop-only { display: none; }
+  .accounts-list .mobile-list { display: block; }
+}
+
 /* 页头「更多」菜单 */
 .menu { position: relative; display: inline-block; }
 .menu-toggle { gap: 6px; }

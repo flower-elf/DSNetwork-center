@@ -35,6 +35,7 @@ def account(uid, realm="cn", remain=None, days=None, rate=None):
         data["credits"] = {
             "remain": remain, "size": remain,
             "packages": [{"remain": remain, "size": remain, "name": "包",
+                          "days_left": days,
                           "expireAt": int(time.time() + days * 86400)}],
         }
     acc = wb_accounts.Account(data)
@@ -47,7 +48,8 @@ def packages(*pairs):
     """余额快照：每一项是（余额, 距今天数），天数为负表示已经过期。"""
     now = time.time()
     return {"remain": sum(remain for remain, _days in pairs), "packages": [
-        {"remain": remain, "name": "包", "expireAt": int(now + days * 86400)}
+        {"remain": remain, "name": "包", "days_left": days,
+         "expireAt": int(now + days * 86400)}
         for remain, days in pairs]}
 
 
@@ -216,6 +218,92 @@ class ScoredPlacementTests(unittest.TestCase):
             thread.join()
         self.assertEqual(errors, [])
         self.assertEqual(pool.routing_snapshot()["smart_pick"], 8 * 1500)
+
+
+class ExpiringTierTests(unittest.TestCase):
+    """智能分配打开时，窗口内的临期积分仍然先被消耗。"""
+
+    def _pool(self, *accounts, window=7):
+        pool = pool_with(*accounts)
+        pool.apply_expiring_window({"global": window, "intl": window, "cn": window})
+        return pool
+
+    def test_window_accounts_take_the_new_conversations(self):
+        soon = account("soon", remain=100, days=1)
+        later = account("later", remain=1000, days=60)
+        pool = self._pool(soon, later)
+        picked = {pool.pick(realm="cn").uid for _ in range(8)}
+        self.assertEqual(picked, {"soon"})
+
+    def test_window_accounts_share_by_credits_at_risk(self):
+        # 余额多、离到期近的账号分到更多流量，余额少的仍然有单可接。
+        small = account("small", remain=10, days=0.5)
+        big = account("big", remain=1000, days=6)
+        pool = self._pool(small, big)
+        counts = collections.Counter(pool.pick(realm="cn").uid for _ in range(20))
+        self.assertGreater(counts["big"], counts["small"] * 3, counts)
+        self.assertGreater(counts["small"], 0, counts)
+
+    def test_window_off_keeps_the_scored_split(self):
+        soon = account("soon-off", remain=100, days=1)
+        later = account("later-off", remain=1000, days=60)
+        pool = self._pool(soon, later, window=0)
+        counts = collections.Counter(pool.pick(realm="cn").uid for _ in range(30))
+        self.assertGreater(counts["soon-off"], 0)
+        self.assertGreater(counts["later-off"], 0, "窗口关闭后仍按欠账分配")
+
+    def test_rate_follows_each_expiry_tranche(self):
+        # 100 一天后到期、10000 六天后到期：每日最低消耗是 10100/6，不是
+        # 10100/1；大包不能压到明天。
+        acc = account("tranches")
+        acc.credits = packages((100, 1), (10000, 6))
+        self.assertAlmostEqual(acc.expiring_rate_per_day(7), 10100.0 / 6, delta=1)
+
+    def test_an_unavailable_window_account_falls_through(self):
+        parked = account("parked", remain=100, days=1)
+        parked.reserve_credits = 10000
+        later = account("spare", remain=1000, days=60)
+        pool = self._pool(parked, later)
+        self.assertEqual({pool.pick(realm="cn").uid for _ in range(6)}, {"spare"})
+
+
+class RemainingTierTests(unittest.TestCase):
+    """智能分配打开时，估计剩余接近耗尽的组合在评分里更靠前。"""
+
+    def test_tight_account_gets_more_picks(self):
+        # 同等积分义务时才看剩余用量倾斜：欠账差很大时仍由智能分配主导。
+        tight = account("tight-rem")
+        loose = account("loose-rem")
+        pool = pool_with(tight, loose)
+        pool.apply_remaining_weights({("tight-rem", MODEL): 5})
+        picks = [pool.pick(realm="cn", model=MODEL).uid for _ in range(20)]
+        self.assertGreater(picks.count("tight-rem"), picks.count("loose-rem"), picks)
+        self.assertGreater(picks.count("loose-rem"), 0, picks)
+
+    def test_credit_obligation_outweighs_the_remaining_hint(self):
+        # 余额多、到期近的账号义务更高，即使另一个组合接近估计限额，也仍多接单。
+        tight = account("tight-low", remain=100, days=60)
+        rich = account("rich-loose", remain=1000, days=60)
+        pool = pool_with(tight, rich)
+        pool.apply_remaining_weights({("tight-low", MODEL): 5})
+        picks = [pool.pick(realm="cn", model=MODEL).uid for _ in range(20)]
+        self.assertGreater(picks.count("rich-loose"), picks.count("tight-low"), picks)
+
+    def test_weight_applies_per_model(self):
+        # 权重只作用于登记的模型，其他模型照常参与评分分配。
+        tight = account("tight-model", remain=100, days=60)
+        loose = account("loose-model", remain=1000, days=60)
+        pool = pool_with(tight, loose)
+        pool.apply_remaining_weights({("tight-model", MODEL): 3})
+        picked = {pool.pick(realm="cn", model="other-model").uid for _ in range(8)}
+        self.assertEqual(picked, {"tight-model", "loose-model"})
+
+    def test_without_weights_the_scored_split_stays(self):
+        tight = account("tight-idle", remain=100, days=60)
+        loose = account("loose-idle", remain=1000, days=60)
+        pool = pool_with(tight, loose)
+        picked = {pool.pick(realm="cn", model=MODEL).uid for _ in range(8)}
+        self.assertEqual(picked, {"tight-idle", "loose-idle"})
 
 
 class RoutingCounterTests(unittest.TestCase):

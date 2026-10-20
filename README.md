@@ -13,7 +13,7 @@
 
 > 本项目由 **吃白饭的蓝色大肥鱼（Deepseek-V4.1-Flash）** 配合开发。人类开发者提供架构和需求，大肥鱼完成界面编写和后端改进。
 
-> 本仓库基于上游项目 **[ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)** 开发，看板界面参照了 **[ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)**。完整的致谢和引用见[七、致谢与引用声明](#七致谢与引用声明)。
+> 本仓库基于上游项目 **[ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)** 开发，看板界面参照了 **[ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)**。项目的来源与贡献者见[七、来源与贡献者](#七来源与贡献者)。
 
 ## 特性
 
@@ -25,7 +25,7 @@
 - **代理槽**：账号可以绑定固定的代理出口，网关支持自动发现 mihomo 端口。
 - **用量审计**：网关为每条请求记录模型、Token、积分、密钥、来源 IP、状态码和实际使用的思考档位。
 - **模型目录**：按官方桌面端清单整理，剔除补全通道与专线变体，支持手动刷新与每日自动获取。
-- **积分与定价**：按 OpenRouter 价格估算每次请求的等价花费，支持人民币与美元切换。
+- **积分与定价**：按 OpenRouter 价格估算每次请求的等价花费，支持人民币与美元切换。「费用估算」页再按模型的官方价格比较积分支出，算出省了多少。
 - **活动与自动化**：国内版 Buddy 加油站签到、成长任务与连登活跃、猫猫旅行，国际版今日活跃打卡；后台调度器按固定时刻巡检。账号被上游限制时，网关立即停止全部账号并向客户端返回 503。
 - **剩余用量与限额护栏**：账号级保留积分、每日 Token、每日积分、按模型 Token 四条护栏，另有剩余用量估算。
 - **本地网络工具**：网关可代替客户端执行声明的 `web_search` 和 `web_fetch` 工具。
@@ -39,7 +39,7 @@
 - [四、核心机制](#四核心机制)
 - [五、接口一览](#五接口一览)
 - [六、命令行参数与环境变量](#六命令行参数与环境变量)
-- [七、致谢与引用声明](#七致谢与引用声明)
+- [七、来源与贡献者](#七来源与贡献者)
 - [八、免责声明](#八免责声明)
 
 ---
@@ -135,7 +135,7 @@ python tests/run_all.py            # 全部套件
 python tests/run_all.py realm      # 只运行名字里含 realm 的套件
 ```
 
-测试共有 153 个套件：139 个 Python 套件 + 14 个 JavaScript 套件。看板的 JavaScript 套件位于 `tests/javascript`。JavaScript 套件需要 Node.js 22 或更新版本，没有安装 Node.js 时会跳过并给出提示。
+测试共有 156 个套件：142 个 Python 套件 + 14 个 JavaScript 套件。看板的 JavaScript 套件位于 `tests/javascript`。JavaScript 套件需要 Node.js 22 或更新版本，没有安装 Node.js 时会跳过并给出提示。
 
 GitHub Actions 在三个环境里运行同一条命令：Ubuntu 的 Python 3.9 和 3.12，以及 Windows 的 Python 3.12。`tests/manual/_mobile_check.py` 是需要手动运行的 Playwright 布局检查器，不属于测试套件。
 
@@ -156,7 +156,7 @@ export OPENAI_API_KEY="你在“密钥”页添加的 API Key"
 
 **（2）Claude Code 等 Messages 客户端**
 
-**积分风险**：网关把 Anthropic Messages 转换为 WorkBuddy 的 Chat 或 Responses 请求，`cache_control` 会被忽略。上游报告过长会话的缓存命中率偏低、单次消耗偏高，因此这个入口默认关闭。确认理解风险后，再在启动前设置 `WB_ENABLE_ANTHROPIC_MESSAGES=1`。关闭时 `/v1/messages` 返回 400，请求不会转发到上游。
+**积分风险**：网关把 Anthropic Messages 转换为 WorkBuddy 的 Chat 或 Responses 请求，`cache_control` 会被忽略。上游报告过长会话的缓存命中率偏低、单次消耗偏高，因此这个入口默认关闭。确认理解风险后，在“设置 → 高级”里打开“Anthropic Messages 入口”。关闭时 `/v1/messages` 返回 400，请求不会转发到上游。
 
 ```bash
 export ANTHROPIC_BASE_URL="http://127.0.0.1:8788"
@@ -188,20 +188,21 @@ curl http://127.0.0.1:8788/v1/chat/completions \
 | 仪表盘 | 账号数、可用账号、积分余额、今日请求与 Token；近 14 天调用趋势；切换网关默认出口；调度器状态 |
 | 账号 | 搜索、筛选与排序账号；每个账号的积分、有效期、出站身份、优先级、代理槽、备注与操作按钮 |
 | 任务 | 调度器状态与日志、国内版任务与福利（Buddy 加油站、成长任务与猫猫日常，可选择单个账号执行）、国际版今日活跃打卡、积分变动记录 |
-| 积分 | 每个账号每一笔套餐的来源、已用、剩余与到期时间 |
+| 积分 | 每个账号每一笔套餐的来源、已用、剩余与到期时间；页头显示 15 天内到期的积分总数 |
 | 密钥 | API Key 的出口、模型限制、有效期、配额、IP 白名单、用量与接入示例 |
 | 模型 | 模型目录与能力规格；可以按账号查看，也可以选「全部账号」看每个模型的账号覆盖率；被筛选规则排除的模型默认停止处理，勾选后才会放行 |
 | 测试台 | 用面板会话直接调试模型，可以指定账号 |
-| 用量 | 按时间范围统计请求、Token、积分与缓存命中，并按账号、密钥与模型细分 |
+| 用量 | 按时间范围统计请求、Token、积分与缓存命中，并按账号、密钥与模型细分；积分卡片下方显示本月消耗 |
+| 费用估算 | 按模型的官方价格折算当前范围的请求费用，再减去积分折算的支出，算出省了多少 |
 | 请求日志 | 每条请求的全部字段，可以按时间、版本、密钥、状态、模型、账号与来源 IP 筛选 |
 | 运行日志 | 网关控制台输出，可以复制、导出或清空 |
-| 设置 | 网关行为、代理槽、面板密码与运行信息 |
+| 设置 | 网关行为、费用估算、代理槽、面板密码、高级功能、运维与运行信息 |
 
 ### 账号
 
 - **添加账号**：点击“账号”页的“添加账号 (OAuth)”，选择国际版或国内版，再选择以 WB、VSC 或 CLI 哪个官方客户端登录，然后扫码或打开授权链接登录。网关自动检测回调。所选客户端就是新账号的出站身份。
 - **优先级**：数字越小，越先选中，默认值为 100。
-- **并发上限**：限制同一账号、同一模型同时在途的请求数，填 0 表示不限。提示里会显示当前在途数。
+- **并发上限**：限制同一账号、同一模型同时在途的请求数，填写 0 表示不限。提示里会显示当前在途数。
 - **出站身份**：在 WB、VSC、CLI 之间切换，切换后立即保存。
 - **测试**：向这个账号发送一条内容为 `hi` 的真实对话，确认它能否正常回复。
 - **备注**：最长 100 字，保存在账号文件里，可以用来搜索。
@@ -214,8 +215,31 @@ curl http://127.0.0.1:8788/v1/chat/completions \
 ### 积分
 
 - **积分构成**：“积分”页按来源列出每个账号的套餐。同一来源的多笔到账合并成一行，展开后可以查看每一笔。
+- **15 天内到期积分**：页头统计当前出口 15 天内到期的剩余额度，只算尚未过期、带到期时间且还有剩余的套餐。
 - **积分到期**：账号的积分旁显示最近一笔“额度 · N 天后到期”。一天内到期的显示为红色，七天内到期的显示为黄色。
 - **积分变动**：网关每次读取余额时，都与上一次的余额比较。余额增加时，网关在 `usage/credit_events.jsonl` 记录一条变动，只保留最近 30 天的记录。“任务”页分页显示这些记录，每页 20 条。
+
+### 费用估算
+
+“费用估算”页按模型的官方价格折算所选范围的请求费用，再减去积分折算的支出，得到省了多少。这两个口径都在“设置 → 费用估算”里填写。估算只统计已完成的请求；失败请求即使上游已经扣了积分，也不进入这张表。
+
+- **官方价格**：单位为元 / 百万 Token，分输入、缓存命中与输出三项。缓存命中价格留空时按输入价格计费。默认只内置 deepseek-v4.1-flash 的官方高峰时段价格；没有配置价格的模型按 0 计，不参与估算。
+- **积分折算单价**：1 积分折合多少元。默认 0 表示积分不计支出，省了多少等于官方价格合计。
+
+### 高级设置
+
+“设置 → 高级”集中放置这些功能开关，修改后立即生效。同名环境变量优先于面板设置，面板会标出它当前的取值。
+
+- **Anthropic Messages 入口**：打开 `/v1/messages`。默认关闭，长会话可能增加积分消耗。
+- **亲和调试日志**：把派生的亲和键与页内轮转写入运行日志。默认关闭，仅用于排查。
+- **prompt_cache_key**：向上游附带该字段。实测没有改变缓存命中率，仅保留作实验开关。默认关闭。
+- **免费模型积分回退**：免费模型额度耗尽后回退到同系列付费模型。默认关闭。
+- **上游连接复用**：复用上游 TCP/TLS 连接。默认开启。
+- **用量聚合缓存**：把用量聚合状态写入磁盘，重启后只读新增日志。默认开启。
+- **日与小时分桶**：窗口统计使用按日/小时分桶的增量结果。默认开启。
+- **最近请求索引**：为请求日志建立深分页索引。默认关闭。
+
+“设置 → 运维”可以调整定价刷新与变体继承、积分后台刷新间隔、日志写入数据库与三条保留上限、小时层与日桶保留、上游超时、可信反向代理、提示词模式与文件、每日版本检查。
 
 ### 密钥
 
@@ -236,6 +260,8 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 
 网关按以下顺序确定恢复时间：首先取上游消息里写明的重置时刻，其次取 HTTP `Retry-After` 头，两者都没有时冷却 60 秒。冷却状态只保存在内存里，重启后清空。
 
+上游返回 401 时，网关先刷新这个账号的令牌并重试同一个账号一次；刷新失败或重试仍是 401 才换号。同一次请求里每个账号最多刷新一次。
+
 ---
 
 ## 四、核心机制
@@ -246,13 +272,14 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 
 1. **可用性**：跳过停用、冷却中、余额不高于保留积分、今日 Token 已达限额的账号。
 2. **会话粘性**：同一段对话固定使用同一个账号，只有这个账号无法接单时才更换账号。客户端没有给出会话标识时，网关按前两条消息识别对话。这个功能默认打开，开关在“设置 → 网关行为 → 会话粘性”。关闭后，每一轮请求都重新选择账号。
-3. **分配规则**：打开“智能分配”时，网关进行智能分配；关闭时，按优先级与轮询顺序分配。开关在“设置 → 网关行为 → 智能分配”，默认打开。
+3. **分配规则**：打开“智能分配”时，网关按积分到期节奏与最近一小时的忙闲分配，剩余额度接近耗尽的账号与模型组合略优先；关闭时，按优先级与轮询顺序分配，临期积分窗口内的账号先接单。开关在“设置 → 网关行为 → 智能分配”，默认打开。
 
-此外，下面三项设置也会影响选号。
+此外，下面四项设置也会影响选号。
 
 - **保留积分**：余额不高于设定值时，账号暂停接单，这样可以避免余额用到 0 后收到上游的提醒短信。填写 0 表示关闭这项功能。网关根据最近一次查询到的余额进行判定。
 - **每日 Token 限额**：今日用量达到设定值时，账号暂停接单，本地时间 0 点后恢复。填写 0 表示不限额。
-- **单账号单模型并发上限**：每个账号可以在账号页单独设置这个数值，填 0 表示不限。具体规则如下。
+- **临期积分优先窗口**：积分在这个天数内到期时优先分配请求，默认 7 天。填写 0 表示关闭。智能分配与轮询都使用这个窗口。
+- **单账号单模型并发上限**：每个账号可以在账号页单独设置这个数值，填写 0 表示不限。具体规则如下。
   - 网关按“同一账号 + 同一模型”分别计数。例如，同一账号的 `glm-5.3` 和 `deepseek` 各自计数，互不占用名额。
   - 选号时，网关直接跳过名额已满的账号，把请求交给其他账号。
   - 对话绑定的账号名额暂满时，其他账号接手这个请求，对话绑定随之转到接手的账号。接手账号重新计算了完整前缀，此后缓存保存在它那里。
@@ -300,7 +327,7 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 | 每天 22:00 | 自动刷新令牌剩余有效期不足 2 小时的账号 |
 | 每天 01:00 | 夜猫子任务 |
 
-这四组整点都可以在“设置 → 网关行为”里单独调整：填 0 到 23 的整点，用逗号分隔；留空表示这组不跑。默认值保持不变。
+这四组整点都可以在“设置 → 网关行为”里单独调整：填写 0 到 23 的整点，用逗号分隔；留空表示这组不跑。默认值保持不变。
 
 在“任务”页可以手动触发巡检，停止或启动调度器，也可以按账号手动执行 Buddy 加油站签到和今日活跃打卡。
 
@@ -333,7 +360,7 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 
 ### Messages 接口
 
-`POST /v1/messages` 按 Anthropic Messages 协议收发，支持 `system`、多轮对话、图片、工具调用、思考内容和流式输出，错误也按这个协议的格式返回。这个入口默认关闭，启动前设置 `WB_ENABLE_ANTHROPIC_MESSAGES=1` 才会启用；关闭时返回 Anthropic 格式的 400，请求不会转发到上游。
+`POST /v1/messages` 按 Anthropic Messages 协议收发，支持 `system`、多轮对话、图片、工具调用、思考内容和流式输出，错误也按这个协议的格式返回。这个入口默认关闭，在“设置 → 高级”里打开“Anthropic Messages 入口”才会启用；关闭时返回 Anthropic 格式的 400，请求不会转发到上游。
 
 翻译方式在“设置 → 网关行为 → Messages 接口翻译”里选择。
 
@@ -406,6 +433,8 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 | GET | /usage/recent | 请求记录，可以按 `realm`、`key`、`status`、`model`、`account`、`ip`、`range`、`since`、`until` 筛选并分页 |
 | GET | /usage/trend | 调用趋势；`days=N` 按天统计，`range=today` 按小时统计 |
 | GET | /usage/analytics | 按账号、模型与密钥的统计 |
+| GET | /usage/cost-estimate | 费用估算，按模型返回官方价格、积分折合与省了多少；参数与 `/usage` 相同 |
+| GET | /usage/month-credit | 本月消耗的积分，按 `realm` 汇总 |
 | GET | /usage/by-account | 按账号的用量明细 |
 | GET | /usage/perf | 首字延迟与生成速度 |
 | GET | /tasks | 国内版成长任务、连续打卡与猫猫日常状态 |
@@ -455,9 +484,20 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 | `WB_PROXY_KEY` | 空 | 与 `API_KEY` 作用相同 |
 | `ACCOUNTS_DIR` | `./accounts` | 账号凭证与设置目录 |
 | `WB_PROXY_USAGE_DIR` | `./usage` | 用量记录目录 |
-| `WB_PROXY_CATALOG_DIR` | `./catalog` | 模型目录落盘存档目录 |
+| `WB_PROXY_CATALOG_DIR` | `./catalog` | 模型目录缓存目录 |
 | `WB_PROXY_DEFAULT_REALM` | `intl` | 启动时的默认出口 |
-| `WB_ENABLE_ANTHROPIC_MESSAGES` | `0` | 打开 Anthropic Messages 入口；默认关闭，确认缓存与积分风险后再设 `1` |
+| `WB_ENABLE_ANTHROPIC_MESSAGES` | `0` | 高级设置“Anthropic Messages 入口”；环境变量优先于面板设置 |
+| `WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK` | `0` | 高级设置“免费模型积分回退”；环境变量优先于面板设置 |
+| `WB_PROMPT_CACHE_KEY` | `0` | 高级设置“prompt_cache_key”；环境变量优先于面板设置 |
+| `WB_AFFINITY_DEBUG` | `0` | 高级设置“亲和调试日志”；环境变量优先于面板设置 |
+| `WB_UPSTREAM_KEEPALIVE` | `1` | 高级设置“上游连接复用”；环境变量优先于面板设置 |
+| `WB_USAGE_CACHE` | `1` | 高级设置“用量聚合缓存”；环境变量优先于面板设置 |
+| `WB_USAGE_DAY_BUCKETS` | `1` | 高级设置“日与小时分桶”；环境变量优先于面板设置 |
+| `WB_RECENT_INDEX` | `0` | 高级设置“最近请求索引”；环境变量优先于面板设置 |
+| `WB_TRUSTED_PROXIES` | 空 | 运维设置“可信反向代理”；环境变量优先于面板设置 |
+| `WB_UPDATE_CHECK_ENABLED` | 空 | 运维设置“自动检查更新”；环境变量优先于面板设置 |
+| `WB_UPDATE_CHECK_INTERVAL_HOURS` | 空 | 运维设置“自动检查间隔”，单位小时，取 1～720；环境变量优先于面板设置 |
+| `WB_MODEL_SCOPED_ERRORS_PENALIZE` | 空 | 设为 `1` 时恢复旧行为，所有 5xx 都记入账号故障；默认只把普通 5xx 记入账号 |
 | `WB_CLIENT_TIMEOUT` | `120` | 客户端连接读写超时，单位为秒 |
 | `WB_MAX_PAYLOAD_BYTES` | `16777216` | 请求体上限，即 16 MiB，超出时返回 413 |
 | `WB_MAX_CONCURRENT_CHAT` | `32` | 同时处理的对话请求数；设为 `auto` 时按可用账号数计算 |
@@ -470,38 +510,16 @@ Key 保存在 `accounts/settings.json`。在看板保存过 Key 之后，启动�
 | `WB_WEB_MIN_INTERVAL` | `0.5` | 对外请求的最小间隔秒数 |
 | `WB_WEB_BUDGET` | `25` | 单次搜索所有引擎的总预算秒数 |
 | `WB_WEB_TOOLS_PROXY` | 空 | 搜索请求的出口代理；`web_fetch` 为固定解析 IP 的安全连接，不走这个代理 |
-| `WB_PROMPT_CACHE_KEY` | `0` | 实验开关，打开后向上游附带 `prompt_cache_key` |
-| `WB_AFFINITY_BY_PREFIX` | `1` | 没有会话标识时按对话前缀固定账号 |
 | `WB_STATS_TTL` | `15` | 用量统计缓存秒数 |
 | `WB_PROXY_DISCOVER_HOST` | `cli-proxy-mihomo` | 代理槽自动发现的主机名 |
 | `WB_PROXY_DISCOVER_PORTS` | `17901-17910` | 代理槽自动发现的端口范围 |
 | `TZ` | `Asia/Shanghai` | 容器时区；定时任务始终按 UTC+8 时间计算 |
 
-## 七、致谢与引用声明
+## 七、来源与贡献者
 
-- **[ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub)**：本仓库的上游。协议转换、账号调度、定时任务和请求侧的风控处理，都建立在它的基础上。
-- **[ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)**：看板界面的参考来源。
-- **[linux-do/cdk](https://github.com/linux-do/cdk)**：LINUX DO 社区的 CDK 发放平台。本项目用原生 H5 和 JavaScript 重新实现了它的部分视觉风格。
-- **[Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)**：成长任务全链路逆向、设备指纹稳定派生 `derive_id`、整点排程调度 `Scheduler`、指纹脱敏与 `reasoning_content` 回填。
-- **[CangShui/workbuddy-cliproxy-fix](https://github.com/CangShui/workbuddy-cliproxy-fix)**：早期客户端代理修复与接口差异参考。
-- **[lovingfish/workbuddy-cliproxy](https://github.com/lovingfish/workbuddy-cliproxy)** 与 **[mmqz/cpa-multi-plugins](https://github.com/mmqz/cpa-multi-plugins)**：网关通信与多插件管理原型参考。
-- **[ardeyouxipianyi/workbuddy2api](https://github.com/ardeyouxipianyi/workbuddy2api)**：国内版分发包逆向分析与出站 User-Agent 规范参考。
-- **[linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel)**：国内版连登管家、对话活跃上报的事件形状与风控口径、企业版门控。
-- **[aodianjun/workbuddy2api-hub](https://github.com/aodianjun/workbuddy2api-hub)**：OpenWrt 打包配方，审计后并入 `wrt/`。
+本仓库基于 [ardeyouxipianyi/workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub) 开发，看板视觉参考 [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager)，部分交互与部署配方参考 [linux-do/cdk](https://github.com/linux-do/cdk)。
 
-PR 贡献者（v1.4.5 之前的改动未进上方更新记录，这里一并列出）：
-
-- **[@ddddd-ren](https://github.com/ddddd-ren)**：用量日志倒序检索与看板防堆叠（PR #14）、原子写入与并发竞争修复（PR #13）、账号池 JSON 导出导入（PR #5）；
-- **[@wylftw0314-glitch](https://github.com/wylftw0314-glitch)**：Responses API custom 工具协议双向转译（PR #12）；
-- **[@shuishuipingan](https://github.com/shuishuipingan)**：成长任务领取竞态与专家/团队事件 id 去重、猫猫旅行派出修复、夜猫子任务接入调度器、启动端口误判（PR #21）、按模型冷却限流（PR #22）、任务接取强化与轮询加速（PR #27）、网络抖动重试与 403 直通（PR #28）、HTTP 连接同步（PR #30）；
-- **[@ayeaaaa](https://github.com/ayeaaaa)**：按账号绑定出口代理槽（PR #26）、DeepSeek `reasoning_content` 回填（PR #36）、看板移动端布局（PR #37）；
-- **[@t-789](https://github.com/t-789)**：macOS 启动脚本与防火墙助手（PR #31）；
-- **[@Cekxri](https://github.com/Cekxri)**：Codex App namespace 工具支持（PR #33）；
-- **[@wiggins-kong](https://github.com/wiggins-kong)**：API Key 行 id 唯一化（PR #40）、Docker 镜像缺少运行时模块（PR #41）；
-- **[@Pro-XK](https://github.com/Pro-XK)**：看板积分消耗与账号昵称（PR #45）；
-- **[@teddyli18000](https://github.com/teddyli18000)**：单模型限流可视化（PR #50）、`/health` 鉴权状态修正（PR #52）；
-- **[@LuFering](https://github.com/LuFering)**：Docker 部署下的 Linux 桌面凭据挂载说明（PR #55）；
-- **[@zhangzm0](https://github.com/zhangzm0)**：`tool_choice="none"` 保留工具声明（PR #57）。
+完整的贡献者名单见 [GitHub 贡献者图表](https://github.com/flower-elf/workbuddy2api-center/graphs/contributors)。
 
 ---
 

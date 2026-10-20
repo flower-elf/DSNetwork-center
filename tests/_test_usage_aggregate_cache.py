@@ -220,9 +220,10 @@ def append_log(rows):
 
 
 def cache_env(enabled=None, min_bytes=None, min_seconds=None):
-    """把三个开关写进环境。None 表示删除该变量并使用默认值。"""
-    for name, value in (("WB_USAGE_CACHE", enabled),
-                        ("WB_USAGE_CACHE_MIN_BYTES", min_bytes),
+    """把落盘开关写进设置，节流阈值仍用环境变量。None 表示使用默认值。"""
+    if enabled is not None:
+        P.wb_settings.set_usage_cache(ACCOUNTS_DIR, bool(enabled))
+    for name, value in (("WB_USAGE_CACHE_MIN_BYTES", min_bytes),
                         ("WB_USAGE_CACHE_MIN_SECONDS", min_seconds)):
         if value is None:
             os.environ.pop(name, None)
@@ -494,7 +495,9 @@ check("新进程结果与不落盘一致", canon(child_raw) == GOLDEN,
 check_same_shape("新进程 vs 冷折叠（真·新进程）", GOLDEN_RAW, child_raw)
 check("新进程记录到了加载的 offset（三份都被采用）",
       adopted_all(child_state), child_state)
-child_off, child_state_off = run_child({"WB_USAGE_CACHE": "0"})
+P.wb_settings.set_usage_cache(ACCOUNTS_DIR, False)
+child_off, child_state_off = run_child()
+P.wb_settings.set_usage_cache(ACCOUNTS_DIR, True)
 check("新进程 + 关掉开关：结果一致", canon(child_off) == GOLDEN,
       first_diff(GOLDEN, canon(child_off)))
 check_same_shape("新进程（关掉开关）vs 冷折叠", GOLDEN_RAW, child_off)

@@ -188,6 +188,18 @@ class SoonestExpiringTests(unittest.TestCase):
         account = make_account("u2", credits=blob)
         self.assertIsNone(account.soonest_expiring_days())
 
+    def test_target_excludes_enterprise_and_no_expiry_packages(self):
+        at = int(time.time() + 86400)
+        account = make_account("u-target", credits={
+            "remain": 200, "used": 0, "size": 200,
+            "packages": [
+                {"name": "免费包", "remain": 100, "expireAt": at, "no_expiry": True},
+                {"name": "企业额度", "remain": 100, "expireAt": at,
+                 "package_code": "enterprise"},
+            ],
+        })
+        self.assertEqual(account.credit_target_per_day(), 0)
+
     def test_skips_the_enterprise_quota(self):
         # 企业额度的 cycleEndTime 是周期重置（额度回满），不是积分作废。
         account = make_account("u3", credits=credits(1, package_code="enterprise"))

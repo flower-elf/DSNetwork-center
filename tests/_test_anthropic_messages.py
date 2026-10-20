@@ -106,6 +106,23 @@ check("tool_result maps to a tool message",
       tool_msg.get("role") == "tool" and tool_msg.get("tool_call_id") == "toolu_1"
       and tool_msg.get("content") == "a.txt", tool_msg)
 
+# 工具结果里的图片必须保留结构化 image_url，不能压成 base64 文本按字符计费。
+_image_tool = P._anthropic_blocks_to_messages("user", [{
+    "type": "tool_result", "tool_use_id": "toolu_img",
+    "content": [
+        {"type": "text", "text": "see"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aaa"}},
+    ],
+}])[0]
+_parts = _image_tool.get("content")
+check("image tool_result keeps a structured image part",
+      isinstance(_parts, list)
+      and any(part.get("type") == "image_url"
+              and part["image_url"]["url"] == "data:image/png;base64,aaa"
+              for part in _parts), _parts)
+check("image tool_result keeps its text part",
+      any(part.get("type") == "text" and part.get("text") == "see" for part in _parts), _parts)
+
 print()
 print("[2] budget thinking maps to effort")
 check("disabled -> none", P.anthropic_effort_from_messages({"thinking": {"type": "disabled"}}) == "none")

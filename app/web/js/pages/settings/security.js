@@ -29,7 +29,6 @@ export function createSecurityTab(page) {
           <input class="input" type="password" autocomplete="new-password" placeholder="至少 4 位"
                  .value=${form.next} ?disabled=${busy}
                  @input=${(e) => { form.next = e.target.value; error = ''; }}>
-          <span class="field-hint">修改后其它浏览器上的登录会全部失效，需要重新输入新密码。</span>
         </label>
         ${error ? html`<p class="field-error" role="alert">${error}</p>` : ''}`,
       foot: () => html`
@@ -49,10 +48,9 @@ export function createSecurityTab(page) {
       ctl.update();
       try {
         const data = await postJSON('/panel/password', { current: form.current, new: form.next });
-        // 服务端会吊销其它浏览器的会话，并为当前浏览器发一张新令牌。
         if (data.token) setPanelToken(data.token);
         ctl.close();
-        toast.success('面板密码已更新', '其它浏览器上的登录已经失效，当前浏览器继续有效。');
+        toast.success('面板密码已更新');
         await page.reloadSettings();
       } catch (err) {
         busy = false;
@@ -78,7 +76,7 @@ export function createSecurityTab(page) {
             <div class="setting">
               <div class="setting-main">
                 <div class="setting-name">修改面板密码</div>
-                <div class="setting-desc">打开本看板时输入的密码，与 API Key 相互独立；修改后其它浏览器上的登录会全部失效。</div>
+                <div class="setting-desc">打开本看板时输入的密码，与 API Key 相互独立。</div>
               </div>
               <div class="setting-control">
                 <button class="btn btn-outline btn-sm" @click=${openPasswordDialog}>

@@ -20,7 +20,7 @@ import {
 
 export const autoRefresh = true;
 
-const PAGE_DESC = '反代网关的每一次调用记录，含状态、首字延迟与 Token 计量。';
+const PAGE_DESC = '反向代理网关的每一次调用记录，含状态、首字延迟与 Token 计量。';
 
 export function mount(host) {
   const viewRealm = getState().viewRealm;

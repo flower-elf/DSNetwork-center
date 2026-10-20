@@ -22,11 +22,35 @@ function withAlpha(rgb, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+let chartLoader = null;
+
+/** 按需加载 Chart.js；仪表盘与用量页共用一次加载。 */
+export function ensureChart() {
+  if (globalThis.Chart) return Promise.resolve();
+  if (chartLoader) return chartLoader;
+  chartLoader = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = '/web/vendor/chart-4.5.1.umd.min.js';
+    script.async = true;
+    script.onload = () => {
+      if (globalThis.Chart) resolve();
+      else reject(new Error('图表库没有初始化'));
+    };
+    script.onerror = () => reject(new Error('图表库加载失败'));
+    document.head.appendChild(script);
+  }).catch((err) => {
+    chartLoader = null;
+    throw err;
+  });
+  return chartLoader;
+}
+
 /**
  * series: [{ label, data: number[], color: '--chart-1' 或颜色值, dashed, fill, format(v), axis, order }]
  * 返回 { update({ labels, series }), destroy() }。
  */
 export function createTrendChart(canvas, initial) {
+  if (!globalThis.Chart) throw new Error('图表库尚未加载');
   let config = initial;
   let chart = null;
 

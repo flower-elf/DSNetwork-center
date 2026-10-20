@@ -1,4 +1,4 @@
-/* 设置页纯逻辑：Messages 路径与模型下拉、数字与密码校验、代理槽编辑器与绑定、运行信息。
+/* 设置页纯逻辑：Messages 路径与模型下拉、数字与密码校验、费用估算表单、代理槽编辑器与绑定、运行信息。
  * 运行：node tests/javascript/_test_settings_logic.js
  */
 import assert from 'node:assert/strict';
@@ -191,5 +191,74 @@ assert.deepEqual(logic.parseHours(''), { ok: true, value: [] }, '留空表示这
 assert.equal(logic.parseHours('24').ok, false);
 assert.equal(logic.parseHours('abc').ok, false);
 assert.equal(logic.parseHours('-1').ok, false);
+
+// ---- 费用估算：默认表、脏检查与提交载荷
+const costState = logic.costEstimateState({
+  credit_price: 0,
+  models: [{ model: 'deepseek-v4.1-flash', input: 2, cached_input: 0.04, output: 8 }],
+});
+assert.equal(costState.creditPrice, '0');
+assert.deepEqual(costState.rows, [{ model: 'deepseek-v4.1-flash', input: '2', cached_input: '0.04', output: '8' }]);
+assert.equal(logic.costEstimateDirty(costState, costState), false, '原样的草稿不算脏');
+assert.equal(logic.costEstimateDirty({ ...costState, creditPrice: '0.1' }, costState), true);
+
+const costBuilt = logic.costEstimatePayload({
+  creditPrice: '0.1',
+  rows: [
+    { model: 'deepseek-v4.1-flash', input: '2', cached_input: '0.04', output: '8' },
+    { model: '', input: '0', cached_input: '0', output: '0' },
+  ],
+});
+assert.equal(costBuilt.ok, true);
+assert.deepEqual(costBuilt.payload, {
+  cost_estimate: {
+    credit_price: 0.1,
+    models: [{ model: 'deepseek-v4.1-flash', input: 2, cached_input: 0.04, output: 8 }],
+  },
+}, '空行要丢掉，价格按数字提交');
+
+const missingModel = logic.costEstimatePayload({
+  creditPrice: '0', rows: [{ model: '', input: '1', cached_input: '0', output: '0' }],
+});
+assert.equal(missingModel.ok, false, '填了价格却没填模型名必须报错');
+assert.ok(missingModel.errors.rows[0]);
+
+const duplicate = logic.costEstimatePayload({
+  creditPrice: '0',
+  rows: [
+    { model: 'glm-5.3', input: '1', cached_input: '0', output: '1' },
+    { model: 'GLM-5.3', input: '2', cached_input: '0', output: '2' },
+  ],
+});
+assert.equal(duplicate.ok, false, '模型名去重不区分大小写');
+assert.ok(duplicate.errors.rows[1]);
+
+const badPrice = logic.costEstimatePayload({
+  creditPrice: '0', rows: [{ model: 'glm-5.3', input: '-1', cached_input: '0', output: '1' }],
+});
+assert.equal(badPrice.ok, false, '负价格不能提交');
+
+const inheritCached = logic.costEstimatePayload({
+  creditPrice: '0',
+  rows: [{ model: 'glm-5.3', input: '2', cached_input: '', output: '8' }],
+});
+assert.equal(inheritCached.ok, true);
+assert.equal(inheritCached.payload.cost_estimate.models[0].cached_input, 2,
+  '缓存命中价留空时要按输入价提交');
+
+const freeCached = logic.costEstimatePayload({
+  creditPrice: '0',
+  rows: [{ model: 'glm-5.3', input: '2', cached_input: '0', output: '8' }],
+});
+assert.equal(freeCached.payload.cost_estimate.models[0].cached_input, 0,
+  '显式填写 0 表示缓存命中免费');
+
+const zeroRow = logic.costEstimatePayload({
+  creditPrice: '0',
+  rows: [{ model: 'glm-5.3', input: '0', cached_input: '0', output: '0' }],
+});
+assert.equal(zeroRow.ok, true);
+assert.deepEqual(zeroRow.payload.cost_estimate.models, [],
+  '价格全为 0 的模型行不参与估算，也不存储');
 
 console.log('settings logic assertions passed');

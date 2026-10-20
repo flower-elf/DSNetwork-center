@@ -178,5 +178,45 @@ class DailyTokenLimitTests(unittest.TestCase):
         self.assertIn("local midnight", str(caught.exception.message))
         self.assertGreaterEqual(caught.exception.wait, 60)
 
+class GuardClearTests(unittest.TestCase):
+    """把日限额改回 0 必须传到池子，账号上的护栏字段只在内存里。
+
+    账号对象的 daily_* 字段由 Account.__init__ 归零，save() 不落盘，清掉旧值
+    只能靠再推一次。设置保存路径（refresh=True）以前对全为 0 的护栏整段跳过，
+    于是「关掉限额」恰好成了唯一推不出去的那次编辑。
+    """
+
+    def _pool(self, directory):
+        account = wb_accounts.Account({"uid": "uid-one", "accessToken": "t",
+                                       "realm": "intl"})
+        pool = wb_accounts.AccountPool(directory)
+        pool.accounts = [account]
+        return pool, account
+
+    def test_clearing_the_token_limit_unparks_the_same_account(self):
+        with tempfile.TemporaryDirectory(prefix="guard-clear-") as directory:
+            pool, account = self._pool(directory)
+            with io.open(P.USAGE_LOG, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(row(P._local_midnight() + 60, "uid-one", 600))
+                         + "\n")
+            reset_cache()
+            old_pool, old_dir = P.POOL, P.ACCOUNTS_DIR
+            P.POOL, P.ACCOUNTS_DIR = pool, directory
+            try:
+                wb_settings.set_daily_token_limit(directory, 500)
+                P.apply_daily_guards(refresh=True)
+                self.assertEqual(account.daily_token_limit, 500)
+                self.assertTrue(account.daily_limit_blocked())
+                self.assertFalse(account.ready())
+
+                wb_settings.set_daily_token_limit(directory, 0)
+                P.apply_daily_guards(refresh=True)
+                self.assertEqual(account.daily_token_limit, 0)
+                self.assertFalse(account.daily_limit_blocked())
+                self.assertTrue(account.ready())
+            finally:
+                P.POOL, P.ACCOUNTS_DIR = old_pool, old_dir
+
+
 if __name__ == "__main__":
     unittest.main()

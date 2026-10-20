@@ -62,6 +62,32 @@ function armRefresh(entry) {
 
 onRefreshSeconds(() => { if (current) armRefresh(current); });
 
+function showLoadError(box, err) {
+  box.replaceChildren();
+  const page = document.createElement('div');
+  page.className = 'page';
+  const alert = document.createElement('div');
+  alert.className = 'load-error';
+  alert.setAttribute('role', 'alert');
+  const mark = document.createElement('div');
+  mark.className = 'load-error-icon';
+  mark.textContent = '!';
+  const title = document.createElement('div');
+  title.className = 'text-sm medium';
+  title.textContent = '页面加载失败：' + (err && err.message ? err.message : String(err));
+  const hint = document.createElement('div');
+  hint.className = 'text-xs muted';
+  hint.textContent = '可以先重试；如果反复出现，请查看运行日志页里的报错。';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'btn btn-outline btn-sm';
+  retry.textContent = '重试';
+  retry.addEventListener('click', () => show());
+  alert.append(mark, title, hint, retry);
+  page.appendChild(alert);
+  box.appendChild(page);
+}
+
 async function show() {
   const { path, sub } = parseHash();
   const route = findRoute(path);
@@ -79,14 +105,35 @@ async function show() {
   }
   const mine = ++generation;
   stopCurrent();
-  const mod = await route.load();
+  const entry = { route, sub, instance: null, timer: null, busy: false, auto: false, fixedMs: 0 };
+  current = entry;
+  let mod;
+  try {
+    mod = await route.load();
+  } catch (err) {
+    if (mine !== generation) return;
+    host.replaceChildren();
+    const box = document.createElement('div');
+    host.appendChild(box);
+    showLoadError(box, err);
+    document.title = route.title + ' - WorkBuddy 网关';
+    onChange(route, sub);
+    return;
+  }
   if (mine !== generation) return;
   host.replaceChildren();
   const mount = document.createElement('div');
   host.appendChild(mount);
-  const entry = { route, sub, instance: null, timer: null, busy: false, auto: !!mod.autoRefresh, fixedMs: mod.refreshMs || 0 };
-  current = entry;
-  entry.instance = mod.mount(mount, { sub, route });
+  entry.auto = !!mod.autoRefresh;
+  entry.fixedMs = mod.refreshMs || 0;
+  try {
+    entry.instance = mod.mount(mount, { sub, route });
+  } catch (err) {
+    showLoadError(mount, err);
+    document.title = route.title + ' - WorkBuddy 网关';
+    onChange(route, sub);
+    return;
+  }
   armRefresh(entry);
   document.title = route.title + ' - WorkBuddy 网关';
   onChange(route, sub);

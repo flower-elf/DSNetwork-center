@@ -223,7 +223,7 @@ assert.equal(logic.parseConcurrencyInput('-1').ok, false);
 assert.equal(logic.parseConcurrencyInput('2.5').ok, false);
 assert.equal(logic.parseConcurrencyInput('abc').ok, false);
 assert.ok(logic.parseConcurrencyInput('1001').message.includes('0 表示不限'),
-  '拒绝时要说清填 0 表示不限，否则操作员不知道怎么关掉');
+  '拒绝时要说清填写 0 表示不限，否则操作员不知道怎么关掉');
 
 // 旧账号缺少该字段时按不限处理
 assert.equal(logic.concurrencyOf(base()), 0, '没设过的账号按不限处理');

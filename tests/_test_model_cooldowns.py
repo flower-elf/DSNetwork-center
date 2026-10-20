@@ -196,8 +196,8 @@ class ModelCooldownTests(unittest.TestCase):
                 return value or 0
 
             def apply_remaining_weights(self, weights=None):
-                # 剩余用量优先调度的权重表也由请求路径推给池；桩只负责接住
-                # 调用（开关默认关，推来的就是 None）。
+                # 剩余用量权重（并入智能分配的评分）也由请求路径推给池；桩只
+                # 负责接住调用，没有加权组合时推来的是 None。
                 return weights or {}
         old_pool, old_urlopen = proxy.POOL, accounts.urlopen
         old_parser = proxy.parse_rate_limit_reset

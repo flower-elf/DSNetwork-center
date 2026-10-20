@@ -30,6 +30,10 @@ export function growthTaskView(task) {
   else if (status === 'accepted' || status === 'in_progress') badge = { text: '进行中', tone: 'info' };
   else if (status === 'not_accepted') badge = { text: '未接取', tone: 'muted' };
   const done = status === 'claimed' || status === 'completed' || (target > 0 && current >= target);
+  const manual = !!(task && task.manual);
+  const mode = manual
+    ? { text: '需手动操作', tone: 'warning', hint: (task && task.manual_reason) || '' }
+    : { text: '可自动推进', tone: 'success', hint: '' };
   const rewards = [
     task && task.reward_credit ? '+' + fmtNumber(task.reward_credit) + ' 积分' : '',
     task && task.reward_energy ? '+' + fmtNumber(task.reward_energy) + ' 能量' : '',
@@ -41,6 +45,7 @@ export function growthTaskView(task) {
     progress: done ? '已达成' : current + ' / ' + target,
     rewards: rewards || '—',
     badge,
+    mode,
   };
 }
 

@@ -55,14 +55,14 @@ def _http_error(url, code, body):
 
 class GrowthPrereqTests(unittest.TestCase):
     def setUp(self):
-        self._orig = (T.fetch_growth_tasks, T.accept_tasks, T.claim_task,
-                      T.report_events, T.do_cat_travel)
+        self._orig = (T.fetch_growth_tasks, T.query_growth_tasks, T.accept_tasks,
+                      T.claim_task, T.report_events, T.do_cat_travel)
         self.events = []
         self.state = {"fb": 0, "cc": "not_accepted"}
 
     def tearDown(self):
-        (T.fetch_growth_tasks, T.accept_tasks, T.claim_task,
-         T.report_events, T.do_cat_travel) = self._orig
+        (T.fetch_growth_tasks, T.query_growth_tasks, T.accept_tasks,
+         T.claim_task, T.report_events, T.do_cat_travel) = self._orig
 
     def _stub(self):
         def fetch(acc):
@@ -214,6 +214,7 @@ class GrowthPrereqTests(unittest.TestCase):
             if state["cur"]:
                 return [_task("black_cat", status="completed", current=3, target=3)]
             return [_task("black_cat", status="not_accepted", current=0, target=3)]
+        T.query_growth_tasks = lambda acc: (True, fetch(acc))
         T.fetch_growth_tasks = fetch
 
         def accept(acc, codes, chunk=20):

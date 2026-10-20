@@ -8,7 +8,7 @@ import { fmtNumber, fmtCompact, fmtRemain, realmLabel } from '../core/format.js'
 import { hrefFor } from '../core/router.js';
 import { pageHeader, statCard, badge, emptyState, loadErrorPage, loadErrorInline, skeletonStats, skeletonBlock, progressBar, copyButton, busyClick, segmented } from '../ui/widgets.js';
 import { confirmDialog } from '../ui/dialog.js';
-import { createTrendChart } from '../ui/chart.js';
+import { createTrendChart, ensureChart } from '../ui/chart.js';
 import { toastError, toast } from '../ui/toast.js';
 import {
   realmAccounts, accountSummary, readyHint, creditsSummary, creditsHint, snapshotAccounts,
@@ -25,6 +25,8 @@ export function mount(host) {
   const chartCanvas = createRef();
   let chart = null;
   let chartCanvasEl = null; // 建图时用的画布节点，用于识别节点被重建的情况
+  let chartPending = false;
+  let chartErrorShown = false;
   let accounts = null;     // GET /accounts?realm=all，按查看版本在前端筛选
   let usage = null;        // GET /usage?realm=<查看版本>&range=today
   let trend = null;        // GET /usage/trend?realm=<查看版本>&days=14
@@ -37,7 +39,11 @@ export function mount(host) {
 
   function draw() {
     render(view(), host);
-    syncChart();
+    syncChart().catch((err) => {
+      if (chartErrorShown) return;
+      chartErrorShown = true;
+      toastError('趋势图渲染失败', err);
+    });
   }
 
   function apply(key, value) {
@@ -81,8 +87,12 @@ export function mount(host) {
     return load();
   }
 
+  function chartPoints() {
+    return trend ? trendSeries(trendMode, trend.buckets, fmtNumber, fmtCompact, { errors: true }) : null;
+  }
+
   /** 趋势图：数据到齐后建图，之后只换数据，轮询刷新不会让整张图重新动画。 */
-  function syncChart() {
+  async function syncChart() {
     const canvas = chartCanvas.value;
     if (!canvas) return;
     // 首屏失败视图上没有画布；恢复后 lit-html 会新建一个节点，旧的图表必须重建。
@@ -90,17 +100,35 @@ export function mount(host) {
       chart.destroy();
       chart = null;
     }
-    const points = trend ? trendSeries(trendMode, trend.buckets, fmtNumber, fmtCompact, { errors: true }) : null;
+    const points = chartPoints();
     if (!points) {
       if (chart) { chart.destroy(); chart = null; }
       return;
     }
-    const next = { labels: points.labels, series: points.series };
-    if (chart) chart.update(next);
-    else {
-      chart = createTrendChart(canvas, next);
-      chartCanvasEl = canvas;
+    if (chart) {
+      chart.update({ labels: points.labels, series: points.series });
+      return;
     }
+    if (chartPending) return;
+    chartPending = true;
+    try {
+      await ensureChart();
+    } catch (err) {
+      if (!chartErrorShown) {
+        chartErrorShown = true;
+        toastError('图表库加载失败', err);
+      }
+      return;
+    } finally {
+      chartPending = false;
+    }
+    // 等加载期间页面可能已经卸载，或数据又换了一轮；用当前节点与当前数据建图。
+    const current = chartCanvas.value;
+    if (!current || !current.isConnected) return;
+    const latest = chartPoints();
+    if (!latest) return;
+    chart = createTrendChart(current, { labels: latest.labels, series: latest.series });
+    chartCanvasEl = current;
   }
 
   function selectTrendMode(id) {

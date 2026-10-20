@@ -9,10 +9,16 @@ export function toMillis(ts) {
 
 const pad2 = (n) => String(n).padStart(2, '0');
 
+// 表格一轮会格式化上千个数字，复用格式化器比每次 toLocaleString 少建临时对象。
+const numberFormat = new Intl.NumberFormat('zh-CN');
+const moneyFormat = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 2, maximumFractionDigits: 2,
+});
+
 export function fmtNumber(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return '0';
-  return n.toLocaleString('zh-CN');
+  return numberFormat.format(n);
 }
 
 /** 1234 → 1.2k，56789 → 57k，3400000 → 3.4M。 */
@@ -29,9 +35,16 @@ export function fmtCredit(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n === 0) return '0';
   const abs = Math.abs(n);
-  if (abs >= 100) return Math.round(n).toLocaleString('zh-CN');
+  if (abs >= 100) return numberFormat.format(Math.round(n));
   if (abs >= 1) return n.toFixed(2);
   return n.toFixed(4);
+}
+
+/** 金额：人民币符号加两位小数。 */
+export function fmtCny(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return '¥' + moneyFormat.format(n);
 }
 
 export function fmtLatency(ms) {

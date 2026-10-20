@@ -39,6 +39,7 @@ import wb_accounts
 import wb_activity
 import wb_atrest
 import wb_catalog
+import wb_cost
 import wb_egress
 import wb_ipintel
 import wb_logstore
@@ -454,7 +455,16 @@ def parse_trusted_proxies(raw):
         except ValueError:
             continue
     return tuple(entries)
-TRUSTED_PROXIES = parse_trusted_proxies(os.environ.get("WB_TRUSTED_PROXIES", ""))
+# 保留模块级覆盖给测试与脚本；None 表示跟随面板设置。
+TRUSTED_PROXIES = None
+
+
+def trusted_proxy_networks():
+    if TRUSTED_PROXIES is not None:
+        return TRUSTED_PROXIES
+    return parse_trusted_proxies(wb_settings.trusted_proxies(ACCOUNTS_DIR))
+
+
 def peer_is_trusted(peer_ip):
     """对端是否有资格代表客户端：回环地址或显式配置的代理。"""
     try:
@@ -462,12 +472,12 @@ def peer_is_trusted(peer_ip):
     except ValueError:
         return False
     # Windows 双栈下连 127.0.0.1 的对端会显示为 ::ffff:127.0.0.1。Python 3.13
-    # 之前的 ipaddress 不把 IPv4 映射地址视为回环，本机反代会被当成不可信来源，
+    # 之前的 ipaddress 不把 IPv4 映射地址视为回环，本机反向代理会被当成不可信来源，
     # 限流桶退化成所有客户端共用一个。
     mapped = addr.ipv4_mapped if addr.version == 6 else None
     if addr.is_loopback or (mapped is not None and mapped.is_loopback):
         return True
-    for net in TRUSTED_PROXIES:
+    for net in trusted_proxy_networks():
         if addr.version == net.version and addr in net:
             return True
     return False
@@ -529,7 +539,7 @@ _catalog_raw_meta = {}
 #: WB_PROXY_CATALOG_DIR 覆盖。
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
     or os.path.join(PROJECT_DIR, "catalog")
 # 用量记账：每个上游响应都带 usage 块，网关同时为每个请求写一行 JSONL。
@@ -2254,17 +2264,21 @@ def apply_daily_guards(refresh=False):
     stats = daily_usage_stats(ttl=ttl) if wants else None
     # 池上这三个 apply_* 的返回值是它们各自的 limits 字典（不是计数），调用方
     # 谁也没用过；这里数的是「推了几条护栏」，别拿返回值做算术。
+    #
+    # 限额只活在账号对象的内存里，清掉旧值只能靠再推一次。设置保存路径
+    # （refresh=True）对三条护栏都推送，值为 0 也推；请求热路径保持
+    # 「没配限额就完全不碰池子」，不为此多付开销。
     published = 0
-    if any(v > 0 for v in token_limits.values()):
+    if refresh or any(v > 0 for v in token_limits.values()):
         POOL.apply_daily_token_limit(
             token_limits, stats["tokens"] if stats is not None else None)
         published += 1
-    if any(v > 0 for v in credit_limits.values()):
+    if refresh or any(v > 0 for v in credit_limits.values()):
         POOL.apply_daily_credit_limit(
             credit_limits, stats["credits"] if stats is not None else None,
             free_models_by_realm())
         published += 1
-    if any(v > 0 for v in model_limits.values()):
+    if refresh or any(v > 0 for v in model_limits.values()):
         POOL.apply_model_daily_token_limit(
             model_limits, stats["models"] if stats is not None else None)
         published += 1
@@ -2335,6 +2349,91 @@ def daily_credits_by_account(ttl=None):
         return dict(credits), True
 
 
+# 本月消耗：面板在今日积分卡片下面显示一行，只需要一个总数。与今日的按账号
+# 折叠分开：那份每天清零，这份按本地 1 号清零，两者共用同一套增量扫描与
+# 截断保护，但各自保留自己的 offset。
+_month_credit = {"month": "", "key": None, "offset": 0, "tail": b"",
+                 "totals": None, "at": 0.0}
+_month_credit_lock = threading.Lock()
+
+
+def _scan_month_credits(offset, totals, start):
+    """从 offset 起把本月行的 credit 折进 realm -> 总额。"""
+    def fold(row):
+        if (row.get("at") or 0) < start:
+            return
+        if row_outcome(row) == "client_aborted":
+            return
+        spent = row.get("credit")
+        if isinstance(spent, bool) or not isinstance(spent, (int, float)):
+            return
+        if not spent:
+            return
+        realm = row_realm(row)
+        totals[realm] = totals.get(realm, 0.0) + float(spent)
+
+    offset, reset = _center_fold_rows(offset, fold)
+    if reset:
+        totals.clear()
+        offset, _ = _center_fold_rows(0, fold)
+    return totals, offset
+
+
+def month_credits(ttl=None):
+    """(realm -> 本月消耗积分, 可读)；日志完全读不出来时第二个值为 False。"""
+    ttl = _STATS_TTL if ttl is None else ttl
+    start = range_window("month")[0]
+    month = time.strftime("%Y-%m", time.localtime(start))
+    now = time.time()
+    with _month_credit_lock:
+        entry = _month_credit
+        key = _usage_log_key()
+        fresh = (entry["month"] == month
+                 and _log_offset_holds(entry["key"], key, entry["offset"])
+                 and entry["totals"] is not None
+                 and entry["tail"] == _log_tail_signature(entry["offset"]))
+        if fresh and (now - entry["at"]) < ttl:
+            return dict(entry["totals"]), True
+        totals = dict(entry["totals"]) if fresh else {}
+        offset = entry["offset"] if fresh else 0
+        try:
+            totals, offset = _scan_month_credits(offset, totals, start)
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            log("month credit fold failed: %s" % exc)
+            if fresh:
+                return dict(entry["totals"]), False
+            return {}, False
+        _month_credit.update({"month": month, "key": _usage_log_key(),
+                              "offset": offset,
+                              "tail": _log_tail_signature(offset),
+                              "totals": totals, "at": now})
+        return dict(totals), True
+
+
+def month_credit_view(realm=None):
+    """本月消耗的积分；realm 为空或 all 时返回两个出口的合计。"""
+    r = realm_scope(realm, CURRENT_REALM)
+    totals, ok = month_credits()
+    credit = totals.get(r, 0.0) if r else sum(totals.values())
+    return {"realm": r or "all",
+            "month": time.strftime("%Y-%m"),
+            "credit": round(credit, 6),
+            "ok": ok}
+
+
+def month_credit_etag(realm=None):
+    """本月积分视图的 ETag；折叠还没跑过时没有可用的校验符。"""
+    r = realm_scope(realm, CURRENT_REALM) or "all"
+    with _month_credit_lock:
+        at = _month_credit["at"]
+        month = _month_credit["month"]
+    if not at:
+        return None
+    return _cache_etag("month-credit", "%s|%s" % (r, month), at)
+
+
 def credit_rate_scale(lt=None):
     """把「今天已消耗的积分」折算成每天消耗速度的倍数。
 
@@ -2346,15 +2445,28 @@ def credit_rate_scale(lt=None):
     return (24.0 / elapsed) if elapsed >= 1.0 else 1.0
 
 
+_ROUTING_PUSH_SECONDS = 2.0
+_routing_push = {"at": 0.0, "credits": None}
+
+
 def apply_routing_inputs(refresh=False):
-    """Push each account's recent credit spend onto the pool for the scored pick."""
-    if POOL is None or not POOL.smart_routing:
+    """Push each account's recent credit spend onto the pool for the scored pick.
+
+    热路径上每个请求都会走到这里；日折叠本身有 TTL，但把结果逐个写回账号要拿
+    账号池锁。两秒的推送间隔足够跟上按天计的消耗速度，refresh=True 仍然立即
+    推送（启动与设置变更）。
+    """
+    if POOL is None or not getattr(POOL, "smart_routing", False):
         return None
+    now = time.time()
+    if not refresh and (now - _routing_push["at"]) < _ROUTING_PUSH_SECONDS:
+        return _routing_push["credits"]
     credits, ok = daily_credits_by_account(ttl=0 if refresh else None)
     if not ok:
         return None
     scale = credit_rate_scale()
     POOL.apply_credit_rates({uid: value * scale for uid, value in credits.items()})
+    _routing_push.update({"at": now, "credits": credits})
     return credits
 
 
@@ -3477,13 +3589,13 @@ def remaining_usage_etag():
 
 
 # ---------------------------------------------------------------------------
-# 剩余用量优先调度（开关默认关，见 wb_settings.remaining_priority_enabled）
+# 剩余用量（并入智能分配的评分）
 #
-# 「快达到估计限额的 (账号, 模型) 先被交出」：估计剩余占预算的比例越小权重
-# 越高，分派侧（AccountPool._pick_remaining_first）只对权重 > 1 的组合做平滑
-# 加权轮询。分档而不是线性：面板上说得清（剩不到 30% 开始加权、5% 以内最重），
-# 测试里也钉得住确切数字。权重表由请求路径每请求推给池——数据方向与
-# apply_daily_* 一致，池不反向依赖本模块。
+# 估计剩余占预算的比例越小权重越高；权重在 AccountPool._pick_scored 里作为
+# 评分倾斜，智能分配的欠账与忙闲仍然决定主要份额。分档而不是线性：面板上
+# 说得清（剩不到 30% 开始加权、5% 以内最重），测试里也钉得住确切数字。
+# 权重表由请求路径每请求推给池——数据方向与 apply_daily_* 一致，池不反向依赖
+# 本模块。
 # ---------------------------------------------------------------------------
 _REMAINING_PRIORITY_BANDS = ((0.05, 4), (0.15, 3), (0.30, 2))
 
@@ -3508,11 +3620,6 @@ def _remaining_schedule_weight(remaining, budget):
         if ratio <= ceiling:
             return weight
     return 1
-
-
-def remaining_priority_enabled():
-    """优先调度开关（默认关）。"""
-    return wb_settings.remaining_priority_enabled(ACCOUNTS_DIR) is True
 
 
 def remaining_schedule_weights():
@@ -3629,6 +3736,21 @@ def usage_snapshot_etag(realm=None, range=None, since=None, until=None):
     if hit is None:
         return None
     return _cache_etag("usage", key, hit[0])
+
+
+def cost_estimate_view(realm=None, range=None, since=None, until=None):
+    """费用估算：用当前窗口的按模型用量与设置里的官方价格折算。
+
+    取数复用 usage_snapshot 的缓存；估算本身只是一次按模型的小循环，不单独
+    缓存。没有配置价格的模型 priced=False，金额按 0 计，不进入合计。
+    """
+    snap = usage_snapshot(realm=realm, range=range, since=since, until=until)
+    config = wb_settings.cost_estimate(ACCOUNTS_DIR)
+    out = wb_cost.estimate(snap.get("by_model") or {}, config)
+    lo, hi = range_window(range, since, until)
+    out["realm"] = snap.get("realm") or "all"
+    out["window"] = {"since": lo, "until": hi}
+    return out
 
 
 def _fold_cost(bucket, cost, model):
@@ -5473,12 +5595,8 @@ _RECENT_INDEX_REALM_MAX = 128
 
 
 def _recent_index_enabled():
-    """索引总开关，默认关；WB_RECENT_INDEX=1 开（现场应急 / 测试切换）。
-
-    与 WB_USAGE_CACHE 同款：每次调用读环境变量，不在导入时定死。
-    """
-    return os.environ.get("WB_RECENT_INDEX", "0").strip().lower() in (
-        "1", "true", "yes", "on")
+    """索引总开关，默认关；面板设置可打开。"""
+    return wb_settings.recent_index(ACCOUNTS_DIR)
 
 
 def _recent_index_min_bytes():
@@ -7209,7 +7327,7 @@ def _analytics_window_from_days(realm, day_key, until, pricing_on):
 # 与日桶同一条纪律：同一窗口的求和统一用按小时分组的口径，
 # _scan_usage_analytics_window_hours、小时桶与加载 checkpoint 三条路径给出
 # 的字节完全一致。非整小时的起点拆不开，仍然整段扫描，优先保证正确。
-# WB_USAGE_DAY_BUCKETS=0 一并关掉小时层。
+# 面板关闭日与小时分桶时一并关掉小时层。
 #
 # 保留期比日桶短得多，由 WB_USAGE_HOUR_KEEP_HOURS 控制，默认 48h：小时桶只
 # 为近期的自定义窗口服务，每个桶的形状与日桶一样，跟着 32 天的日桶全留会
@@ -7489,7 +7607,7 @@ def _add_analytics_stat(dst, src):
 # 相同。逐行顺序无法从日聚合还原，这是日桶推导的固有代价；本文件里同一
 # 窗口的所有路径统一用按日分组的口径，冷扫描、日桶与加载 checkpoint 三条
 # 路径给出的字节完全一致。analytics 的小时窗口同理，只把分组粒度换成小时。
-# WB_USAGE_DAY_BUCKETS=0 可整体退回逐行口径。
+# 面板关闭日与小时分桶时可整体退回逐行口径。
 #
 # 小时层：日桶只服务起点为本地午夜的窗口，而面板的自定义区间起点是任意
 # 时刻，最常见的是整点。datetime-local 输入框给到分钟粒度，操作者选整点的
@@ -7525,67 +7643,61 @@ _USAGE_DAY_SNAPSHOT_FIELDS = tuple(
 
 
 def _usage_keep_setting(key):
-    """面板设置的聚合保留值；没设过或读不出来返回 None。
+    """实际生效的聚合保留值；环境变量优先，其次面板显式保存，都没有返回 None。
 
-    环境变量始终优先，便于现场调整与测试来回切换；面板设置只在没有环境
-    变量时生效，与 upstream_timeouts 读取 header_timeout_seconds 同一条
-    路子。
+    每次调用都读环境变量与设置：现场调整与测试切换都要即时生效。
     """
     try:
-        cfg = wb_settings.usage_config(ACCOUNTS_DIR)
+        return wb_settings.usage_keep_value(ACCOUNTS_DIR, key)
     except Exception:
         return None
-    value = cfg.get(key)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        return None
-    return value
 
 
 def _usage_day_keep_days():
-    """日桶保留天数，默认 32；WB_USAGE_DAY_KEEP_DAYS 优先，其次面板设置。
+    """日桶保留天数，默认 32；WB_USAGE_DAY_KEEP_DAYS 与面板设置优先于默认值。
 
-    每次调用都读环境变量，理由与 WB_USAGE_CACHE 相同：现场调整与测试来回
-    切换都要即时生效。
+    每次调用都读环境变量与设置：现场调整与测试切换都要即时生效。
     """
+    value = _usage_keep_setting("day_keep_days")
+    if value:
+        return value
     raw = os.environ.get("WB_USAGE_DAY_KEEP_DAYS")
     if raw is not None:
         try:
-            return max(1, int(raw))
+            return max(1, min(int(raw), wb_settings.USAGE_LIMITS["day_keep_days"]))
         except (TypeError, ValueError):
             return _USAGE_DAY_KEEP_DAYS
-    return _usage_keep_setting("day_keep_days") or _USAGE_DAY_KEEP_DAYS
+    return _USAGE_DAY_KEEP_DAYS
 
 
 def _usage_hour_keep_days():
-    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_DAYS 优先，其次由面板的
-    「小时层保留」向上取整到整天。
+    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_HOURS 与面板的「小时层保留」
+    决定它，其次才是 WB_USAGE_HOUR_KEEP_DAYS。
 
     两个状态各有一条小时层保留线，snapshot 按天、analytics 按小时；面板只
     暴露一个「小时层保留」，单位小时，所以这里跟着它走，避免调了一个另一个
     不动。取值最低为 1 天：小时层至少要能服务今天的整点窗口，否则等于没建。
     """
-    raw = os.environ.get("WB_USAGE_HOUR_KEEP_DAYS")
-    if raw is not None:
-        try:
-            return max(1, int(raw))
-        except (TypeError, ValueError):
-            return _USAGE_HOUR_KEEP_DAYS
     hours = _usage_keep_setting("hour_keep_hours")
     if hours:
         return max(1, (hours + 23) // 24)
+    raw = os.environ.get("WB_USAGE_HOUR_KEEP_DAYS")
+    if raw is not None:
+        try:
+            cap = (wb_settings.USAGE_LIMITS["hour_keep_hours"] + 23) // 24
+            return max(1, min(int(raw), cap))
+        except (TypeError, ValueError):
+            return _USAGE_HOUR_KEEP_DAYS
     return _USAGE_HOUR_KEEP_DAYS
 
 
 def _usage_day_buckets_enabled():
-    """日桶总开关，默认开；WB_USAGE_DAY_BUCKETS=0 退回逐行扫描口径。
+    """日桶总开关，默认开；面板设置可关闭，退回逐行扫描口径。
 
-    与 WB_USAGE_CACHE 同样的用法：现场紧急关掉，测试在一个进程里来回切。
     关掉时既不折日桶也不使用它们，窗口路径与逐行口径逐字节一致。小时层挂在
-    日桶上，即每个日桶里的 hours 子表，所以这个开关一并管住小时层：关掉时
-    既不折小时桶，整点窗口也退回逐行口径。
+    日桶上，即每个日桶里的 hours 子表，所以这个开关一并管住小时层。
     """
-    return os.environ.get("WB_USAGE_DAY_BUCKETS", "1").strip().lower() not in (
-        "0", "false", "no", "off")
+    return wb_settings.usage_day_buckets(ACCOUNTS_DIR)
 
 
 # analytics 小时子表的保留小时数：小时层只为近期的自定义窗口服务，而每个
@@ -7598,19 +7710,22 @@ _USAGE_HOUR_KEEP_HOURS = 48
 
 
 def _usage_hour_keep_hours():
-    """小时子表保留小时数，默认 48；WB_USAGE_HOUR_KEEP_HOURS 优先，其次
-    面板设置。
+    """小时子表保留小时数，默认 48；面板设置优先，其次
+    WB_USAGE_HOUR_KEEP_HOURS。
 
-    每次调用都读环境变量，理由与 _usage_day_keep_days 相同：现场调整与
+    每次调用都读环境变量与设置，理由与 _usage_day_keep_days 相同：现场调整与
     测试来回切换都要即时生效。
     """
+    value = _usage_keep_setting("hour_keep_hours")
+    if value:
+        return value
     raw = os.environ.get("WB_USAGE_HOUR_KEEP_HOURS")
     if raw is not None:
         try:
-            return max(1, int(raw))
+            return max(1, min(int(raw), wb_settings.USAGE_LIMITS["hour_keep_hours"]))
         except (TypeError, ValueError):
             return _USAGE_HOUR_KEEP_HOURS
-    return _usage_keep_setting("hour_keep_hours") or _USAGE_HOUR_KEEP_HOURS
+    return _USAGE_HOUR_KEEP_HOURS
 
 
 def _local_day_key(ts):
@@ -8984,13 +9099,11 @@ _USAGE_CACHE_KINDS = ("snapshot", "by_account", "analytics", "series",
 
 
 def _usage_cache_enabled():
-    """落盘总开关，默认开；WB_USAGE_CACHE=0 关。
+    """落盘总开关，默认开；面板设置可关闭。
 
-    每次调用都读环境变量而不是在导入时定死：现场用它紧急关掉，测试用它在一
-    个进程里来回切，而一次 os.environ.get 的开销在刷新路径上可以忽略。
+    每次调用都读设置而不是在导入时定死：现场切换后下一个刷新周期即生效。
     """
-    return os.environ.get("WB_USAGE_CACHE", "1").strip().lower() not in (
-        "0", "false", "no", "off")
+    return wb_settings.usage_cache(ACCOUNTS_DIR)
 
 
 def _usage_cache_path():
@@ -10409,13 +10522,18 @@ def runtime_settings_view():
         "model_daily_token_limit": wb_settings.model_daily_token_limit(ACCOUNTS_DIR),
         "pricing_refresh_minutes": wb_settings.pricing_refresh_minutes(ACCOUNTS_DIR),
         "credits_refresh_hours": wb_settings.credits_refresh_hours(ACCOUNTS_DIR),
+        "cost_estimate": wb_settings.cost_estimate(ACCOUNTS_DIR),
         "section_max_height": wb_settings.section_max_height(ACCOUNTS_DIR),
         "ui_language": wb_settings.ui_language(ACCOUNTS_DIR),
         "pricing_variant_inherit": wb_settings.pricing_variant_inherit(ACCOUNTS_DIR),
         "pricing_enabled": wb_settings.pricing_enabled(ACCOUNTS_DIR),
         "auto_switch_product": wb_settings.auto_switch_product(ACCOUNTS_DIR),
-        "free_model_credit_fallback": wb_settings.free_model_credit_fallback(ACCOUNTS_DIR),
-        "enable_anthropic_messages": wb_settings.enable_anthropic_messages(ACCOUNTS_DIR),
+        # 下面这些项可能被环境变量覆盖：视图给面板自己的值，环境变量取值在
+        # env_overrides 里单独交给面板显示，运行时的读取仍然环境变量优先。
+        "free_model_credit_fallback":
+            wb_settings.panel_flag(ACCOUNTS_DIR, "free_model_credit_fallback", False),
+        "enable_anthropic_messages":
+            wb_settings.panel_flag(ACCOUNTS_DIR, "enable_anthropic_messages", False),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -10436,8 +10554,13 @@ def runtime_settings_view():
         "daily_chat_model": wb_settings.daily_chat_model(ACCOUNTS_DIR),
         "daily_chat_model_default": wb_accounts.DAILY_CHAT_MODEL,
         "local_web_tools": wb_settings.local_web_tools(ACCOUNTS_DIR),
-        "remaining_priority_enabled":
-            wb_settings.remaining_priority_enabled(ACCOUNTS_DIR),
+        "prompt_cache_key": wb_settings.panel_flag(ACCOUNTS_DIR, "prompt_cache_key", False),
+        "affinity_debug": wb_settings.panel_flag(ACCOUNTS_DIR, "affinity_debug", False),
+        "upstream_keepalive": wb_settings.panel_flag(ACCOUNTS_DIR, "upstream_keepalive", True),
+        "usage_cache": wb_settings.panel_flag(ACCOUNTS_DIR, "usage_cache", True),
+        "usage_day_buckets": wb_settings.panel_flag(ACCOUNTS_DIR, "usage_day_buckets", True),
+        "recent_index": wb_settings.panel_flag(ACCOUNTS_DIR, "recent_index", False),
+        "trusted_proxies": wb_settings.panel_trusted_proxies(ACCOUNTS_DIR),
         "egress_backoff_enabled":
             wb_settings.egress_backoff_enabled(ACCOUNTS_DIR),
         "log_db_enabled": wb_settings.log_db_enabled(ACCOUNTS_DIR),
@@ -10448,7 +10571,12 @@ def runtime_settings_view():
         "accounts_separate_tab": wb_settings.accounts_separate_tab(ACCOUNTS_DIR),
         "key_before_hidden": wb_settings.key_before_hidden(ACCOUNTS_DIR),
         "hidden_pages": wb_settings.hidden_pages(ACCOUNTS_DIR),
-        "update_check_enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
+        "update_check_enabled":
+            wb_settings.panel_flag(ACCOUNTS_DIR, "update_check_enabled", False),
+        "update_check_interval_hours":
+            wb_settings.panel_update_check_interval_hours(ACCOUNTS_DIR),
+        # 被环境变量控制的项：面板标出环境变量的当前取值，控件仍可编辑。
+        "env_overrides": wb_settings.env_overrides(),
         "upstream": wb_settings.upstream_config(ACCOUNTS_DIR),
         "usage": wb_settings.usage_config(ACCOUNTS_DIR),
         "prompt": wb_settings.prompt_config(ACCOUNTS_DIR),
@@ -10490,10 +10618,10 @@ def current_account():
 # 取消息列表的前两条（system + 首条 user），它们在整段对话生命周期内不变，
 # 因此同一对话的每一轮都会落到同一账号；而不同对话的首条 user 不同，
 # 依旧会分散到各账号，负载均衡不受影响。
-AFFINITY_BY_PREFIX = os.environ.get("WB_AFFINITY_BY_PREFIX", "1").lower() not in (
-    "0", "false", "no", "off")
-AFFINITY_DEBUG = os.environ.get("WB_AFFINITY_DEBUG", "0").lower() in (
-    "1", "true", "yes", "on")
+def affinity_debug_enabled():
+    return wb_settings.affinity_debug(ACCOUNTS_DIR)
+
+
 # 亲和的上限：对话超过这么多条消息后不再绑定账号。
 #
 # 为什么需要上限：亲和把整段对话固定在同一个账号上，而对话的上下文是单调
@@ -10534,9 +10662,10 @@ def affinity_route(messages):
     conversations whose client supplied its own session key). Both come from
     the same head hash, so every turn of a conversation agrees on its key and
     its page without any server-side state.
+
+    客户端自带会话标识时用它的；没有标识就按对话前缀派生。两者共用一个开关：
+    会话粘性，关掉就完全不绑定。
     """
-    if not AFFINITY_BY_PREFIX:
-        return None, None
     if not wb_settings.session_affinity(ACCOUNTS_DIR):
         return None, None
     try:
@@ -10550,14 +10679,14 @@ def affinity_route(messages):
         if AFFINITY_MAX_MSGS > 0 and len(msgs) > AFFINITY_MAX_MSGS:
             if AFFINITY_PAGE_SIZE > 1:
                 page = (int(digest[:8], 16) % AFFINITY_PAGE_SIZE, AFFINITY_PAGE_SIZE)
-                if AFFINITY_DEBUG:
+                if affinity_debug_enabled():
                     log("affinity: %d msgs (> %d), page %d/%d"
                         % (len(msgs), AFFINITY_MAX_MSGS, page[0], page[1]))
                 return key, page
             if AFFINITY_PAGE_SIZE == 1:
                 # Pinned like any other conversation: the cap is switched off.
                 return key, None
-            if AFFINITY_DEBUG:
+            if affinity_debug_enabled():
                 log("affinity: skip %d msgs (> %d), letting the pool rotate"
                     % (len(msgs), AFFINITY_MAX_MSGS))
             return None, None
@@ -10627,7 +10756,7 @@ _LOG_TAG_HINTS = (
     ("agents", ("agents", "智能体")),
 )
 
-# 可选的 SQLite 落库（默认关闭）。None = 还没初始化（模块 import 期），启动时按
+# 可选的 SQLite 日志库（默认关闭）。None = 还没初始化（模块 import 期），启动时按
 # settings 建好，之后由面板开关驱动 wb_logstore.LogStore.configure()。关闭时它
 # 要么是 None、要么 enabled=False，整条日志路径与上游一字不差：只写内存环形
 # 缓冲，不建库、不落盘。
@@ -10670,21 +10799,34 @@ def add_log_entry(msg, level=None, tag=None):
             "msg": msg_str,
         }
         LOG_BUFFER.append(entry)
-    # 落库在锁外：append 只是入队，但没必要把持锁时间拉长到调用 queue.put。
+    # 写数据库在锁外：append 只是入队，但没必要把持锁时间拉长到调用 queue.put。
+    # 入队失败（线程已停、队列坏了）只丢这一行日志，不把异常抛给调用方。
     if _log_db_active():
-        LOG_STORE.append(entry)
+        try:
+            LOG_STORE.append(entry)
+        except Exception:
+            pass
     return entry
 
 def log(msg, level=None, tag=None):
-    sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
-    sys.stderr.flush()
-    add_log_entry(msg, level=level, tag=tag)
+    # 启动它的终端被回收后，stderr 的读端消失，写入会抛 OSError。异常发生在
+    # 响应头之前时整条请求会空连接关闭，日志坏了最多丢一行，不能打死请求。
+    try:
+        sys.stderr.write(f"[wb-proxy] {time.strftime('%H:%M:%S')} {msg}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        add_log_entry(msg, level=level, tag=tag)
+    except Exception:
+        pass
+
 
 # 本地网络工具的多引擎轮换、冷却与失败分类写进看板日志（tag=webtools）
 wb_webtools.set_logger(log)
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
-    # 落库开启时以数据库为准：它是完整历史（受保留上限约束），而内存环形缓冲
+    # 写入数据库开启时以数据库为准：它是完整历史（受保留上限约束），而内存环形缓冲
     # 只留最新 2000 条，拿它回答会看不到刚过去的窗口。查询失败或超时就退回内存，
     # 面板宁可少看历史，也不能因为日志库出问题而整页空白。
     if _log_db_active():
@@ -11907,9 +12049,20 @@ def sanitize_tool_calls(tool_calls):
         if isinstance(tc, dict):
             item = dict(tc)
             fn = item.get("function")
-            if isinstance(fn, dict) and isinstance(fn.get("arguments"), str):
+            if isinstance(fn, dict):
                 fn = dict(fn)
-                fn["arguments"] = sanitize_text(fn["arguments"])
+                raw = fn.get("arguments")
+                if isinstance(raw, str):
+                    fn["arguments"] = sanitize_text(raw)
+                elif raw is None:
+                    fn["arguments"] = "{}"
+                else:
+                    # 上游 Go 结构要求 arguments 是字符串；客户端传对象、数组、
+                    # 数字或布尔值时统一转成 JSON 文本，避免 11101。
+                    try:
+                        fn["arguments"] = json.dumps(raw, ensure_ascii=False)
+                    except Exception:
+                        fn["arguments"] = str(raw)
                 item["function"] = fn
             out.append(item)
         else:
@@ -12284,27 +12437,151 @@ def normalize_tool_choice(obj):
             obj.pop("tool_choice", None)
     else:
         obj.pop("tool_choice", None)
+_SCHEMA_TYPE_MAP = {
+    "str": "string",
+    "text": "string",
+    "int": "integer",
+    "bool": "boolean",
+    "dict": "object",
+    "list": "array",
+    "float": "number",
+}
+_SCHEMA_VALID_TYPES = {"string", "number", "integer", "boolean", "array", "object", "null"}
+
+
+def _deep_normalize_schema(schema):
+    """递归规整工具参数 JSON Schema，避免上游 Go 校验器回 11129。
+
+    处理嵌套对象、数组、definitions、anyOf/oneOf/allOf，以及客户端常见的
+    Python 类型别名与 null 元数据。
+    """
+    if not isinstance(schema, dict):
+        return schema
+    for key in list(schema.keys()):
+        if schema[key] is None and key in (
+                "description", "title", "format", "pattern", "items", "default"):
+            schema.pop(key, None)
+    if "type" in schema:
+        typ = schema["type"]
+        if isinstance(typ, str):
+            lower = typ.strip().lower()
+            if lower in _SCHEMA_TYPE_MAP:
+                schema["type"] = _SCHEMA_TYPE_MAP[lower]
+            elif lower not in _SCHEMA_VALID_TYPES:
+                if "properties" in schema:
+                    schema["type"] = "object"
+                elif "items" in schema:
+                    schema["type"] = "array"
+                else:
+                    schema.pop("type", None)
+            else:
+                schema["type"] = lower
+        elif isinstance(typ, list):
+            schema["type"] = [
+                _SCHEMA_TYPE_MAP.get(str(item).lower(), str(item).lower())
+                for item in typ if item]
+    if schema.get("type") == "object" or ("properties" in schema and schema.get("type") is None):
+        if schema.get("type") is None:
+            schema["type"] = "object"
+        if not isinstance(schema.get("properties"), dict):
+            schema["properties"] = {}
+    if "required" in schema:
+        required = schema["required"]
+        if isinstance(required, list):
+            cleaned = [str(item) for item in required
+                       if item is not None and str(item).strip()]
+            if cleaned:
+                schema["required"] = cleaned
+            else:
+                schema.pop("required", None)
+        elif isinstance(required, str) and required.strip():
+            schema["required"] = [required.strip()]
+        else:
+            schema.pop("required", None)
+    if "items" in schema:
+        items = schema["items"]
+        if isinstance(items, list):
+            first = next((item for item in items if isinstance(item, dict)), None)
+            schema["items"] = (_deep_normalize_schema(dict(first))
+                               if first is not None else {"type": "string"})
+        elif isinstance(items, dict):
+            _deep_normalize_schema(items)
+        elif items is None:
+            schema.pop("items", None)
+    if isinstance(schema.get("properties"), dict):
+        for value in list(schema["properties"].values()):
+            if isinstance(value, dict):
+                _deep_normalize_schema(value)
+    for key in ("$defs", "definitions"):
+        if isinstance(schema.get(key), dict):
+            for value in list(schema[key].values()):
+                if isinstance(value, dict):
+                    _deep_normalize_schema(value)
+    for key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(schema.get(key), list):
+            for value in schema[key]:
+                if isinstance(value, dict):
+                    _deep_normalize_schema(value)
+    return schema
+
+
+def _normalize_tool_parameters(fn):
+    """把函数参数规整成上游要求的对象 schema；函数参数不是对象时重置为对象。"""
+    params = fn.get("parameters")
+    if not isinstance(params, dict):
+        params = {}
+        fn["parameters"] = params
+    if params.get("type") != "object":
+        params["type"] = "object"
+    if not isinstance(params.get("properties"), dict):
+        params["properties"] = {}
+    _deep_normalize_schema(params)
+    fn["parameters"] = params
+
+
 def normalize_tools(obj):
+    # 旧客户端可能仍发根级 functions，先折叠成 tools。
+    if "functions" in obj and "tools" not in obj:
+        funcs = obj.pop("functions")
+        if isinstance(funcs, list):
+            obj["tools"] = [{"type": "function", "function": item}
+                            for item in funcs if isinstance(item, dict)]
     tools = obj.get("tools")
     if not tools or not isinstance(tools, list):
+        if "tools" in obj:
+            obj.pop("tools", None)
         return
     norm = []
-    for t in tools:
-        if not isinstance(t, dict):
+    for tool in tools:
+        if not isinstance(tool, dict):
             continue
-        # Wrap top-level name tool definition into Chat Completions function schema
-        if "name" in t and "function" not in t and t.get("type") == "function":
+        # 顶层 name 定义的简化工具：补成 Chat Completions 的 function schema。
+        # 只处理没有类型或明确是 function 的条目；web_search、custom 等服务端
+        # 工具必须原样保留，否则会改变客户端自己的工具声明。
+        if ("name" in tool and "function" not in tool
+                and tool.get("type") in (None, "", "function")):
             fn = {
-                "name": t.get("name") or "",
-                "description": t.get("description") or "",
-                "parameters": t.get("parameters") or {},
+                "name": tool.get("name") or "",
+                "description": tool.get("description") or "",
+                "parameters": tool.get("parameters") or {},
             }
-            if "strict" in t:
-                fn["strict"] = t["strict"]
+            if "strict" in tool:
+                fn["strict"] = tool["strict"]
+            _normalize_tool_parameters(fn)
             norm.append({"type": "function", "function": fn})
-        else:
-            norm.append(t)
-    obj["tools"] = norm
+            continue
+        item = dict(tool)
+        if item.get("type") in (None, ""):
+            item["type"] = "function"
+        if isinstance(item.get("function"), dict):
+            fn = dict(item["function"])
+            _normalize_tool_parameters(fn)
+            item["function"] = fn
+        norm.append(item)
+    if norm:
+        obj["tools"] = norm
+    else:
+        obj.pop("tools", None)
 # ---------------------------------------------------------------------------
 # Stop Sequence Normalization (avoids code 11101 on a string stop)
 # ---------------------------------------------------------------------------
@@ -13110,8 +13387,7 @@ def prompt_cache_key_enabled():
     nor the charge, so it is left as an opt-in for experimenting rather than
     added to every request.
     """
-    return os.environ.get("WB_PROMPT_CACHE_KEY", "0").strip().lower() in (
-        "1", "true", "yes", "on")
+    return wb_settings.prompt_cache_key(ACCOUNTS_DIR)
 
 
 def inject_prompt_cache_key(body, uid, conversation):
@@ -13376,6 +13652,75 @@ def is_transient(exc):
         "bad gateway", "502", "503", "504", "incompleteread",
     )
     return any(m in t for m in markers)
+
+
+# 上游正文表明「模型或服务不可用」而不是凭据问题：11134 模型提供方暂不可用、
+# 11102 服务信息不存在、11150 思考档位不支持、11158 模型不可用、11129 函数
+# 参数非法。命中时不该让这个账号背故障，否则一个坏模型会熔断整个账号池。
+MODEL_SCOPED_ERROR_CODES = frozenset((11102, 11129, 11134, 11150, 11158))
+
+
+def upstream_error_code(detail):
+    """上游错误正文里的数字 code，取不到时返回 None。"""
+    try:
+        payload = json.loads(detail or "")
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return int(payload.get("code"))
+    except (TypeError, ValueError):
+        return None
+
+
+def http_error_detail(exc, limit=600):
+    """读一次 HTTPError 正文并把字节留在异常上，后续读取仍能拿到。"""
+    try:
+        raw = exc.read(limit)
+    except Exception:
+        return ""
+    try:
+        exc.wb_body = raw
+    except Exception:
+        pass
+    return raw.decode("utf-8", "replace")
+
+
+def read_http_error(exc, limit=600):
+    """取 http_error_detail 读到的字节；其他异常走普通读取。"""
+    raw = getattr(exc, "wb_body", None)
+    if raw is not None:
+        return raw[:limit]
+    try:
+        return exc.read(limit)
+    except Exception:
+        return b""
+
+
+def model_scoped_errors_penalize_account():
+    """兼容开关：恢复「任何 5xx 都记在账号上」的旧行为。"""
+    raw = os.environ.get("WB_MODEL_SCOPED_ERRORS_PENALIZE", "")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+#: 401 正文里指向凭据本身的说法。中间层 nginx/openresty 的 HTML 错误页不算。
+_AUTH_FAILURE_MARKERS = ("401", "unauthorized", "authorization failed",
+                         "invalid_token", "invalid token", "token expired",
+                         "token invalid")
+
+
+def auth_failure_text(text):
+    """401 是否指向凭据本身，而不是中间代理返回的 HTML 错误页。
+
+    HTML 401 说明链路中间有别的服务在拒绝，令牌可能完全正常；据此冷却账号
+    会把健康凭证锁到手动重新登录。
+    """
+    low = str(text or "").lower()
+    if "<html" in low or "<!doctype" in low:
+        return False
+    return any(marker in low for marker in _AUTH_FAILURE_MARKERS)
+
 
 # 「本机没网」的指纹：DNS 解析不出来、路由不可达、网卡没起来。这些失败里账号
 # 连一个字节都没发出去，结局却和「上游挂了」长得一样（都是 URLError），所以必须
@@ -13814,10 +14159,7 @@ _FREE_MODEL_CREDIT_FALLBACKS = {
 
 
 def _free_model_credit_fallback_enabled():
-    if wb_settings.free_model_credit_fallback(ACCOUNTS_DIR):
-        return True
-    return os.environ.get("WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK", "0").strip().lower() in (
-        "1", "true", "yes", "on")
+    return wb_settings.free_model_credit_fallback(ACCOUNTS_DIR)
 
 
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
@@ -13830,17 +14172,19 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # share the same fold, and calling them separately paid for it three
     # times on every request.
     apply_daily_guards()
+    # 评分分配用今日消耗速度算欠账：这一项必须跟着当天用量推进。底层的日折叠
+    # 有 15 秒 TTL 且增量读取，热请求只付一次字典拷贝；智能分配关着时直接返回。
+    apply_routing_inputs()
     # 账号被上游限制过就一个请求都不再发：继续轮询下一个账号会把账号池关联起来。
     if stand_down_active():
         raise GatewayStandDown(STAND_DOWN.get("detail") or "",
                                account_uid=STAND_DOWN.get("uid") or None)
-    # 剩余用量优先调度（开关默认关）：把「估计剩余接近耗尽」的 (账号, 模型)
-    # 权重推给池，让它们先接单。只在开关打开时读剩余估算（载荷有短 TTL，热路径
-    # 上是缓存命中）；关着时推空表，把上一次可能留下的权重清掉，下一个请求就
-    # 回到与从前逐字节一致的纯轮询。
+    # 剩余用量估计并入智能分配：把「估计剩余接近耗尽」的 (账号, 模型) 权重
+    # 推给池，作为评分的一点倾斜。智能分配关着时不需要它，直接清空，省掉
+    # 剩余估算的读取成本。
     if POOL is not None:
-        POOL.apply_remaining_weights(
-            remaining_schedule_weights() if remaining_priority_enabled() else None)
+        smart = bool(getattr(POOL, "smart_routing", False))
+        POOL.apply_remaining_weights(remaining_schedule_weights() if smart else None)
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
     # 复用调用方已建好的 body：/v1/chat/completions 在进这里之前已经 build 过
@@ -13856,7 +14200,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     affinity_page = None
     if not session_key:
         session_key, affinity_page = affinity_route(upstream_body.get("messages"))
-        if session_key and AFFINITY_DEBUG:
+        if session_key and affinity_debug_enabled():
             log("affinity: derived %s for %d msgs"
                 % (session_key, len(upstream_body.get("messages") or [])))
     if not wb_settings.session_affinity(ACCOUNTS_DIR):
@@ -13865,6 +14209,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         affinity_page = None
     total = max(1, POOL.count_ready(realm, model=model)) if POOL else 1
     tried = set()
+    # 同一次请求内每个账号最多刷新一次 token：401 可能只是访问令牌过期，
+    # 先刷新再重试同号，减少把还能恢复的凭证当成坏号冷却。
+    refreshed_401 = set()
     # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
     # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
     # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
@@ -14002,7 +14349,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 body_reset = parse_rate_limit_reset(detail)
@@ -14075,7 +14422,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 continue
             if exc.code == 403:
                 try:
-                    detail = exc.read(600).decode("utf-8", "replace")
+                    detail = read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 # 先分流：上游风控限制（code 11140「账号存在异常行为，已被限制
@@ -14111,7 +14458,7 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 break
             if exc.code == 402:
                 try:
-                    detail = exc.read(400).decode("utf-8", "replace")
+                    detail = read_http_error(exc, 400).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
                 account.note_balance_cooled(detail or "HTTP 402 (insufficient credits)")
@@ -14122,6 +14469,26 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 last_error = exc
                 continue
             if exc.code == 401:
+                if account.uid not in refreshed_401:
+                    refreshed_401.add(account.uid)
+                    if account.refresh():
+                        tried.discard(account.uid)
+                        log("account %s rejected (HTTP 401), token refreshed; "
+                            "retrying the same account" % account.uid[:8])
+                        last_error = exc
+                        continue
+                    log("account %s rejected (HTTP 401), refresh failed"
+                        % account.uid[:8])
+                detail = read_http_error(exc, 400).decode("utf-8", "replace")
+                if not auth_failure_text("HTTP 401 " + detail):
+                    # 中间层代理的 HTML 401 不代表令牌失效，冷却健康账号会让它
+                    # 一直停到手动重新登录。只换号，不记故障。
+                    log("account %s got a non-credential 401; rotating without "
+                        "cooling" % account.uid[:8])
+                    if session_key and POOL:
+                        POOL.affinity.demote(session_key, account.uid)
+                    last_error = exc
+                    continue
                 log("account %s rejected (HTTP 401), rotating" % account.uid[:8])
                 if session_key and POOL:
                     POOL.affinity.demote(session_key, account.uid)
@@ -14131,6 +14498,16 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 last_error = exc
                 continue
             if exc.code >= 500:
+                detail = http_error_detail(exc)
+                code = upstream_error_code(detail)
+                if (code in MODEL_SCOPED_ERROR_CODES
+                        and not model_scoped_errors_penalize_account()):
+                    # 坏模型不该熔断整个账号池：正文说这是模型或服务的问题，
+                    # 不是凭据问题。停止轮换，把上游原文交回客户端。
+                    log("upstream %s for '%s' (code %s, model-scoped); "
+                        "not charging the account" % (exc.code, model, code))
+                    last_error = exc
+                    break
                 # 一切服务端 5xx（含上游自定义的 550 这类）都按瞬时故障轮转，
                 # 不在已知清单里的也不能把错误原样甩回客户端——换号是默认，
                 # 全试完才交出去。
@@ -14424,7 +14801,7 @@ def probe_account(account, model=None, timeout=30):
     except urllib.error.HTTPError as exc:
         row["elapsed_ms"] = int((time.time() - t0) * 1000)
         try:
-            detail = exc.read(400).decode("utf-8", "replace")
+            detail = read_http_error(exc, 400).decode("utf-8", "replace")
         except Exception:
             detail = str(exc)
         if looks_like_local_network(exc):
@@ -15165,7 +15542,7 @@ def build_citations(text, sources):
 
 def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_start,
                                 lease=None, drop_tools=False):
-    """执行反代代跑的网络工具，把结果喂回模型，返回新的上游连接。
+    """执行网络工具并把结果喂回模型，返回新的上游连接。
 
     drop_tools=True 表示最后一轮：从工具清单收回网络工具，模型只能用手上的
     结果收尾。回合用尽时直接失败，不合成 status=completed、output=[] 的
@@ -15621,6 +15998,45 @@ def _anthropic_block_text(block):
     return ""
 
 
+def _anthropic_tool_result_content(value, is_error=None):
+    """工具结果里的图片保留结构化 image_url，纯文本仍压成一个字符串。
+
+    上游把 data URL 当普通文本计费，一张截图就可能把长上下文顶过限制；
+    有图片时返回多段 content，没有图片时保持原来的字符串形态。
+    """
+    if not isinstance(value, list):
+        return _anthropic_content_to_text(value, is_error)
+    parts = []
+    has_image = False
+    for item in value:
+        if not isinstance(item, dict):
+            if isinstance(item, str):
+                parts.append({"type": "text", "text": item})
+            continue
+        typ = str(item.get("type") or "")
+        if typ == "image":
+            part = _anthropic_image_part(item)
+            url = (part.get("image_url") or {}).get("url")
+            if url:
+                has_image = True
+                parts.append(part)
+            else:
+                parts.append({"type": "text", "text": "[image omitted: no data]"})
+        elif typ == "document":
+            parts.append({"type": "text", "text": _anthropic_document_text(item)})
+        else:
+            text = _anthropic_block_text(item)
+            if text:
+                parts.append({"type": "text", "text": text})
+    if not has_image:
+        joined = "".join(part.get("text", "") for part in parts
+                         if part.get("type") == "text")
+        return ("error: " + joined) if is_error is True else joined
+    if is_error is True:
+        parts.insert(0, {"type": "text", "text": "error:"})
+    return parts
+
+
 def _anthropic_image_part(block):
     source = block.get("source") if isinstance(block, dict) else None
     url = ""
@@ -15778,8 +16194,8 @@ def _anthropic_blocks_to_messages(role, blocks):
             tool_messages.append({
                 "role": "tool",
                 "tool_call_id": _anthropic_text(block.get("tool_use_id")),
-                "content": _anthropic_content_to_text(block.get("content"),
-                                                      block.get("is_error")),
+                "content": _anthropic_tool_result_content(block.get("content"),
+                                                          block.get("is_error")),
             })
             continue
         if typ == "image":
@@ -16333,7 +16749,7 @@ def stream_responses_events(upstream, model, holder):
     saw_done = False
     custom_names = set(holder.get("custom_names") or ())
     ns_map = holder.get("namespace_map") or {}
-    # 由反代代跑的网络工具调用，收集起来不转发给客户端
+    # 由反向代理代为执行的网络工具调用，收集起来不转发给客户端
     _internal_calls = {}
     # Only reach for same-named calls when this request's definitions were the
     # gateway's own (see web_tools_active); otherwise they belong to the client.
@@ -16477,7 +16893,7 @@ def stream_responses_events(upstream, model, holder):
                 full_text = clean_text
         if dsml_calls and not tool_calls_map:
             for dc in dsml_calls:
-                # DSML 形状的网络工具调用一样由反代执行
+                # DSML 形状的网络工具调用一样由反向代理执行
                 if _own_web_tools and wb_webtools.is_internal_tool(dc.get("name")):
                     entry = _internal_calls.setdefault(dc.get("id") or _new_id("call_"),
                                                        {"name": dc.get("name"), "arguments": "{}"})
@@ -16663,7 +17079,7 @@ def stream_responses_events(upstream, model, holder):
                 fn_name = fn.get("name") or ""
                 fn_args = fn.get("arguments") or ""
                 call_id = tc.get("id") or ""
-                # web_search / web_fetch 由反代执行，不转发给客户端
+                # web_search / web_fetch 由反向代理执行，不转发给客户端
                 if idx in _internal_calls or (
                         _own_web_tools and fn_name
                         and wb_webtools.is_internal_tool(fn_name)):
@@ -16880,10 +17296,7 @@ def _cache_etag(kind, key, built_at):
 
 
 def _anthropic_messages_enabled():
-    if wb_settings.enable_anthropic_messages(ACCOUNTS_DIR):
-        return True
-    return os.environ.get("WB_ENABLE_ANTHROPIC_MESSAGES", "").strip().lower() in (
-        "1", "true", "yes", "on")
+    return wb_settings.enable_anthropic_messages(ACCOUNTS_DIR)
 
 # ---------------------------------------------------------------------------
 # Per-key concurrency tracking (#359)
@@ -17759,6 +18172,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_accounts_login_poll(query)
         if path == "/usage/analytics":
             return self._get_usage_analytics(query)
+        if path == "/usage/cost-estimate":
+            return self._get_usage_cost_estimate(query)
+        if path == "/usage/month-credit":
+            return self._get_usage_month_credit(query)
         if path == "/usage/by-account":
             return self._get_usage_by_account()
         if path == "/usage/remaining":
@@ -18185,6 +18602,23 @@ class Handler(BaseHTTPRequestHandler):
             lambda: usage_analytics_etag(realm=req_realm, range=req_range,
                                          since=req_since, until=req_until))
 
+    def _get_usage_cost_estimate(self, query):
+        if not self._authorized():
+            return
+        req_realm = query.get("realm", [None])[0] or None
+        req_range, req_since, req_until = range_query(query)
+        return self._json(200, cost_estimate_view(
+            realm=req_realm, range=req_range, since=req_since, until=req_until))
+
+    def _get_usage_month_credit(self, query):
+        if not self._authorized():
+            return
+        req_realm = query.get("realm", [None])[0] or None
+        return self._json_cached(
+            200,
+            lambda: month_credit_view(realm=req_realm),
+            lambda: month_credit_etag(realm=req_realm))
+
     def _get_usage_by_account(self):
         if not self._authorized():
             return
@@ -18301,6 +18735,7 @@ class Handler(BaseHTTPRequestHandler):
             "current_version": running_version(),
             "latest_version": None, "update_available": False,
             "enabled": wb_settings.update_check_enabled(ACCOUNTS_DIR),
+            "interval_hours": wb_settings.update_check_interval_hours(ACCOUNTS_DIR),
             "checking": False, "last_attempt": None, "last_success": None,
             "last_error": "", "release_url": "", "published_at": "",
             "msg": "更新检查未运行",
@@ -18321,7 +18756,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             since_id = 0
         result = get_logs(limit=limit, level=level, tag=tag, search=search, since_id=since_id)
-        # 面板要据 mode 决定顶部文案（内存保留 vs 落库保留）与是否显示库容量，
+        # 面板要据 mode 决定顶部文案（内存保留与数据库保留）与是否显示库容量，
         # 所以把模式与库统计一并带回；统计失败不该让整个日志请求失败。
         result["mode"] = "db" if _log_db_active() else "memory"
         if _log_db_active():
@@ -18748,6 +19183,12 @@ class Handler(BaseHTTPRequestHandler):
             reply["pricing_enabled"] = raw
             if PRICING:
                 PRICING.wake()
+        if "cost_estimate" in payload:
+            try:
+                reply["cost_estimate"] = wb_settings.set_cost_estimate(
+                    ACCOUNTS_DIR, payload.get("cost_estimate"))
+            except ValueError as exc:
+                return self._error(400, str(exc), "invalid_request_error")
         if "pricing_refresh_minutes" in payload or "pricing_refresh_hours" in payload:
             # The interval is in minutes. The old field name is still accepted
             # (x60) so a panel page cached from the previous build cannot set
@@ -18856,6 +19297,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "free_model_credit_fallback must be true or false", "invalid_request_error")
             wb_settings.set_free_model_credit_fallback(ACCOUNTS_DIR, raw)
             reply["free_model_credit_fallback"] = raw
+        for key, setter in (
+                ("prompt_cache_key", wb_settings.set_prompt_cache_key),
+                ("affinity_debug", wb_settings.set_affinity_debug),
+                ("upstream_keepalive", wb_settings.set_upstream_keepalive),
+                ("usage_cache", wb_settings.set_usage_cache),
+                ("usage_day_buckets", wb_settings.set_usage_day_buckets),
+                ("recent_index", wb_settings.set_recent_index)):
+            if key not in payload:
+                continue
+            raw = payload.get(key)
+            if not isinstance(raw, bool):
+                return self._error(400, "%s must be true or false" % key,
+                                   "invalid_request_error")
+            reply[key] = setter(ACCOUNTS_DIR, raw)
+        if "trusted_proxies" in payload:
+            raw = payload.get("trusted_proxies")
+            if not isinstance(raw, str):
+                return self._error(400, "trusted_proxies must be a string",
+                                   "invalid_request_error")
+            cleaned = ",".join(str(net) for net in parse_trusted_proxies(raw))
+            reply["trusted_proxies"] = wb_settings.set_trusted_proxies(
+                ACCOUNTS_DIR, cleaned)
         if "auto_switch_product" in payload:
             # Strictly a JSON boolean: a string like "false" would be truthy and
             # silently switch the feature on, which is the one thing an operator
@@ -18948,30 +19411,18 @@ class Handler(BaseHTTPRequestHandler):
                                    "invalid_request_error")
             wb_settings.set_local_web_tools(ACCOUNTS_DIR, raw)
             reply["local_web_tools"] = raw
-        if "remaining_priority_enabled" in payload:
-            raw = payload.get("remaining_priority_enabled")
-            if not isinstance(raw, bool):
-                return self._error(400, "remaining_priority_enabled must be true or false",
-                                   "invalid_request_error")
-            wb_settings.set_remaining_priority_enabled(ACCOUNTS_DIR, raw)
-            reply["remaining_priority_enabled"] = raw
         if "egress_backoff_enabled" in payload:
-            # 出口级瞬时失败退避（issue #271）：与 remaining_priority_enabled
-            # 同一形状——严格 JSON 布尔，字符串 "false" 会是真值。
+            # 出口级瞬时失败退避（issue #271）：严格 JSON 布尔，字符串 "false"
+            # 会是真值。
             raw = payload.get("egress_backoff_enabled")
             if not isinstance(raw, bool):
                 return self._error(400, "egress_backoff_enabled must be true or false",
                                    "invalid_request_error")
             wb_settings.set_egress_backoff_enabled(ACCOUNTS_DIR, raw)
             reply["egress_backoff_enabled"] = raw
-            if not raw and POOL is not None:
-                # 关掉就立刻清掉池里上一次推的权重，不等下一个请求；打开则
-                # 由下一个请求照常推（此刻就算推也要先折一次剩余估算，没必要
-                # 为一个开关多付这一趟）。
-                POOL.apply_remaining_weights(None)
         if "log_db_enabled" in payload or "log_db_max_rows" in payload \
                 or "log_db_max_days" in payload or "log_db_max_bytes" in payload:
-            # 日志落库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
+            # 日志写入数据库（默认关闭）：开关与三条保留上限一次提交里可以任选子集，
             # 没带到的键原样保留。上限留空（null / "" / 0）一律存成「不限」。
             log_db_touched = False
             if "log_db_enabled" in payload:
@@ -19036,7 +19487,7 @@ class Handler(BaseHTTPRequestHandler):
             reply["hidden_pages"] = wb_settings.set_hidden_pages(ACCOUNTS_DIR, raw)
         if "update_check_enabled" in payload:
             # Strictly a JSON boolean, like the switches above: "false" as a
-            # string would be truthy and silently start the daily GitHub call.
+            # string would be truthy and silently start the GitHub call.
             raw = payload.get("update_check_enabled")
             if not isinstance(raw, bool):
                 return self._error(400, "update_check_enabled must be true or false",
@@ -19045,6 +19496,20 @@ class Handler(BaseHTTPRequestHandler):
             reply["update_check_enabled"] = raw
             if UPDATES and raw:
                 # Turning it on should not wait out the rest of the poll sleep.
+                UPDATES.wake()
+        if "update_check_interval_hours" in payload:
+            raw = payload.get("update_check_interval_hours")
+            if isinstance(raw, bool) or not isinstance(raw, int):
+                return self._error(400, "update_check_interval_hours must be an integer",
+                                   "invalid_request_error")
+            if raw < 1 or raw > wb_settings.UPDATE_CHECK_INTERVAL_MAX:
+                return self._error(400, "update_check_interval_hours must be between 1 and %d"
+                                   % wb_settings.UPDATE_CHECK_INTERVAL_MAX,
+                                   "invalid_request_error")
+            reply["update_check_interval_hours"] = \
+                wb_settings.set_update_check_interval_hours(ACCOUNTS_DIR, raw)
+            if UPDATES:
+                # 新间隔可能已经放行，立刻让后台线程重新判断一次。
                 UPDATES.wake()
         if "upstream" in payload:
             raw = payload.get("upstream")
@@ -19067,7 +19532,6 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._error(400, str(exc), "invalid_request_error")
             wb_settings.set_usage_config(ACCOUNTS_DIR, patch)
-            reply["usage"] = wb_settings.usage_config(ACCOUNTS_DIR)
         if "prompt" in payload:
             raw = payload.get("prompt")
             if not isinstance(raw, dict):
@@ -19449,7 +19913,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/panel/login":
             peer_ip = self.client_address[0] if hasattr(self, "client_address") and self.client_address else "127.0.0.1"
-            # 限流键不能直接取对端地址：反代后对端是代理本身，见 login_rate_limit_key
+            # 限流键不能直接取对端地址：反向代理后对端是代理本身，见 login_rate_limit_key
             client_ip = login_rate_limit_key(peer_ip, getattr(self, "headers", None))
             now = time.time()
             with _login_lock:
@@ -19667,6 +20131,7 @@ class Handler(BaseHTTPRequestHandler):
         from wb_tasks import run_growth_tasks
         combined_logs = []
         total_credit = 0
+        busy = []
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
             nick = acc.nickname or uid_str
@@ -19676,18 +20141,26 @@ class Handler(BaseHTTPRequestHandler):
             # reading the old "credit_added" name silently summed zeros
             # and the dashboard always showed "+0 积分".
             total_credit += res.get("earned_credit") or 0
+            if res.get("busy"):
+                busy.append(acc.uid)
             for l in res.get("logs") or []:
                 combined_logs.append(f"  {l}")
             if i < len(targets) - 1:
                 time.sleep(1.5)
         combined_logs.append(f"====== 全部 {len(targets)} 个账号任务执行完毕，累计新增积分: +{total_credit} ======")
         add_log_entry(f"[任务福利] 批量成长任务执行完成，共 {len(targets)} 个账号，新增积分 +{total_credit}", tag="tasks")
-        return self._json(200, {
-            "ok": True,
+        out = {
+            "ok": not (busy and len(busy) == len(targets)),
             "credit_added": total_credit,
             "logs": combined_logs,
-            "accounts_count": len(targets)
-        })
+            "accounts_count": len(targets),
+        }
+        if busy:
+            out["busy_accounts"] = busy
+            out["msg"] = "部分账号正在执行其他成长任务，本次已跳过"
+            if len(busy) == len(targets):
+                out["msg"] = "所有目标账号都在执行其他成长任务，请稍后再试"
+        return self._json(200, out)
 
     def _route_tasks_streak_bonus(self, payload):
         if not POOL:
@@ -19705,15 +20178,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import run_streak_bonus
         results = []
+        busy = []
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
             nick = acc.nickname or uid_str
             res = run_streak_bonus(acc)
+            if res.get("busy"):
+                busy.append(acc.uid)
             results.append(f"{nick}: {res.get('msg')}")
             add_log_entry(f"[任务福利] 账号 [{nick}] 连登管家与抽奖: {res.get('msg')}", tag="tasks")
             if i < len(targets) - 1:
                 time.sleep(1.0)
-        return self._json(200, {"ok": True, "msg": chr(10).join(results)})
+        out = {
+            "ok": not (busy and len(busy) == len(targets)),
+            "msg": chr(10).join(results),
+        }
+        if busy:
+            out["busy_accounts"] = busy
+            if len(busy) == len(targets):
+                out["msg"] = "所有目标账号都在执行其他成长任务，请稍后再试"
+        return self._json(200, out)
 
     def _route_tasks_travel(self, payload):
         if not POOL:
@@ -19731,15 +20215,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": False, "msg": "未找到已启用的国内版账号"})
         from wb_tasks import do_cat_travel
         results = []
+        busy = []
         for i, acc in enumerate(targets):
             uid_str = acc.uid[:8] if acc.uid else "?"
             nick = acc.nickname or uid_str
             res = do_cat_travel(acc)
+            if res.get("busy"):
+                busy.append(acc.uid)
             results.append({
                 "uid": acc.uid,
                 "nickname": nick,
                 "action": res.get("action"),
                 "msg": res.get("msg") or "",
+                "busy": bool(res.get("busy")),
                 # do_cat_travel() returns the amount as "credit".
                 "reward_credit": res.get("credit", 0)
             })
@@ -19748,12 +20236,17 @@ class Handler(BaseHTTPRequestHandler):
         summary_msg = chr(10).join([f"{r['nickname']}: {r['msg']}" for r in results])
         for r in results:
             add_log_entry(f"[任务福利] 账号 [{r['nickname']}] 猫猫旅行: {r['msg']}", tag="tasks")
-        return self._json(200, {
-            "ok": True,
+        out = {
+            "ok": not (busy and len(busy) == len(targets)),
             "results": results,
             "msg": summary_msg,
-            "accounts_count": len(targets)
-        })
+            "accounts_count": len(targets),
+        }
+        if busy:
+            out["busy_accounts"] = busy
+            if len(busy) == len(targets):
+                out["msg"] = "所有目标账号都在执行其他成长任务，请稍后再试"
+        return self._json(200, out)
 
     def _route_update_check(self):
         """Run one release check now, on the operator's explicit request.
@@ -20350,7 +20843,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
+            detail = read_http_error(exc, 600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
@@ -20394,7 +20887,7 @@ class Handler(BaseHTTPRequestHandler):
                   "realm": realm}
         first_ms = None
         try:
-            # 一轮跑完如果模型要的是 web_search / web_fetch，就由反代
+            # 一轮跑完如果模型要的是 web_search / web_fetch，就由反向代理
             # 执行、把结果喂回去再跑一轮。客户端从头到尾只看到一则连续的回应。
             rounds = 0
             total_usage = None
@@ -20491,7 +20984,7 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, lease=None):
-        # 跟流式那条一样：客户端声明 web_search / web_fetch 时由反代代跑。
+        # 跟流式那条一样：客户端声明 web_search / web_fetch 时由反向代理代为执行。
         # 中间那几轮对客户端不可见，最后才组成一个 Responses 对象返回；不这样
         # 做的话 web_search 的 function_call 会直接漏给客户端，客户端只会回
         # 一句 unsupported call。
@@ -20630,7 +21123,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._anthropic_rate_limited(exc)
         except urllib.error.HTTPError as exc:
             try:
-                detail = exc.read(600).decode("utf-8", "replace")
+                detail = read_http_error(exc, 600).decode("utf-8", "replace")
             except Exception:
                 detail = str(exc)
             record_error(model, exc.code, detail,
@@ -20857,8 +21350,8 @@ class Handler(BaseHTTPRequestHandler):
                 "Anthropic Messages is disabled by default: this gateway "
                 "translates requests to Chat Completions and ignores "
                 "cache_control. This can cause excessive credit consumption. "
-                "Enable it in the Settings panel or set WB_ENABLE_ANTHROPIC_MESSAGES=1 "
-                "to opt in at your own risk (see issue #367).",
+                "Enable it in Settings → Advanced to opt in at your own risk "
+                "(see issue #367).",
                 "invalid_request_error")
         payload = self._payload_or_error(allow_list=(path == "/accounts/import"))
         if payload is None:
@@ -20987,7 +21480,7 @@ class Handler(BaseHTTPRequestHandler):
                          key=self._key_id())
             return self._rate_limited(exc)
         except urllib.error.HTTPError as exc:
-            detail = exc.read(600).decode("utf-8", "replace")
+            detail = read_http_error(exc, 600).decode("utf-8", "replace")
             record_error(model, exc.code, detail,
                          elapsed_ms=int((time.time() - t_start) * 1000),
                          account=getattr(exc, "account_uid", None),
@@ -21324,7 +21817,7 @@ def _probe_running_instance(args):
             print()
             raise SystemExit(1)
         print()
-        print(f"  [已有一个反代在 {args.port} 端口运行，无需重复启动]")
+        print(f"  [已有一个反向代理在 {args.port} 端口运行，无需重复启动]")
         print(f"  账号: {existing.get('uid', '?')} @ {existing.get('domain', '?')}")
         print(f"  看板: http://127.0.0.1:{args.port}/")
         print()
@@ -21344,7 +21837,7 @@ def _bootstrap_runtime(args):
     SYSTEM_PROMPT = args.system_prompt
     if args.accounts_dir:
         ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
-    # 日志落库（默认关闭）：在账号池之前初始化，好让「池加载失败」这类最需要
+    # 日志写入数据库（默认关闭）：在账号池之前初始化，好让「池加载失败」这类最需要
     # 事后留档的启动日志也能进库。关闭时这里只造一个 enabled=False 的空壳，
     # 不建文件、不改日志路径。
     LOG_STORE = wb_logstore.LogStore(os.path.join(USAGE_DIR, "logs.sqlite3"))
@@ -21396,6 +21889,7 @@ def _bootstrap_runtime(args):
     # The panel's pricing switches (master switch, variant inheritance) live in
     # settings.json; point the pricing side at the same file the panel writes.
     wb_pricing.set_settings_dir(ACCOUNTS_DIR)
+    wb_upstream_pool.set_settings_dir(ACCOUNTS_DIR)
     # The refresher always exists so /pricing can report its state; with the
     # master switch off its loop simply parks without fetching.
     PRICING = wb_pricing.PriceRefresher(

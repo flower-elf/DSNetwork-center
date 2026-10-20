@@ -74,51 +74,63 @@ export function mount(host) {
 
   // ---------------------------------------------------------------- 数据
 
+  let loadSeq = 0;
+
   async function refresh() {
-    let payload;
-    try {
-      payload = await acct.loadAccounts();
-    } catch (err) {
+    const mine = ++loadSeq;
+    // 账号列表与三份辅助数据互不依赖，一起发出；旧实现先等账号列表，首屏多一个往返。
+    const [accountsResult, auxResult] = await Promise.allSettled([
+      acct.loadAccounts(),
+      Promise.all([acct.loadUsageByAccount(), acct.loadProxySlots(), acct.loadActivityToday()]),
+    ]);
+    if (mine !== loadSeq) return;
+    S.loading = false;
+    if (accountsResult.status === 'rejected') {
+      const err = accountsResult.reason || {};
       if (!S.accounts.length) {
         S.error = err.message || '读取账号失败';
-        S.loading = false;
         draw();
         return;
       }
-      S.partial = '账号列表这次没有读取成功，下面显示的是上一次的数据：' + err.message;
-      S.loading = false;
-      draw();
-      return;
+      S.partial = '账号列表这次没有读取成功，下面显示的是上一次的数据：' + (err.message || err);
+    } else {
+      const payload = accountsResult.value || {};
+      S.accounts = payload.accounts || [];
+      S.standDown = payload.stand_down || null;
+      S.error = '';
     }
-    S.accounts = payload.accounts || [];
-    S.standDown = payload.stand_down || null;
-    S.error = '';
-    S.loading = false;
-    try {
-      const [usage, slots, today] = await Promise.all([
-        acct.loadUsageByAccount(), acct.loadProxySlots(), acct.loadActivityToday(),
-      ]);
+    if (auxResult.status === 'fulfilled') {
+      const [usage, slots, today] = auxResult.value;
       S.usage = {};
       for (const row of usage.accounts || []) S.usage[row.account] = row;
       S.slots = slots.slots || [];
       S.activity = activity.latestByUid(today.rows || []);
-      S.partial = '';
-    } catch (err) {
-      S.partial = '用量、代理槽或今日活动这次没有读取成功，相关列可能是旧的：' + err.message;
+      if (accountsResult.status === 'fulfilled') S.partial = '';
+    } else {
+      S.partial = '用量、代理槽或今日活动这次没有读取成功，相关列可能是旧的：'
+        + (auxResult.reason && auxResult.reason.message ? auxResult.reason.message : auxResult.reason);
     }
     draw();
-    fillMissingCredits();
+    if (accountsResult.status === 'fulfilled') fillMissingCredits();
   }
 
   // 刚导入的账号补查一次积分；每个账号在一次页面生命周期里只查一次，避免每轮心跳重复请求。
   async function fillMissingCredits() {
     const todo = logic.creditsToFill(S.accounts, S.tried);
     if (!todo.length) return;
-    for (const uid of todo) S.tried.add(uid);
+    const mine = loadSeq;
+    let started = 0;
+    let touched = false;
     try {
-      let touched = false;
-      for (const uid of todo) {
+      for (let index = 0; index < todo.length; index += 1) {
+        if (mine !== loadSeq) break;
+        const uid = todo[index];
+        // 只标记已经发起请求的账号；中途被新的刷新取代时，后面没查的账号
+        // 才能在 finally 里放回待查集合。
+        S.tried.add(uid);
+        started = index + 1;
         const result = await acct.fetchCredits(uid);
+        if (mine !== loadSeq) break;
         if (result.accounts) {
           S.accounts = result.accounts;
           touched = true;
@@ -127,15 +139,23 @@ export function mount(host) {
           touched = true;
         }
       }
-      if (touched) draw();
+      if (mine === loadSeq && touched) draw();
     } catch (err) {
+      if (mine !== loadSeq) return;
       S.partial = '有账号的积分没有查询成功：' + err.message;
       draw();
+    } finally {
+      if (mine !== loadSeq) {
+        for (let index = started; index < todo.length; index += 1) S.tried.delete(todo[index]);
+      }
     }
   }
 
   function applyAccountPayload(payload) {
-    if (payload && payload.accounts) S.accounts = payload.accounts;
+    if (payload && payload.accounts) {
+      loadSeq += 1;
+      S.accounts = payload.accounts;
+    }
   }
 
   // ---------------------------------------------------------------- 动作
@@ -163,20 +183,6 @@ export function mount(host) {
       else toast.warn(activity.BUDDY_LABEL + '签到', logic.summarizeResults(results));
     } catch (err) {
       toastError('签到失败', err);
-    }
-  }
-
-  async function doDailyChat() {
-    try {
-      const result = await acct.dailyChat();
-      const results = result.results || [];
-      applyAccountPayload(result);
-      draw();
-      if (!results.length) toast.warn('没有可打卡的国际版账号');
-      else if (logic.anyOk(results)) toast.success('每日活跃打卡', logic.summarizeResults(results, { okText: '活跃打卡成功' }));
-      else toast.warn('每日活跃打卡', logic.summarizeResults(results));
-    } catch (err) {
-      toastError('打卡失败', err);
     }
   }
 
@@ -786,7 +792,7 @@ export function mount(host) {
       return html`<div class="card card-flush">${emptyCard(kind)}</div>`;
     }
     return html`
-      <div class="card card-flush">
+      <div class="card card-flush accounts-list">
         <div class="table-wrap desktop-only">
           <table class="table table-accounts">
             <thead>
@@ -831,8 +837,6 @@ export function mount(host) {
         <button class="btn btn-outline btn-sm" title="为每个国内版账号领取当天的 Buddy 加油站积分"
                 @click=${busyClick(doCheckin)}>${icon('Fuel')}${activity.BUDDY_LABEL}签到</button>` : nothing}
       ${acts.dailyChat ? html`
-        <button class="btn btn-outline btn-sm" title="为每个已启用的国际版账号发送一条轻量对话，计入官方每日活跃"
-                @click=${busyClick(doDailyChat)}>${icon('CalendarCheck')}每日活跃打卡</button>
         <button class="btn btn-outline btn-sm" title="今天还没打卡的已启用国际版账号；已经打过的不再打第二遍"
                 @click=${busyClick(doDailyChatPending)}>${icon('CalendarCheck')}未活跃打卡一键打卡</button>` : nothing}
       ${acts.dailyChatWeb ? html`

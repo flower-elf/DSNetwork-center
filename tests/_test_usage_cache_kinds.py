@@ -170,8 +170,9 @@ def append_log(rows):
 
 
 def cache_env(enabled=None, min_bytes=None, min_seconds=None):
-    for name, value in (("WB_USAGE_CACHE", enabled),
-                        ("WB_USAGE_CACHE_MIN_BYTES", min_bytes),
+    if enabled is not None:
+        P.wb_settings.set_usage_cache(ACCOUNTS_DIR, bool(enabled))
+    for name, value in (("WB_USAGE_CACHE_MIN_BYTES", min_bytes),
                         ("WB_USAGE_CACHE_MIN_SECONDS", min_seconds)):
         if value is None:
             os.environ.pop(name, None)

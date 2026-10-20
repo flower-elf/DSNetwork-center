@@ -147,6 +147,59 @@ check("日志里点出失败的端点",
       any("growth/tasks" in line and "404" in line for line in logs), logs)
 
 print()
+print("[2b] 上游 200 正文里的业务错误码按查询失败处理")
+
+business_logs = []
+
+
+def rejected_urlopen(req, timeout=30, proxy=""):
+    return FakeResponse(json.dumps({"code": 11110, "msg": "login expired"}).encode("utf-8"))
+
+
+T.set_logger(business_logs.append)
+wb_accounts.urlopen = rejected_urlopen
+try:
+    ok, tasks = T.query_growth_tasks(account)
+finally:
+    wb_accounts.urlopen = real_urlopen
+    T.set_logger(lambda msg: None)
+
+check("业务错误码不算成功", ok is False, ok)
+check("业务错误码不返回任务", tasks == [], tasks)
+check("日志点出错误码", any("11110" in line for line in business_logs), business_logs)
+
+print()
+print("[2c] 任务列表标注可自动化与需手动操作")
+
+
+def tasks_urlopen(req, timeout=30, proxy=""):
+    return FakeResponse(json.dumps({"code": 0, "data": {"tasks": [
+        {"task_code": "Future_Task_X"},
+        {"task_code": "wb_wechat_oa_subscribe_task"},
+        {"task_code": "chat_5"},
+    ]}}).encode("utf-8"))
+
+
+wb_accounts.urlopen = tasks_urlopen
+try:
+    ok, tasks = T.query_growth_tasks(account)
+finally:
+    wb_accounts.urlopen = real_urlopen
+
+by_code = {t["task_code"]: t for t in tasks}
+check("任务清单读取成功", ok is True, ok)
+check("未登记任务标为需手动操作",
+      by_code["Future_Task_X"]["manual"] is True, by_code["Future_Task_X"])
+check("未登记任务给出手动原因",
+      by_code["Future_Task_X"]["manual_reason"] == "暂未登记自动化",
+      by_code["Future_Task_X"])
+check("不可伪造任务标为需手动操作",
+      by_code["wb_wechat_oa_subscribe_task"]["manual"] is True,
+      by_code["wb_wechat_oa_subscribe_task"])
+check("可自动推进的任务不标手动",
+      by_code["chat_5"]["manual"] is False, by_code["chat_5"])
+
+print()
 print("[3] run_growth_tasks() 在 credits 为 None 时不能抛 AttributeError")
 
 account = make_account("u-credits")

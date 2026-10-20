@@ -127,8 +127,8 @@ def urlopen(req, timeout=30, proxy=""):
     重新 TCP+TLS 握手（真机实测 118.0ms，是请求路径上最大的一笔开销）。默认改走
     wb_upstream_pool：按（目标, 代理串）分池复用连接。不能逐字节复现 urllib 语义
     的请求（非 http(s) 目标、非 HTTP 代理、需要跟随的 3xx 重定向）由 PoolBypass
-    回退到下面这条原来的路，行为与改动前一致；WB_UPSTREAM_KEEPALIVE=0 时整条
-    路径都与改动前相同。
+    回退到下面这条原来的路，行为与改动前一致；面板「高级」设置关闭连接复用
+    时整条路径都与改动前相同。
     """
     if wb_upstream_pool.enabled():
         try:
@@ -724,6 +724,12 @@ class Account(object):
         # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
         self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
+        # 一次余额快照的到期列表：credits 整体替换时失效，避免每次列表接口
+        # 与评分选号都重新遍历、排序套餐。
+        self._expiry_cache = None
+        # 每日到期目标只随时间缓慢变化：按余额快照与分钟缓存，选号热路径
+        # 不必每次重新遍历到期列表。
+        self._target_cache = None
         # 评分分配用的运行时数据：最近一小时被选中的时刻与每天消耗的积分
         # （由 wb_proxy 折叠 usage 日志后推下来），都不写回凭证文件。
         self._pick_stamps = collections.deque()
@@ -849,14 +855,23 @@ class Account(object):
         """套餐到期列表 [{at, amount, name}]，按到期时间升序。
 
         只收余额大于 0 且解析出到期时刻的套餐, 余额为 0 的套餐列出来只会让人
-        误以为还有额度。
+        误以为还有额度。列表按余额快照缓存：积分刷新会整体替换 credits 对象，
+        缓存自然失效；调用方只读，不要原地修改返回的列表。
         """
-        credits = self.credits if isinstance(self.credits, dict) else {}
+        source = self.credits
+        cached = self._expiry_cache
+        if cached is not None and cached[0] is source:
+            return cached[1]
+        credits = source if isinstance(source, dict) else {}
         packages = credits.get("packages")
         rows = []
         if isinstance(packages, list):
             for pack in packages:
                 if not isinstance(pack, dict):
+                    continue
+                # 免费包与体验包的抵扣截止远在数年后，企业额度的周期结束是
+                # 重置额度，两者都不该进入“快到期”的排序与评分。
+                if pack.get("no_expiry") or pack.get("package_code") == "enterprise":
                     continue
                 at = pack.get("expireAt")
                 amount = pack.get("remain")
@@ -867,6 +882,7 @@ class Account(object):
                 rows.append({"at": int(at), "amount": amount,
                              "name": str(pack.get("name") or "")})
         rows.sort(key=lambda row: row["at"])
+        self._expiry_cache = (source, rows)
         return rows
 
     def mark_pick(self, now=None):
@@ -897,6 +913,10 @@ class Account(object):
         if not isinstance(credits.get("packages"), list):
             return None
         now = time.time() if now is None else now
+        bucket = int(now // 60)
+        cached = self._target_cache
+        if cached is not None and cached[0] is credits and cached[1] == bucket:
+            return cached[2]
         best = cumulative = 0.0
         for row in self.credit_expiries():
             if row["at"] <= now:
@@ -904,6 +924,7 @@ class Account(object):
             cumulative += row["amount"]
             days = max((row["at"] - now) / 86400.0, 1.0 / 24.0)
             best = max(best, cumulative / days)
+        self._target_cache = (credits, bucket, best)
         return best
 
     def public(self):
@@ -1076,6 +1097,61 @@ class Account(object):
             if soonest is None or days < soonest:
                 soonest = float(days)
         return soonest
+
+    def _expiring_rows(self, within_days, now=None):
+        """窗口内到期的 (距今天数, 剩余额度)，按天数升序。
+
+        与 soonest_expiring_days() 同一套过滤：认抵扣截止时间，跳过企业额度、
+        no_expiry 与已经过期的包。优先用 expireAt（秒），旧快照只有 days_left
+        时退回它。
+        """
+        try:
+            window = float(within_days or 0)
+        except (TypeError, ValueError):
+            return []
+        if window <= 0:
+            return []
+        credits = self.credits
+        if not isinstance(credits, dict):
+            return []
+        now = time.time() if now is None else now
+        rows = []
+        for package in (credits.get("packages") or []):
+            if not isinstance(package, dict):
+                continue
+            if package.get("no_expiry"):
+                continue
+            if package.get("package_code") == "enterprise":
+                continue
+            if package.get("is_expired"):
+                continue
+            remain = package.get("remain")
+            if not isinstance(remain, (int, float)) or remain <= 0:
+                continue
+            expire_at = package.get("expireAt")
+            if isinstance(expire_at, (int, float)) and expire_at > 0:
+                days = (float(expire_at) - now) / 86400.0
+            else:
+                days = package.get("days_left")
+                if not isinstance(days, (int, float)):
+                    continue
+            if 0 <= days <= window:
+                rows.append((float(days), float(remain)))
+        rows.sort()
+        return rows
+
+    def expiring_rate_per_day(self, within_days, now=None):
+        """窗口内的临期积分每天至少要消耗掉多少。
+
+        对每个到期时刻，把在它之前到期的余额加总后除以离它的天数，取最大值。
+        余额分几笔到期时按各自的梯度累计，不会把六天后才到期的大包压到明天。
+        """
+        best = 0.0
+        cumulative = 0.0
+        for days, amount in self._expiring_rows(within_days, now=now):
+            cumulative += amount
+            best = max(best, cumulative / max(days, 1.0 / 24.0))
+        return best
 
     def in_expiring_window(self):
         """True when this account should jump the dispatch queue.
@@ -1897,13 +1973,21 @@ class Account(object):
         if self.is_enterprise():
             return {"ok": False, "error": "enterprise accounts do not support activity report"}
         import wb_tasks
-        event = wb_tasks.build_event(self, "chat")
-        if not wb_tasks.report_events(self, [event]):
-            return {"ok": False, "error": "活跃上报被上游拒绝（未返回 code=0）"}
-        self.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
-        if self.path and os.path.exists(os.path.dirname(self.path)):
-            self.save(os.path.dirname(self.path))
-        days = wb_tasks.fetch_streak_days(self)
+        # 这次上报与成长任务写入同一套成长进度，共用账号闸门，避免并发重复上报。
+        lock = wb_tasks.acquire_growth(self.uid)
+        if lock is None:
+            return {"ok": False, "busy": True,
+                    "error": "该账号正在执行其他成长任务，请稍后再试"}
+        try:
+            event = wb_tasks.build_event(self, "chat")
+            if not wb_tasks.report_events(self, [event]):
+                return {"ok": False, "error": "活跃上报被上游拒绝（未返回 code=0）"}
+            self.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
+            if self.path and os.path.exists(os.path.dirname(self.path)):
+                self.save(os.path.dirname(self.path))
+            days = wb_tasks.fetch_streak_days(self)
+        finally:
+            wb_tasks.release_growth(lock)
         if days is None:
             return {"ok": True, "msg": "对话活跃上报成功（连登天数未知）"}
         if days <= 0:
@@ -2354,7 +2438,7 @@ class Account(object):
                 now = time.time()
                 self.model_cooldowns[model] = now + wait
                 # 起始时刻：面板要如实说「限流时刻 + 恢复时间」，而恢复时刻减不出
-                # 起始时刻（wait 来自 60s→10m 的阶梯，不落库）。记这一次就够了。
+                # 起始时刻（wait 来自 60s→10m 的阶梯，不持久化）。记这一次就够了。
                 self.model_cooldowns_at[model] = now
                 return
             actual_cooldown = 3 if single_account else cooldown
@@ -2815,6 +2899,10 @@ class SessionAffinity(object):
 ROUTING_COUNTERS = ("bound_hit", "bound_lost", "fresh_binding", "no_key",
                     "smart_pick", "cursor_pick")
 
+#: 智能分配里「剩余接近耗尽」的倾斜量：权重每高一档，评分向前挪这么多。
+#: 满档（权重 4）相当于 15 个百分点，能压过轻微的忙闲差，压不过明显欠账。
+REMAINING_URGENCY_STEP = 0.05
+
 
 #: 面板可改、而登录与桌面端导入数据里通常不带的字段（payload 键 -> 属性名）。
 #: AccountPool.add() 替换同 uid 账号时, 只有新数据确实写了这个键才覆盖, 否则继承
@@ -3002,15 +3090,11 @@ class AccountPool(object):
         # keyed by uid (see _weighted_pick). Runtime-only: a restart just
         # restarts the rotation.
         self._expiry_weights = {}
-        # 剩余用量优先调度：wb_proxy 每请求推来的 {(uid, model): 权重}（只有它
-        # 读得到剩余估算）。空表 = 不启用——开关关着、或没有任何组合接近估计
-        # 限额——选择就是原来的纯轮询。纯派生值，不落盘。
+        # 剩余用量：wb_proxy 每请求推来的 {(uid, model): 权重}（只有它读得到
+        # 剩余估算）。空表表示没有组合接近估计限额。智能分配把它折进评分。
         self._remaining_weights = {}
-        # 这条偏好自己的平滑加权轮询累计值，键是 (uid, model)：与临期的
-        # _expiry_weights 分开，两个偏好各自记各自的轮次。
-        self._remaining_pick_state = {}
         # 手动权重优先（面板按账号设置，weight > 1 才生效）的平滑加权轮询
-        # 累计值，键是 uid：与前两条偏好各自的轮次分开。派生值，不落盘。
+        # 累计值，键是 uid：与临期偏好的轮次分开。派生值，不落盘。
         self._manual_weights = {}
         # 页内轮转（超限对话）的每页游标，键是 (页号, 页大小)；整池轮转仍用
         # _cursor，两条轮转互不挪动对方的位置。派生值，不落盘。
@@ -3062,8 +3146,10 @@ class AccountPool(object):
 
     def list_public(self, realm=None):
         with self._lock:
-            accs = self.accounts if (not realm or realm == "all") else [a for a in self.accounts if a.realm == realm]
-            return [a.public() for a in accs]
+            accs = list(self.accounts if (not realm or realm == "all")
+                        else [a for a in self.accounts if a.realm == realm])
+        # 序列化每个账号会派生 machineId、整理到期列表，没必要占着账号池锁。
+        return [a.public() for a in accs]
 
     def get(self, uid):
         with self._lock:
@@ -3281,12 +3367,11 @@ class AccountPool(object):
         return values
 
     def apply_remaining_weights(self, weights):
-        """换上 wb_proxy 算好的 (账号, 模型) 权重表（剩余用量优先调度）。
+        """换上 wb_proxy 算好的 (账号, 模型) 权重表（剩余用量并入智能分配）。
 
         数据方向与 apply_daily_* 同款：只有 wb_proxy 读得到剩余估算（折叠、
         预算与载荷都在那边），池不反向依赖它，只存派生值。None / 空表表示
-        「不启用」——开关关着，或这一刻没有组合接近估计限额——把上次的权重
-        清掉，选择立即回到纯轮询（开关关时行为与从前逐字节一致）。
+        这一刻没有组合接近估计限额（或智能分配关着），上次的权重会被清掉。
         权重 <= 1 的条目没有偏好意义，直接丢弃。返回存下来的表（测试用）。
         """
         table = {}
@@ -3612,15 +3697,8 @@ class AccountPool(object):
                 account.mark_pick()
                 return account
             exclude.add(account.uid)
-        # 剩余用量优先调度（开关默认关）：估计剩余接近耗尽的组合优先交出。
-        while True:
-            account = self._pick_remaining_first(snapshot, exclude, model)
-            if account is None:
-                break
-            if _claim(account, model, claim):
-                account.mark_pick()
-                return account
-            exclude.add(account.uid)
+        # 智能分配关闭时按优先级与轮询顺序派单：剩余用量偏好已并入智能分配的
+        # 评分，不再作为独立分层。
         return self._rotate_pick(snapshot, exclude, model, cursor_key=page, claim=claim)
 
     def _pick_weighted_first(self, snapshot, exclude, model):
@@ -3667,11 +3745,11 @@ class AccountPool(object):
         return self._weighted_pick(ready)
 
     def _expiry_weight(self, account):
-        """How much of the window's traffic this account should take.
+        """窗口内的账号按「每天要消耗掉的临期积分」分配流量。
 
-        Linear in how close the credits are to lapsing, floored at 1 so an
-        account at the far edge of the window still gets served rather than
-        starved until the others run dry.
+        权重等于窗口内各笔到期余额按到期梯度累计出的每日最低消耗：六天后才
+        到期的大包不会压到明天，只按它自己的期限分摊。窗口边缘的账号也仍有
+        一份，不会被饿到余额全过期。
         """
         try:
             window = int(account.expiring_window_days or 0)
@@ -3680,39 +3758,10 @@ class AccountPool(object):
         days = account.soonest_expiring_days()
         if days is None:
             return 1
+        rate = account.expiring_rate_per_day(window)
+        if rate > 0:
+            return max(1, int(round(rate)))
         return max(1, int(round(window - days)) + 1)
-
-    def _pick_remaining_first(self, snapshot, exclude, model):
-        """剩余估算接近耗尽的 (账号, 模型) 优先接单，或 None（没有可交的）。
-
-        与临期积分那条同款的两层结构：只有权重 > 1（快达到估计限额）的组合
-        进入这一层，它们之间按剩余多少平滑加权轮询——越接近耗尽分到的流量
-        越多，但同层之内没有谁独占。没有加权的可选项，或它们此刻都不可用
-        （冷却、限额、被排除）时落回纯轮询，一个快耗尽的组合不会把整个模型
-        卡死。剩余为 0 与没有预算样本的组合由 wb_proxy 侧就不进表：前者没有
-        「先用掉」的意义（冷却中的本来也不可用），后者没有可比较的尺度。
-        """
-        if not model:
-            return None
-        table = self._remaining_weights
-        if not table:
-            return None
-        ready = []
-        for account in snapshot:
-            if account.uid in exclude:
-                continue
-            weight = table.get((account.uid, model))
-            if weight is None or weight <= 1:
-                continue
-            if not account.ready(model=model):
-                continue
-            ready.append((account, weight))
-        if not ready:
-            return None
-        return self._smooth_weighted_pick(
-            [(account, (account.uid, model), weight) for account, weight in ready],
-            "_remaining_pick_state",
-            keep_uids=set(a.uid for a in snapshot))
 
     def _weighted_pick(self, ready):
         """临期积分那条的入口：在窗口内的账号之间平滑加权轮询。"""
@@ -3720,7 +3769,7 @@ class AccountPool(object):
             [(account, account.uid, self._expiry_weight(account))
              for account in ready], "_expiry_weights")
 
-    def _smooth_weighted_pick(self, entries, state_name, keep_uids=None):
+    def _smooth_weighted_pick(self, entries, state_name):
         """Smooth weighted round-robin over (account, key, weight) triples.
 
         nginx's algorithm: every entry accrues its weight each pick, the
@@ -3728,18 +3777,13 @@ class AccountPool(object):
         weight. Equal weights degenerate to a plain rotation, so same-weight
         entries keep taking turns.
 
-        `key` is what the rotation state is kept under - a uid for the
-        expiring-credits window, a (uid, model) pair for the remaining-usage
-        preference - and `state_name` names the pool attribute holding that
-        state, so the two preferences never share a rotation.
+        `key` is what the rotation state is kept under, and `state_name` names
+        the pool attribute holding that state.
 
-        Without `keep_uids` the state is pruned to exactly the entries taking
-        part this pick (the expiring window's behaviour). The remaining-usage
-        preference passes every account still in the pool instead: pruning by
-        the current pick alone would drop another model's (or another realm's)
-        rotation every time it is someone else's turn, and a rotation that
-        restarts every pick collapses the weights into "always the first
-        entry". Entries of accounts that really left the pool are dropped.
+        The state is pruned to exactly the entries taking part this pick: an
+        account that dropped out (cooling, filtered, out of capacity) loses its
+        accumulator, and a later return starts level rather than with a debt
+        from before it left.
 
         The rotation state is shared by every request thread, so the
         read-modify-write runs under the pool lock. The `ready()` checks that
@@ -3750,12 +3794,8 @@ class AccountPool(object):
         keys = set(key for _account, key, _weight in entries)
         with self._lock:
             stored = getattr(self, state_name)
-            if keep_uids is None:
-                state = dict((key, value) for key, value in stored.items()
-                             if key in keys)
-            else:
-                state = dict((key, value) for key, value in stored.items()
-                             if key[0] in keep_uids)
+            state = dict((key, value) for key, value in stored.items()
+                         if key in keys)
             total = 0
             chosen = None
             for account, key, weight in entries:
@@ -3825,6 +3865,10 @@ class AccountPool(object):
 
         候选账号只包括此刻能接单、又没被排除的账号: 拿不到新对话的账号若算进
         总和, 它的欠账永远消不掉, 会把其余账号的份额压平。
+
+        评分之前先过临期积分层: 窗口内的账号按到期节奏加权先接单, 与关闭
+        智能分配时一致; 都没命中才按欠账与忙闲评分。估计剩余接近耗尽的
+        (账号, 模型) 组合在评分里获得一点倾斜, 越接近限额越靠前, 但不独占流量。
         """
         exclude = exclude or set()
         if snapshot is None:
@@ -3839,6 +3883,36 @@ class AccountPool(object):
         candidates = [index for index, account in enumerate(snapshot)
                       if account.uid not in exclude and account.servable(model=model)
                       and account.has_request_capacity(model)]
+        if not candidates:
+            return None
+
+        def take(account):
+            """结算一次智能分配命中：推进轮询游标、记录来源并计入忙闲。"""
+            with self._lock:
+                try:
+                    index = snapshot.index(account)
+                except ValueError:
+                    index = -1
+                if index >= 0:
+                    self._cursor = (index + 1) % total
+            self.count_routing("smart_pick")
+            account.mark_pick(now)
+            return account
+
+        # 临期积分优先：窗口内的账号先接单，与关闭智能分配时的偏好一致。
+        # 窗口内按「临期余额除以剩余天数」加权轮询，余额多、离到期近的分到
+        # 更多流量，但窗口之外的账号在它们都能接单时拿不到新对话。
+        while True:
+            urgent = self._pick_expiring_first(snapshot, exclude, model)
+            if urgent is None:
+                break
+            if _claim(urgent, model, claim):
+                return take(urgent)
+            exclude.add(urgent.uid)
+        # 临期层里没抢到名额的账号已经进了 exclude：候选集必须按最新的
+        # exclude 重算，否则它的欠账仍会算进总和，压低其余账号的份额。
+        candidates = [index for index in candidates
+                      if snapshot[index].uid not in exclude]
         if not candidates:
             return None
         targets = {index: snapshot[index].credit_target_per_day(now=now) for index in candidates}
@@ -3856,13 +3930,20 @@ class AccountPool(object):
         total_backlog = sum(backlog.values())
         loads = {index: snapshot[index].recent_load(now) for index in candidates}
         total_hour = sum(loads.values())
+        weights = self._remaining_weights
         ranked = []
         for index in candidates:
             share = (backlog[index] / total_backlog) if total_backlog > 0 else 0.0
             done = (loads[index] / float(total_hour)) if total_hour > 0 else 0.0
+            # 剩余接近耗尽的组合往前挪一点：越接近估计限额越优先交出，但只作
+            # 温和倾斜，欠账与忙闲仍然决定主要份额。
+            urgency = 0.0
+            if model:
+                weight = weights.get((snapshot[index].uid, model), 1)
+                urgency = max(0, weight - 1) * REMAINING_URGENCY_STEP
             # 评分相同时欠账多的先派，没有欠账的账号不会靠平局拿到新对话。
-            ranked.append((done - share, -share, loads[index], snapshot[index].priority,
-                           (index - start) % total, index))
+            ranked.append((done - share - urgency, -share, loads[index],
+                           snapshot[index].priority, (index - start) % total, index))
         ranked.sort()
         for _score, _share, _hour, _priority, _offset, index in ranked:
             account = snapshot[index]

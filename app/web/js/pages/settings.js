@@ -1,4 +1,4 @@
-// 设置页：四个标签由地址栏决定（#/settings/<id>），各自是一个独立模块。
+// 设置页：标签由地址栏决定（#/settings/<id>），各自是一个独立模块。
 import { html, render, nothing } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { getJSON, postJSON } from '../core/api.js';
@@ -8,7 +8,10 @@ import { loadErrorPage, sectionTabs, skeletonRows } from '../ui/widgets.js';
 import { openDialog } from '../ui/dialog.js';
 import { toastError } from '../ui/toast.js';
 import { createAboutTab } from './settings/about.js';
+import { createAdvancedTab } from './settings/advanced.js';
+import { createCostTab } from './settings/estimate.js';
 import { createGatewayTab } from './settings/gateway.js';
+import { createMaintenanceTab } from './settings/maintenance.js';
 import { createProxyTab } from './settings/proxy.js';
 import { createSecurityTab } from './settings/security.js';
 
@@ -41,6 +44,9 @@ export function mount(host, ctx) {
       state.loading = false;
       state.loaded = true;
       tabs.gateway.seed(data);
+      tabs.cost.seed(data);
+      tabs.advanced.seed(data);
+      tabs.maintenance.seed(data);
       draw();
       return true;
     } catch (err) {
@@ -58,6 +64,9 @@ export function mount(host, ctx) {
       state.view = data;
       state.error = '';
       tabs.gateway.seed(data);
+      tabs.cost.seed(data);
+      tabs.advanced.seed(data);
+      tabs.maintenance.seed(data);
     } catch (err) {
       toastError('设置刷新失败', err);
     }
@@ -102,6 +111,9 @@ export function mount(host, ctx) {
 
   const tabs = {
     gateway: createGatewayTab(page),
+    cost: createCostTab(page),
+    advanced: createAdvancedTab(page),
+    maintenance: createMaintenanceTab(page),
     proxy: createProxyTab(page),
     security: createSecurityTab(page),
     about: createAboutTab(page),
@@ -133,7 +145,7 @@ export function mount(host, ctx) {
         <div class="col" style="gap:10px">
           <div>
             <h1 class="page-title">设置</h1>
-            <p class="page-desc">网关行为、代理槽、面板密码与运行信息</p>
+            <p class="page-desc">网关行为、费用估算、代理槽、面板密码、高级功能、运维与运行信息</p>
           </div>
           ${sectionTabs(navItems, activeId)}
         </div>

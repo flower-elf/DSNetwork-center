@@ -113,7 +113,6 @@ assert.equal(summary.queried, true);
 assert.equal(summary.remain, 140);
 assert.equal(summary.used, 160);
 assert.equal(summary.size, 300);
-assert.equal(summary.count, 2);
 assert.equal(summary.groups.length, 1, '两笔同来源合成一组');
 assert.equal(summary.nextExpireAt, (sec(now + 1 * DAY)) * 1000);
 assert.equal(summary.nextExpireAmount, 40);
@@ -124,21 +123,22 @@ assert.equal(unqueried.queried, false);
 assert.equal(unqueried.remain, 0);
 assert.deepEqual(unqueried.groups, []);
 
-// ---- 页头汇总：只算查到余额的账号，没查到的单独计数
+// ---- 页头汇总：只算查到余额的账号，未查询账号不计入汇总
 const totals = logic.pageTotals([
   account(),
   account({ uid: 'uid-b', credits: { remain: 20, used: 5, size: 25, packages: [pack({ name: '体验版', subProduct: '' })] } }),
   account({ uid: 'uid-c', credits: null }),
 ]);
-assert.deepEqual(totals, { remain: 120, used: 5, packages: 2, queried: 2, missing: 1 });
+assert.deepEqual(totals, { remain: 120, used: 5, queried: 2 });
 
-// ---- 最近到期：跳过余额为零与已过期的条目
+// ---- 最近到期：跳过余额为零、已过期、企业额度与无到期安排的条目
 const soonest = logic.nextExpiry([
   account({ uid: 'uid-a', nickname: '甲', credits: { remain: 100, packages: [pack({ remain: 100, expireAt: sec(now + 4 * DAY) })] } }),
   account({ uid: 'uid-b', nickname: '乙', credits: { remain: 50, packages: [
     pack({ remain: 50, expireAt: sec(now + 2 * DAY) }),
     pack({ remain: 0, used: 50, expireAt: sec(now + 1 * DAY) }),
     pack({ remain: 30, expireAt: sec(now - 3 * DAY) }),
+    pack({ remain: 9, expireAt: sec(now + 1 * DAY), package_code: 'enterprise' }),
   ] } }),
 ], now);
 assert.equal(soonest.account, '乙');
@@ -164,6 +164,15 @@ assert.equal(logic.groupSubText({ count: 1, subProduct: '赠送包' }), '赠送�
 assert.equal(logic.groupSubText({ count: 3, subProduct: '赠送包' }), '共 3 笔 · 赠送包');
 assert.equal(logic.groupSubText({ count: 1, subProduct: '' }), '');
 
+const enterpriseGroup = logic.groupPackages([
+  pack({ remain: 9, expireAt: sec(now + DAY), package_code: 'enterprise' }),
+], now)[0];
+assert.equal(enterpriseGroup.state, 'active', '企业额度不应显示为已过期');
+const freeGroup = logic.groupPackages([
+  pack({ remain: 9, expireAt: sec(now + DAY), no_expiry: true }),
+], now)[0];
+assert.equal(freeGroup.state, 'active', '无到期安排的额度不应显示为已过期');
+
 // ---- 待补查账号：跳过已查过的与正在补查的
 const tried = new Set(['uid-b']);
 const pending = logic.unqueriedAccounts([
@@ -180,5 +189,24 @@ assert.equal(logic.dueForRefresh(now - 60000, now, 60), true, '刚好到间隔�
 assert.equal(logic.dueForRefresh(now - 600000, now, 60), true);
 assert.equal(logic.dueForRefresh(now - 600000, now, 0), false, '禁用自动刷新后只用缓存');
 assert.equal(logic.dueForRefresh(0, now, 0), true, '第一次打开总要读取');
+
+// ---- 15 天内到期的积分：只算尚未过期、带到期时间且还有剩余的套餐
+const expiringAccounts = [
+  account({ uid: 'exp-a', credits: { remain: 160, packages: [
+    pack({ remain: 40, expireAt: sec(now + 10 * DAY) }),
+    pack({ remain: 60, expireAt: sec(now + 15 * DAY) }),
+    pack({ remain: 20, expireAt: sec(now + 20 * DAY) }),
+    pack({ remain: 30, expireAt: sec(now - DAY) }),
+    pack({ remain: 10, expireAt: 0 }),
+    pack({ remain: 7, expireAt: sec(now + 5 * DAY), no_expiry: true }),
+    pack({ remain: 9, expireAt: sec(now + 5 * DAY), package_code: 'enterprise' }),
+  ] } }),
+  account({ uid: 'exp-b', credits: { remain: 25, packages: [pack({ remain: 25, expireAt: sec(now + 1 * DAY) })] } }),
+  account({ uid: 'exp-c', credits: null }),
+];
+assert.equal(logic.expiringTotal(expiringAccounts, 15, now), 125,
+  '只累加 0 天到 15 天之间到期的剩余额度');
+assert.equal(logic.expiringTotal(expiringAccounts, 0, now), 0, '窗口为 0 时没有临期积分');
+assert.equal(logic.expiringTotal([], 15, now), 0);
 
 console.log('credits logic assertions passed');

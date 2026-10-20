@@ -145,24 +145,25 @@ class Scheduler:
         self.next_run_time = time.strftime("%Y-%m-%d %H:%M:%S", t_struct)
 
     def trigger_now(self):
-        """手动立即触发一次调度检查。"""
+        """手动立即触发一次调度检查；强制跑完整轮，不受整点分组限制。"""
         if self._run_lock.locked():
             return {"ok": False, "msg": "已有巡检正在执行，请稍候再试"}
-        threading.Thread(target=self._execute_cycle, args=("手动立即触发",), daemon=True).start()
+        threading.Thread(target=self._execute_cycle,
+                         args=("手动立即触发", True), daemon=True).start()
         return {"ok": True, "msg": "已触发后台调度执行"}
 
-    def _execute_cycle(self, trigger_reason="周期巡检"):
+    def _execute_cycle(self, trigger_reason="周期巡检", force=False):
         if not self._run_lock.acquire(blocking=False):
             self.log(f"跳过本次巡检 ({trigger_reason})：上一轮仍在执行")
             return
         try:
-            self._run_cycle(trigger_reason)
+            self._run_cycle(trigger_reason, force)
         except Exception as exc:
             self.log(f"巡检异常 ({trigger_reason}): {exc}")
         finally:
             self._run_lock.release()
 
-    def _run_cycle(self, trigger_reason="周期巡检"):
+    def _run_cycle(self, trigger_reason="周期巡检", force=False):
         self.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S", wb_tasks.cst_now())
         proxy = sys.modules.get("wb_proxy") or sys.modules.get("__main__")
         if getattr(proxy, "stand_down_active", lambda: False)():
@@ -178,6 +179,13 @@ class Scheduler:
         report_count = 0
         travel_count = 0
         daily_chat_count = 0
+        # 每个任务只在自己的配置整点执行：命中任意一个整点不再顺带跑完整轮。
+        # 时间按 UTC+8 计算，与调度器其余部分一致；手动触发强制跑完整轮。
+        cycle_hour = wb_tasks.cst_now().tm_hour
+        run_checkin = force or cycle_hour in self.checkin_hours
+        run_travel = force or cycle_hour in self.travel_hours
+        run_keepalive = force or cycle_hour in self.keepalive_hours
+        run_cat = force or cycle_hour in self.cat_hours
 
         processed = 0
         for idx, acc in enumerate(list(self.pool.accounts)):
@@ -193,61 +201,66 @@ class Scheduler:
             processed += 1
             uid8 = acc.uid[:8] if acc.uid else "?"
             # 1. 检查 Token 剩余寿命 (小于 2 小时自动刷新保活)
-            exp = acc.expires_at or 0
-            if exp and (exp - time.time()) < 7200:
-                self.log(f"账号 [{uid8}] Token 即将到期，执行主动保活刷新")
-                if acc.refresh():
-                    refreshed_count += 1
-                    self.log(f"✓ 账号 [{uid8}] Token 自动保活刷新成功")
-                else:
-                    self.log(f"! 账号 [{uid8}] Token 保活刷新失败: {acc.last_error}")
+            if run_keepalive:
+                exp = acc.expires_at or 0
+                if exp and (exp - time.time()) < 7200:
+                    self.log(f"账号 [{uid8}] Token 即将到期，执行主动保活刷新")
+                    if acc.refresh():
+                        refreshed_count += 1
+                        self.log(f"✓ 账号 [{uid8}] Token 自动保活刷新成功")
+                    else:
+                        self.log(f"! 账号 [{uid8}] Token 保活刷新失败: {acc.last_error}")
 
             # 2. 如果是国内版账号，检查每日签到与猫猫旅行
             if acc.realm == "cn":
-                if acc.can_checkin():
-                    self.log(f"检测到国内版账号 [{uid8}] 今日尚未签到，执行自动签到")
-                    res = acc.checkin(trigger="scheduler")
-                    if res.get("ok"):
-                        checkin_count += 1
-                        self.log(f"✓ 账号 [{uid8}] 自动签到成功: {res.get('msg')}")
-                    else:
-                        self.log(f"! 账号 [{uid8}] 自动签到未成功: {res.get('error') or res.get('msg')}")
+                if run_checkin:
+                    if acc.can_checkin():
+                        self.log(f"检测到国内版账号 [{uid8}] 今日尚未签到，执行自动签到")
+                        res = acc.checkin(trigger="scheduler")
+                        if res.get("ok"):
+                            checkin_count += 1
+                            self.log(f"✓ 账号 [{uid8}] 自动签到成功: {res.get('msg')}")
+                        else:
+                            self.log(f"! 账号 [{uid8}] 自动签到未成功: {res.get('error') or res.get('msg')}")
+                        time.sleep(1.0)
+
+                    if acc.can_report_activity():
+                        self.log(f"检测到国内版账号 [{uid8}] 今日尚未活跃上报，执行对话活跃上报")
+                        res = acc.report_activity()
+                        if res.get("ok"):
+                            report_count += 1
+                            self.log(f"✓ 账号 [{uid8}] {res.get('msg')}")
+                        else:
+                            self.log(f"! 账号 [{uid8}] 对话活跃上报失败: {res.get('error') or res.get('msg')}")
+                        time.sleep(1.0)
+
+                if run_travel:
+                    # 检查猫猫旅行
+                    tr = do_cat_travel(acc)
+                    if tr.get("busy"):
+                        self.log(f"🐱 账号 [{uid8}] 猫猫日常跳过: {tr.get('msg')}")
+                    elif tr.get("action") in ("claim", "depart"):
+                        travel_count += 1
+                        self.log(f"🐱 账号 [{uid8}] 猫猫日常处理: {tr.get('msg')}")
                     time.sleep(1.0)
 
-                if acc.can_report_activity():
-                    self.log(f"检测到国内版账号 [{uid8}] 今日尚未活跃上报，执行对话活跃上报")
-                    res = acc.report_activity()
-                    if res.get("ok"):
-                        report_count += 1
-                        self.log(f"✓ 账号 [{uid8}] {res.get('msg')}")
-                    else:
-                        self.log(f"! 账号 [{uid8}] 对话活跃上报失败: {res.get('error') or res.get('msg')}")
-                    time.sleep(1.0)
+                    # 连登管家闭环（补签保连登 -> 礼包/补偿 -> 连登兑换 -> 自动抽奖）
+                    bonus = wb_tasks.run_streak_bonus(acc)
+                    if bonus.get("logs"):
+                        for l in bonus["logs"]:
+                            self.log(f"★ 账号 [{uid8}] {l}")
+                        time.sleep(1.0)
 
-                # 检查猫猫旅行
-                tr = do_cat_travel(acc)
-                if tr.get("action") in ("claim", "depart"):
-                    travel_count += 1
-                    self.log(f"🐱 账号 [{uid8}] 猫猫日常处理: {tr.get('msg')}")
-                time.sleep(1.0)
-
-                # 连登管家闭环（补签保连登 -> 礼包/补偿 -> 连登兑换 -> 自动抽奖）
-                bonus = wb_tasks.run_streak_bonus(acc)
-                if bonus.get("logs"):
-                    for l in bonus["logs"]:
-                        self.log(f"★ 账号 [{uid8}] {l}")
-                    time.sleep(1.0)
-
-                # 01:00 夜猫子专属任务: black_cat 只在 23:00-08:00 上报计数,
-                # 之前这个整点只是空转通用巡检, 从未真正上报过夜猫事件。
-                if wb_tasks.cst_now().tm_hour in self.cat_hours:
+                if run_cat:
+                    # 夜猫子任务 black_cat 只在 23:00-08:00 上报计数，
+                    # run_night_growth 自己会判断窗口。
                     night = wb_tasks.run_night_growth(acc)
                     for line in night.get("logs", []):
                         self.log(f"🌙 {line}")
                     time.sleep(1.0)
 
             # 3. 如果是国际版账号，检查每日活跃对话 (送 30/50 积分福利)
-            if acc.realm == "intl":
+            if acc.realm == "intl" and run_checkin:
                 if acc.can_daily_chat():
                     self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话")
                     res = acc.daily_chat(trigger="scheduler")

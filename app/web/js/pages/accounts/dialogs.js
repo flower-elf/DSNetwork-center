@@ -389,7 +389,7 @@ export function openNoteDialog(account, { onDone } = {}) {
   async function save() {
     const text = value.trim();
     if ([...text].length > 100) {
-      toast.warn('备注太长了', '备注最长 100 字，本次没有保存');
+      toast.warn('备注太长了', '备注最长 100 字');
       return;
     }
     busy = true;

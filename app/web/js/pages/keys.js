@@ -120,7 +120,7 @@ export function mount(host, ctx) {
 
   async function copyRow(row) {
     if (!row.id) {
-      toast.warn('这一行还没有保存，暂时没有可复制的密钥');
+      toast.warn('这一行还没有保存');
       return;
     }
     try {
@@ -157,7 +157,7 @@ export function mount(host, ctx) {
 
   function resetUsage(row) {
     if (!row.id) {
-      toast.warn('这一行还没有保存，无法重置用量');
+      toast.warn('这一行还没有保存');
       return;
     }
     confirmDialog({

@@ -246,6 +246,97 @@ check("save() 没有留下自己的临时文件",
       sorted(os.listdir(tmp_dir)) == ["settings.json", "settings.json.tmp"],
       sorted(os.listdir(tmp_dir)))
 
+# ---- [10] 高级功能开关：默认值与显式关闭 -----------------------------------
+print()
+print("[10] 高级功能开关默认值与读写")
+
+flags_dir = tempfile.mkdtemp(prefix="wb-store-flags-")
+flag_defaults = (
+    ("prompt_cache_key", False),
+    ("affinity_debug", False),
+    ("upstream_keepalive", True),
+    ("usage_cache", True),
+    ("usage_day_buckets", True),
+    ("recent_index", False),
+)
+for key, default in flag_defaults:
+    check("%s 默认 %s" % (key, default), getattr(S, key)(flags_dir) is default,
+          getattr(S, key)(flags_dir))
+    setter = getattr(S, "set_" + key)
+    setter(flags_dir, not default)
+    check("%s 能改为 %s" % (key, not default),
+          getattr(S, key)(flags_dir) is (not default), getattr(S, key)(flags_dir))
+    setter(flags_dir, default)
+    check("%s 能改回 %s" % (key, default),
+          getattr(S, key)(flags_dir) is default, getattr(S, key)(flags_dir))
+
+check("Anthropic Messages 默认关闭", S.enable_anthropic_messages(flags_dir) is False)
+S.set_enable_anthropic_messages(flags_dir, True)
+check("Anthropic Messages 能打开", S.enable_anthropic_messages(flags_dir) is True)
+check("免费模型回退默认关闭", S.free_model_credit_fallback(flags_dir) is False)
+S.set_free_model_credit_fallback(flags_dir, True)
+check("免费模型回退能打开", S.free_model_credit_fallback(flags_dir) is True)
+
+# 手写文件里的字符串 / 1 不能把默认开启的开关悄悄关掉，也不能把默认关闭的打开。
+hand_edit(flags_dir, lambda data: data.update({
+    "usage_cache": "false",
+    "recent_index": 1,
+}))
+check("非布尔值按默认值处理", S.usage_cache(flags_dir) is True, S.usage_cache(flags_dir))
+check("非布尔值不会打开默认关闭的开关",
+      S.recent_index(flags_dir) is False, S.recent_index(flags_dir))
+
+# 环境变量优先于面板值：面板保存仍然写入，读取时被环境变量覆盖。
+env_dir = tempfile.mkdtemp(prefix="wb-store-flags-env-")
+_old_env = os.environ.get("WB_USAGE_CACHE")
+_old_recent = os.environ.get("WB_RECENT_INDEX")
+try:
+    os.environ["WB_USAGE_CACHE"] = "0"
+    check("没有面板值时读取环境变量", S.usage_cache(env_dir) is False,
+          S.usage_cache(env_dir))
+    S.set_usage_cache(env_dir, True)
+    check("环境变量优先于面板值", S.usage_cache(env_dir) is False,
+          S.usage_cache(env_dir))
+    os.environ.pop("WB_USAGE_CACHE")
+    check("环境变量移除后面板值生效", S.usage_cache(env_dir) is True,
+          S.usage_cache(env_dir))
+
+    os.environ["WB_USAGE_CACHE"] = "maybe"
+    os.environ["WB_RECENT_INDEX"] = "maybe"
+    env_fresh = tempfile.mkdtemp(prefix="wb-store-flags-env2-")
+    check("未知值回默认开启", S.usage_cache(env_fresh) is True, S.usage_cache(env_fresh))
+    check("未知值不会打开默认关闭的开关",
+          S.recent_index(env_fresh) is False, S.recent_index(env_fresh))
+    os.environ["WB_RECENT_INDEX"] = "on"
+    check("明确开启值生效", S.recent_index(env_fresh) is True, S.recent_index(env_fresh))
+
+    os.environ["WB_USAGE_CACHE"] = "0"
+    overrides = S.env_overrides()
+    entry = overrides.get("usage_cache") or {}
+    check("环境变量列入 env_overrides",
+          entry.get("name") == "WB_USAGE_CACHE" and entry.get("value") == "关闭",
+          overrides)
+    check("未设置环境变量的项不列入",
+          "prompt_cache_key" not in overrides, overrides)
+    os.environ["WB_USAGE_HOUR_KEEP_HOURS"] = "12"
+    try:
+        usage_overrides = S.env_overrides().get("usage") or {}
+        hour = usage_overrides.get("hour_keep_hours") or {}
+        check("用量保留的小时数列出环境变量",
+              hour.get("name") == "WB_USAGE_HOUR_KEEP_HOURS"
+              and hour.get("value") == "12", usage_overrides)
+    finally:
+        os.environ.pop("WB_USAGE_HOUR_KEEP_HOURS", None)
+finally:
+    if _old_env is None:
+        os.environ.pop("WB_USAGE_CACHE", None)
+    else:
+        os.environ["WB_USAGE_CACHE"] = _old_env
+    if _old_recent is None:
+        os.environ.pop("WB_RECENT_INDEX", None)
+    else:
+        os.environ["WB_RECENT_INDEX"] = _old_recent
+
 print()
 print("PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

@@ -7,7 +7,7 @@ export const ROUTES = [
     keywords: '账号池 积分 签到 加油站 今日活跃 登录 导入 导出', load: () => import('../pages/accounts.js') },
   { path: 'tasks', title: '任务', icon: 'ClipboardList', section: 'accounts',
     keywords: '成长任务 猫猫旅行 调度器 巡检 签到 加油站 打卡 今日活跃 积分变动', load: () => import('../pages/tasks.js') },
-  { path: 'credits', title: '积分', icon: 'Coins', dock: true, group: 'ops', section: 'accounts',
+  { path: 'credits', title: '积分', icon: 'Coins', dock: true, group: 'ops',
     keywords: '积分 余额 套餐 到期 来源', load: () => import('../pages/credits.js') },
   { path: 'keys', title: '密钥', icon: 'KeyRound', dock: true, group: 'ops',
     keywords: 'API Key 密钥 配额 白名单', load: () => import('../pages/keys.js') },
@@ -15,8 +15,10 @@ export const ROUTES = [
     keywords: '模型库 能力 上下文', load: () => import('../pages/models.js') },
   { path: 'playground', title: '测试台', icon: 'MessageSquare', section: 'models',
     keywords: '聊天 调试 对话', load: () => import('../pages/playground.js') },
-  { path: 'stats', title: '用量', icon: 'TrendingUp', dock: true, group: 'govern', groupLabel: '治理',
+  { path: 'stats', title: '用量', icon: 'TrendingUp', dock: true, group: 'govern', groupLabel: '治理', section: 'usage',
     keywords: '统计 Token 消耗 性能 分析', load: () => import('../pages/stats.js') },
+  { path: 'estimate', title: '费用估算', icon: 'Calculator', section: 'usage',
+    keywords: '费用 估算 官方价格 省了多少 积分换算', load: () => import('../pages/estimate.js') },
   { path: 'requests', title: '请求日志', dockTitle: '日志', icon: 'ScrollText', dock: true, group: 'govern', section: 'logs',
     keywords: '调用记录 审计 请求', load: () => import('../pages/requests.js') },
   { path: 'logs', title: '运行日志', icon: 'Terminal', section: 'logs',
@@ -28,8 +30,11 @@ export const ROUTES = [
 // 设置页的标签：地址为 #/settings/<id>。
 export const SETTINGS_TABS = [
   { id: 'gateway', title: '网关行为', icon: 'Server', keywords: '保留积分 每日限额 自动切换 Messages 网络工具 接口测试模型 打卡' },
+  { id: 'cost', title: '费用估算', icon: 'Calculator', keywords: '官方价格 积分 换算 省了多少' },
   { id: 'proxy', title: '代理槽', icon: 'Network', keywords: '代理 出口 槽位' },
   { id: 'security', title: '面板密码', icon: 'ShieldCheck', keywords: '密码 安全 登录' },
+  { id: 'advanced', title: '高级', icon: 'Wrench', keywords: '环境变量 功能开关 缓存 连接复用 Anthropic 会话粘性' },
+  { id: 'maintenance', title: '运维', icon: 'Gauge', keywords: '日志 保留 定价 刷新 超时 提示词 更新' },
   { id: 'about', title: '运行信息', icon: 'Info', keywords: '版本 目录 关于' },
 ];
 

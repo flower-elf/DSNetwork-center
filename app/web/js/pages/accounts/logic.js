@@ -197,7 +197,7 @@ export function parseConcurrencyInput(raw) {
   if (text === '') return { ok: true, value: 0 };
   const value = Number(text);
   if (!Number.isInteger(value) || value < 0 || value > CONCURRENCY_MAX) {
-    return { ok: false, message: '并发上限需要 0 到 ' + CONCURRENCY_MAX + ' 之间的整数，填 0 表示不限，本次没有发送请求' };
+    return { ok: false, message: '并发上限需要 0 到 ' + CONCURRENCY_MAX + ' 之间的整数，填写 0 表示不限，本次没有发送请求' };
   }
   return { ok: true, value };
 }

@@ -37,7 +37,10 @@ _TMP = isolated_data_dirs("wb-upstream-pool-")
 
 import wb_accounts            # noqa: E402
 import wb_proxy               # noqa: E402  (_apply_stream_idle_timeout 的对齐)
+import wb_settings            # noqa: E402
 import wb_upstream_pool as pool  # noqa: E402
+
+pool.set_settings_dir(os.environ["ACCOUNTS_DIR"])
 
 PASS = 0
 FAIL = 0
@@ -675,7 +678,7 @@ try:
     print("[14] 开关关闭：行为与改动前一致（Connection: close、无复用）")
     srv14 = new_server()
     pool.close_all()
-    os.environ["WB_UPSTREAM_KEEPALIVE"] = "0"
+    wb_settings.set_upstream_keepalive(os.environ["ACCOUNTS_DIR"], False)
     try:
         check("enabled() 认关闭开关", pool.enabled() is False)
         before = pool.stats()
@@ -702,12 +705,12 @@ try:
             resp.read()
             resp.close()
 
-        os.environ.pop("WB_UPSTREAM_KEEPALIVE", None)
+        wb_settings.set_upstream_keepalive(os.environ["ACCOUNTS_DIR"], True)
         post_once()                       # 池路径
-        os.environ["WB_UPSTREAM_KEEPALIVE"] = "0"
+        wb_settings.set_upstream_keepalive(os.environ["ACCOUNTS_DIR"], False)
         post_once()                       # 原 urllib 路径
     finally:
-        os.environ.pop("WB_UPSTREAM_KEEPALIVE", None)
+        wb_settings.set_upstream_keepalive(os.environ["ACCOUNTS_DIR"], True)
     h_pool = srv14.requests[-2]["headers"]
     h_urllib = srv14.requests[-1]["headers"]
     pool_side = {k: v for k, v in h_pool.items() if k != "connection"}
@@ -762,19 +765,11 @@ try:
           and info["port"] == "", info)
     check("_split_proxy: 非数字端口 -> None（回退原路径）",
           sp("http://h:notaport") is None)
-    os.environ.pop("WB_UPSTREAM_KEEPALIVE", None)
-    check("enabled(): 未设置默认开", pool.enabled() is True)
-    for off in ("0", "off", "FALSE", "No"):
-        os.environ["WB_UPSTREAM_KEEPALIVE"] = off
-        if pool.enabled() is not False:
-            check("enabled(): %r 关闭" % off, False)
-            break
-    else:
-        check("enabled(): 0/off/false/no 都关闭", True)
-    os.environ.pop("WB_UPSTREAM_KEEPALIVE", None)
-    os.environ["WB_UPSTREAM_KEEPALIVE"] = "1"
-    check("enabled(): 1 开启", pool.enabled() is True)
-    os.environ.pop("WB_UPSTREAM_KEEPALIVE", None)
+    check("enabled(): 默认开", pool.enabled() is True)
+    wb_settings.set_upstream_keepalive(os.environ["ACCOUNTS_DIR"], False)
+    check("enabled(): 设置关闭后为 False", pool.enabled() is False)
+    wb_settings.set_upstream_keepalive(os.environ["ACCOUNTS_DIR"], True)
+    check("enabled(): 设置打开后为 True", pool.enabled() is True)
     stale = pool._stale_connection_error
     check("死连接判定：RemoteDisconnected / BrokenPipe / 重置 都算",
           stale(http.client.RemoteDisconnected("x")) is True

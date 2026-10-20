@@ -123,6 +123,36 @@ class SettingsContractTests(unittest.TestCase):
                 wb_settings.save(d, {"update_check_enabled": value})
                 self.assertFalse(wb_settings.update_check_enabled(d), value)
 
+    def test_interval_defaults_to_a_day(self):
+        with tempfile.TemporaryDirectory(prefix="upd-set-") as d:
+            self.assertEqual(wb_settings.update_check_interval_hours(d), 24)
+
+    def test_interval_round_trip_and_bounds(self):
+        with tempfile.TemporaryDirectory(prefix="upd-set-") as d:
+            self.assertEqual(wb_settings.set_update_check_interval_hours(d, 6), 6)
+            self.assertEqual(wb_settings.update_check_interval_hours(d), 6)
+            with self.assertRaises(ValueError):
+                wb_settings.set_update_check_interval_hours(d, 0)
+            with self.assertRaises(ValueError):
+                wb_settings.set_update_check_interval_hours(d, 721)
+            wb_settings.save(d, {"update_check_interval_hours": "junk"})
+            self.assertEqual(wb_settings.update_check_interval_hours(d), 24)
+
+    def test_env_overrides_enabled_and_interval(self):
+        with tempfile.TemporaryDirectory(prefix="upd-set-") as d:
+            wb_settings.set_update_check_enabled(d, True)
+            wb_settings.set_update_check_interval_hours(d, 48)
+            with mock.patch.dict(os.environ, {"WB_UPDATE_CHECK_ENABLED": "0"}):
+                self.assertFalse(wb_settings.update_check_enabled(d))
+            with mock.patch.dict(os.environ, {"WB_UPDATE_CHECK_INTERVAL_HOURS": "6"}):
+                self.assertEqual(wb_settings.update_check_interval_hours(d), 6)
+            self.assertEqual(wb_settings.panel_update_check_interval_hours(d), 48)
+            with mock.patch.dict(os.environ, {"WB_UPDATE_CHECK_ENABLED": "0",
+                                              "WB_UPDATE_CHECK_INTERVAL_HOURS": "6"}):
+                overrides = wb_settings.env_overrides()
+            self.assertEqual(overrides["update_check_enabled"]["value"], "关闭")
+            self.assertEqual(overrides["update_check_interval_hours"]["value"], "6")
+
 
 class VersionComparisonTests(unittest.TestCase):
     def test_plain_semver_parses_with_or_without_the_v(self):
@@ -225,6 +255,20 @@ class CheckBehaviourTests(unittest.TestCase):
             checker_ = checker(d, fetcher)
             checker_.check()
             checker_._last_attempt = time.time() - wb_updates.SCHEDULED_INTERVAL_SECONDS - 1
+            self.assertTrue(checker_.due())
+            checker_.check()
+            self.assertEqual(len(fetcher.calls), 2)
+
+    def test_a_custom_interval_moves_the_window(self):
+        with tempfile.TemporaryDirectory(prefix="upd-run-") as d:
+            wb_settings.set_update_check_enabled(d, True)
+            wb_settings.set_update_check_interval_hours(d, 6)
+            fetcher = FakeFetcher([release("v1.6.18")])
+            checker_ = checker(d, fetcher)
+            checker_.check()
+            checker_._last_attempt = time.time() - 5 * 3600
+            self.assertFalse(checker_.due())
+            checker_._last_attempt = time.time() - 7 * 3600
             self.assertTrue(checker_.due())
             checker_.check()
             self.assertEqual(len(fetcher.calls), 2)

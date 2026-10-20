@@ -68,11 +68,11 @@ class SettingsPreservationTests(unittest.TestCase):
 
 
 class UsageRetentionTests(unittest.TestCase):
-    """用量聚合保留窗口：面板可设、有默认、有上限，且环境变量仍然优先。
+    """用量聚合保留窗口：面板可设、有默认、有上限，面板设置优先于环境变量。
 
     这三个值决定 checkpoint 能覆盖多久（空间换时间），所以「面板没设过就是
-    内置默认」和「环境变量优先」都要钉住——前者保证升级不改行为，后者保证
-    现场调与测试里来回切的既有用法不被打断。
+    内置默认」和「显式设置优先、环境变量兜底」都要钉住——前者保证升级不改
+    行为，后者保证现场调与测试里来回切的既有用法不被打断。
     """
 
     def _write(self, directory, data):
@@ -122,7 +122,48 @@ class UsageRetentionTests(unittest.TestCase):
             view = wb_settings.usage_config(directory)
         self.assertEqual(view, {"hour_keep_hours": 48, "day_keep_days": 32})
 
-    def test_readers_prefer_env_then_setting_then_default(self):
+    def test_keep_value_reports_the_effective_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, {})
+            self.assertIsNone(wb_settings.usage_keep_value(directory, "day_keep_days"))
+            self._write(directory, {"usage": {"day_keep_days": 8}})
+            self.assertEqual(
+                wb_settings.usage_keep_value(directory, "day_keep_days"), 8)
+            self.assertIsNone(wb_settings.usage_keep_value(directory, "hour_keep_hours"))
+            self._write(directory, {"usage": {"day_keep_days": "many"}})
+            self.assertIsNone(wb_settings.usage_keep_value(directory, "day_keep_days"))
+            old = os.environ.get("WB_USAGE_DAY_KEEP_DAYS")
+            try:
+                os.environ["WB_USAGE_DAY_KEEP_DAYS"] = "2"
+                self.assertEqual(
+                    wb_settings.usage_keep_value(directory, "day_keep_days"), 2)
+            finally:
+                if old is None:
+                    os.environ.pop("WB_USAGE_DAY_KEEP_DAYS", None)
+                else:
+                    os.environ["WB_USAGE_DAY_KEEP_DAYS"] = old
+
+    def test_env_overrides_the_stored_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._write(directory, {})
+            saved = {k: os.environ.get(k) for k in (
+                "WB_USAGE_HOUR_KEEP_HOURS", "WB_USAGE_DAY_KEEP_DAYS")}
+            try:
+                os.environ["WB_USAGE_HOUR_KEEP_HOURS"] = "24"
+                os.environ["WB_USAGE_DAY_KEEP_DAYS"] = "8"
+                self.assertEqual(wb_settings.usage_effective(directory),
+                                 {"hour_keep_hours": 24, "day_keep_days": 8})
+                self._write(directory, {"usage": {"hour_keep_hours": 72}})
+                self.assertEqual(wb_settings.usage_effective(directory),
+                                 {"hour_keep_hours": 24, "day_keep_days": 8})
+            finally:
+                for key, value in saved.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+    def test_env_overrides_the_setting(self):
         import wb_proxy as P
         with tempfile.TemporaryDirectory() as directory:
             self._write(directory, {"usage": {"hour_keep_hours": 72,
@@ -140,10 +181,14 @@ class UsageRetentionTests(unittest.TestCase):
                     self.assertEqual(P._usage_hour_keep_hours(), 72)
                     # snapshot 的小时层按天剪枝，跟着同一个「小时层保留」走。
                     self.assertEqual(P._usage_hour_keep_days(), 3)
-                    # 环境变量仍然优先（现场调 / 测试里来回切）。
+                    # 环境变量优先于面板值。
                     os.environ["WB_USAGE_DAY_KEEP_DAYS"] = "2"
                     os.environ["WB_USAGE_HOUR_KEEP_HOURS"] = "24"
                     os.environ["WB_USAGE_HOUR_KEEP_DAYS"] = "1"
+                    self.assertEqual(P._usage_day_keep_days(), 2)
+                    self.assertEqual(P._usage_hour_keep_hours(), 24)
+                    self.assertEqual(P._usage_hour_keep_days(), 1)
+                    self._write(directory, {})
                     self.assertEqual(P._usage_day_keep_days(), 2)
                     self.assertEqual(P._usage_hour_keep_hours(), 24)
                     self.assertEqual(P._usage_hour_keep_days(), 1)

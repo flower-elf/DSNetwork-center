@@ -51,6 +51,11 @@ assert.equal(logic.growthTaskView({ task_code: 't4', status: 'not_accepted' }).b
 const oddStatus = logic.growthTaskView({ task_code: 't5', status: 'unforgeable_x' });
 assert.equal(oddStatus.badge.text, 'unforgeable_x', '没有映射过的状态原样显示');
 assert.equal(logic.growthTaskView({}).name, '未命名任务');
+const manualTask = logic.growthTaskView({ task_code: 't6', manual: true, manual_reason: '需真实操作' });
+assert.equal(manualTask.mode.text, '需手动操作');
+assert.equal(manualTask.mode.hint, '需真实操作');
+assert.equal(logic.growthTaskView({ task_code: 't7' }).mode.text, '可自动推进');
+assert.equal(logic.growthTaskView({ task_code: 't8' }).mode.hint, '');
 
 // ---- 猫猫旅行：状态文案与归来时刻
 const travelNow = new Date(2026, 9, 3, 12, 0, 0).getTime();
