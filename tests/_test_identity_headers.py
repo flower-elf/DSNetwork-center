@@ -42,5 +42,18 @@ class CliIdentityTest(unittest.TestCase):
                 headers["X-IDE-Version"], headers["X-IDE-Version"]))
 
 
+class PrivateDataTest(unittest.TestCase):
+    # 网关不提供数据用途选项，三种出站身份对个人号与企业号都声明数据私有。
+    def test_every_identity_declares_private_data(self):
+        for product in wb_identity.VALID_PRODUCTS:
+            for realm in ("intl", "cn"):
+                for enterprise in ("", "ent-1"):
+                    headers = wb_identity.build_identity_headers(
+                        product, realm, "uid-1", "token-1",
+                        enterprise_id=enterprise)
+                    self.assertEqual(headers.get("X-Private-Data"), "true",
+                                     (product, realm, enterprise))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -539,7 +539,7 @@ _catalog_raw_meta = {}
 #: WB_PROXY_CATALOG_DIR 覆盖。
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
     or os.path.join(PROJECT_DIR, "catalog")
 # 用量记账：每个上游响应都带 usage 块，网关同时为每个请求写一行 JSONL。

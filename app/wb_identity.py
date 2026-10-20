@@ -184,7 +184,6 @@ def build_identity_headers(product, realm, uid, token,
             "X-IDE-Name": "WorkBuddy",
             "X-IDE-Type": "WorkBuddy",
             "X-IDE-Version": client_ver,
-            "X-Private-Data": "true",
             "X-Product": "SaaS",
             "X-Domain": str(domain or endpoint_for(realm, product)[1]),
             "User-Agent": chat_ua,
@@ -240,6 +239,9 @@ def build_identity_headers(product, realm, uid, token,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
+
+    # 网关不提供数据用途选项，统一声明数据私有：true 表示不参与模型优化。
+    headers["X-Private-Data"] = "true"
 
     if enterprise_id:
         headers["X-Enterprise-Id"] = str(enterprise_id)
