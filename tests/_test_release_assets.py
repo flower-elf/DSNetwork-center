@@ -54,6 +54,12 @@ EXPECTED_LEGS = (
     "windows-latest / python 3.12",
 )
 
+# Windows CPython links these into python312.dll, so the packaged runtime has
+# no Lib file to require. Linux builds expose math as a shared module instead,
+# which makes the host's sys.builtin_module_names an unsafe proxy for what the
+# Windows runtime already contains.
+WINDOWS_BUILTINS = {"math"}
+
 
 def read(*parts):
     with open(os.path.join(ROOT, *parts), encoding="utf-8") as fh:
@@ -353,7 +359,8 @@ class RuntimeTrimTests(unittest.TestCase):
         # sys / time and friends are compiled into python312.dll, so the trim
         # cannot remove them and they have no Lib/ file to check.
         needed = sorted(m for m in imported
-                        if m not in local and m not in sys.builtin_module_names)
+                        if m not in local and m not in sys.builtin_module_names
+                        and m not in WINDOWS_BUILTINS)
         self.assertTrue(needed)
         covered = set(portable_runtime.REQUIRED_FILES)
         missing = [m for m in needed
