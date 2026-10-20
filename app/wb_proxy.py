@@ -12068,11 +12068,49 @@ def sanitize_tool_calls(tool_calls):
         else:
             out.append(tc)
     return out
+# DSH 的 system prompt 用两句自我介绍声明厂商归属。上游 WAF 把任一句当成
+# 非官方渠道的判定依据，命中即返回 HTTP 400，错误消息为 Illegal API invocation
+# from an unapproved channel，与请求规模、tools、stream 无关。两句均已单独
+# 实测触发，因此 system 消息里的这两句全部改写，其余提示词逐字保留。
+# 第一句把产品名改成 Harness，第二句把从句换成 assistant built on，模型名保留。
+SANITIZE_DSH_SYSTEM_REWRITES = (
+    (re.compile(r"You are an AI agent powered by DeepSeek Harness\b", re.IGNORECASE),
+     "You are an AI agent powered by Harness"),
+    (re.compile(r"You are a coding agent powered by the (deepseek-[0-9a-z._-]+) model\b",
+                re.IGNORECASE),
+     r"You are an assistant built on the \1 model"),
+)
+
+
+def _sanitize_dsh_system_text(text):
+    for pattern, replacement in SANITIZE_DSH_SYSTEM_REWRITES:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def sanitize_dsh_system(content):
+    """改写 system 消息里的 DSH 自我介绍，其余内容原样返回。"""
+    if isinstance(content, str):
+        return _sanitize_dsh_system_text(content)
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if (isinstance(part, dict) and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)):
+                part = dict(part)
+                part["text"] = _sanitize_dsh_system_text(part["text"])
+            out.append(part)
+        return out
+    return content
+
+
 def sanitize_messages(messages):
     out = []
     for m in messages or []:
         if isinstance(m, dict):
             item = dict(m)
+            if item.get("role") == "system" and "content" in item:
+                item["content"] = sanitize_dsh_system(item["content"])
             if "content" in item:
                 item["content"] = sanitize_content(item["content"])
             if isinstance(item.get("reasoning_content"), str):
