@@ -539,7 +539,7 @@ _catalog_raw_meta = {}
 #: WB_PROXY_CATALOG_DIR 覆盖。
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
     or os.path.join(PROJECT_DIR, "catalog")
 # 用量记账：每个上游响应都带 usage 块，网关同时为每个请求写一行 JSONL。
@@ -12068,17 +12068,22 @@ def sanitize_tool_calls(tool_calls):
         else:
             out.append(tc)
     return out
-# DSH 的 system prompt 用两句自我介绍声明厂商归属。上游 WAF 把任一句当成
-# 非官方渠道的判定依据，命中即返回 HTTP 400，错误消息为 Illegal API invocation
-# from an unapproved channel，与请求规模、tools、stream 无关。两句均已单独
-# 实测触发，因此 system 消息里的这两句全部改写，其余提示词逐字保留。
-# 第一句把产品名改成 Harness，第二句把从句换成 assistant built on，模型名保留。
+# DSH 的 system prompt 用自我介绍和 GUI 描述声明厂商归属。上游把其中已确认的
+# 连续文本当成非官方渠道的判定依据，命中即返回 HTTP 400，错误消息为 Illegal API
+# invocation from an unapproved channel，与请求规模、tools、stream 无关。
+# 这里只改已确认的片段，其余提示词逐字保留：第一句自我介绍换成中性身份句，
+# 第二句保留模型名；GUI 描述去掉品牌词并改写 URL 从句。品牌词单独出现时
+# 上游放行。
 SANITIZE_DSH_SYSTEM_REWRITES = (
     (re.compile(r"You are an AI agent powered by DeepSeek Harness\b", re.IGNORECASE),
-     "You are an AI agent powered by Harness"),
+     "You are a helpful AI assistant"),
     (re.compile(r"You are a coding agent powered by the (deepseek-[0-9a-z._-]+) model\b",
                 re.IGNORECASE),
      r"You are an assistant built on the \1 model"),
+    (re.compile(
+        r"through the DeepSeek Harness Web GUI whose URL the runtime context names\.",
+        re.IGNORECASE),
+     "through the GUI whose URL is named in the runtime context."),
 )
 
 

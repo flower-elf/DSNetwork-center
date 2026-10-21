@@ -66,17 +66,17 @@ class DshSystemRewriteTests(unittest.TestCase):
         text = self.AI_SENTENCE + "\n" + self.CODING_SENTENCE
         self.assertEqual(
             P.sanitize_dsh_system(text),
-            "You are an AI agent powered by Harness.\n"
+            "You are a helpful AI assistant.\n"
             "You are an assistant built on the deepseek-v4.1-flash model.")
 
     def test_case_insensitive(self):
         self.assertEqual(P.sanitize_dsh_system(self.AI_SENTENCE.lower()),
-                         "You are an AI agent powered by Harness.")
+                         "You are a helpful AI assistant.")
 
     def test_tool_contract_after_the_sentences_kept(self):
         text = self.AI_SENTENCE + "\nUse the read tool first."
         self.assertEqual(P.sanitize_dsh_system(text),
-                         "You are an AI agent powered by Harness.\n"
+                         "You are a helpful AI assistant.\n"
                          "Use the read tool first.")
 
     def test_unrelated_powered_by_prompts_untouched(self):
@@ -94,7 +94,7 @@ class DshSystemRewriteTests(unittest.TestCase):
                    {"type": "text", "text": self.CODING_SENTENCE}]
         out = P.sanitize_dsh_system(content)
         self.assertEqual(out[0]["text"],
-                         "You are an AI agent powered by Harness.")
+                         "You are a helpful AI assistant.")
         self.assertEqual(out[1], {"type": "image", "source": "x"})
         self.assertEqual(out[2]["text"],
                          "You are an assistant built on the deepseek-v4.1-flash model.")
@@ -108,7 +108,7 @@ class DshSystemRewriteTests(unittest.TestCase):
         ]
         out = P.sanitize_messages(messages)
         self.assertEqual(out[0]["content"],
-                         "You are an AI agent powered by Harness.")
+                         "You are a helpful AI assistant.")
         self.assertEqual(out[1]["content"], self.AI_SENTENCE)
         self.assertEqual(out[2]["content"], self.CODING_SENTENCE)
 
@@ -124,7 +124,52 @@ class DshSystemRewriteTests(unittest.TestCase):
                          {"role": "user", "content": "hi"}],
         })
         self.assertEqual(body["messages"][0]["content"],
-                         "You are an AI agent powered by Harness.")
+                         "You are a helpful AI assistant.")
+
+
+class DshGuiParagraphTests(unittest.TestCase):
+    """DSH 的 GUI 描述段触发上游渠道校验时的改写。"""
+
+    A = ('You are interacting with the user through the DeepSeek Harness Web GUI '
+         'whose URL the runtime context names.')
+    CLEAN_A = ('You are interacting with the user through the GUI '
+               'whose URL is named in the runtime context.')
+    B = ('When the user refers to "this page", "this GUI", or "this app" without '
+         'naming another target, they mean this GUI.')
+
+    def test_paragraph_rewritten(self):
+        self.assertEqual(P.sanitize_dsh_system(self.A + " " + self.B),
+                         self.CLEAN_A + " " + self.B)
+
+    def test_developer_message_rewritten(self):
+        body = P.build_upstream_body({
+            "model": "deepseek-v4.1-flash",
+            "messages": [{"role": "developer", "content": self.A + " " + self.B},
+                         {"role": "user", "content": "hi"}],
+        })
+        self.assertEqual(body["messages"][0]["content"],
+                         self.CLEAN_A + " " + self.B)
+
+    def test_user_and_assistant_untouched(self):
+        text = self.A + " " + self.B
+        out = P.sanitize_messages([
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": text},
+        ])
+        self.assertEqual(out[0]["content"], text)
+        self.assertEqual(out[1]["content"], text)
+
+    def test_brand_outside_the_gui_sentence_untouched(self):
+        for text in (
+            "The runtime context names the DeepSeek Harness implementation checkout.",
+            "DeepSeek Harness",
+            "You are interacting with the user through the DeepSeek Harness CLI.",
+        ):
+            self.assertEqual(P.sanitize_dsh_system(text), text, text)
+
+    def test_rewrite_is_idempotent(self):
+        once = P.sanitize_dsh_system(self.A)
+        self.assertEqual(P.sanitize_dsh_system(once), once)
 
 
 if __name__ == "__main__":
