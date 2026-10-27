@@ -279,7 +279,7 @@ class ManifestTests(unittest.TestCase):
 
     def test_launchers_and_gateway_are_listed(self):
         listed = tools.read_manifest()
-        for name in ("app/wb_proxy.py", "app/web/index.html", "README.md", "LICENSE",
+        for name in ("app/wb_proxy.py", "app/web/index.html", "LICENSE",
                      "start-wb-proxy.bat", "start-wb-proxy.sh",
                      "start-wb-proxy.command", "start-wb-proxy-lan.sh"):
             self.assertIn(name, listed)

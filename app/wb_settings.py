@@ -1564,6 +1564,22 @@ def set_enable_anthropic_messages(accounts_dir, enabled):
     return enabled
 
 
+def dsh_tool_neutralization(accounts_dir):
+    """是否对 DSH 工具调用做通用化处理，默认关闭。"""
+    return _flag(accounts_dir, "dsh_tool_neutralization", False,
+                 "WB_DSH_TOOL_NEUTRALIZATION")
+
+
+def set_dsh_tool_neutralization(accounts_dir, enabled):
+    """保存 DSH 工具调用通用化开关，返回存储的布尔值。"""
+    enabled = bool(enabled)
+    with _lock:
+        data = load(accounts_dir)
+        data["dsh_tool_neutralization"] = enabled
+        save(accounts_dir, data)
+    return enabled
+
+
 def _env_flag_value(name):
     """环境变量的布尔值：返回 (是否设置, 值)。
 
@@ -1688,6 +1704,7 @@ def set_trusted_proxies(accounts_dir, value):
 #: 面板字段 -> 控制它的环境变量。存在时面板值不生效，面板显示黄色提示。
 ENV_OVERRIDE_FIELDS = (
     ("enable_anthropic_messages", "WB_ENABLE_ANTHROPIC_MESSAGES"),
+    ("dsh_tool_neutralization", "WB_DSH_TOOL_NEUTRALIZATION"),
     ("free_model_credit_fallback", "WB_ENABLE_FREE_MODEL_CREDIT_FALLBACK"),
     ("prompt_cache_key", "WB_PROMPT_CACHE_KEY"),
     ("affinity_debug", "WB_AFFINITY_DEBUG"),

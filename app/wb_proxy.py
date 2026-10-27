@@ -539,7 +539,7 @@ _catalog_raw_meta = {}
 #: WB_PROXY_CATALOG_DIR 覆盖。
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
-VERSION = "0.3.3"
+VERSION = "0.4.0"
 CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
     or os.path.join(PROJECT_DIR, "catalog")
 # 用量记账：每个上游响应都带 usage 块，网关同时为每个请求写一行 JSONL。
@@ -10534,6 +10534,8 @@ def runtime_settings_view():
             wb_settings.panel_flag(ACCOUNTS_DIR, "free_model_credit_fallback", False),
         "enable_anthropic_messages":
             wb_settings.panel_flag(ACCOUNTS_DIR, "enable_anthropic_messages", False),
+        "dsh_tool_neutralization":
+            wb_settings.panel_flag(ACCOUNTS_DIR, "dsh_tool_neutralization", False),
         "daily_chat_web": wb_settings.daily_chat_web(ACCOUNTS_DIR),
         "daily_chat_web_retry": wb_settings.daily_chat_web_retry(ACCOUNTS_DIR),
         "daily_chat_web_attempts":
@@ -12068,12 +12070,52 @@ def sanitize_tool_calls(tool_calls):
         else:
             out.append(tc)
     return out
-# DSH 的 system prompt 用自我介绍和 GUI 描述声明厂商归属。上游把其中已确认的
+# 官方 file-reference 插件注入的 @ 路径说明段里，前两句连续出现即命中 11-128，
+# 判据与 GUI 描述段相同：单发首句或次句都放行，两句连排就拒绝。
+# 首句补一个 that 即可破坏这段连续原文，语义不变，负向前瞻保证重复执行不再改写。
+SANITIZE_DSH_FILEREF_RE = re.compile(
+    r"Tokens prefixed with @ are paths (?!that )the user explicitly referenced\.",
+    re.IGNORECASE)
+SANITIZE_DSH_FILEREF_REPLACEMENT = (
+    "Tokens prefixed with @ are paths that the user explicitly referenced.")
+# DSH 客户端独有标识：品牌全名、DSH 缩写、Web 启动命令与 boot 全局名。
+# 这些字符串会出现在 system 提示和运行时上下文里，统一换成中性表述，
+# 保留原有语义，同时缩小上游后续收紧客户端特征时的命中面。
+SANITIZE_DSH_BRAND_RE = re.compile(r"DeepSeek Harness", re.IGNORECASE)
+SANITIZE_DSH_BRAND_REPLACEMENT = "Harness"
+SANITIZE_DSH_ABBREV_RE = re.compile(r"\bDSH\b")
+SANITIZE_DSH_ABBREV_REPLACEMENT = "the harness"
+SANITIZE_DSH_WEB_LAUNCH_RE = re.compile(r"\bdsh web\b")
+SANITIZE_DSH_WEB_LAUNCH_REPLACEMENT = "the web launcher"
+SANITIZE_DSH_BOOT_RE = re.compile(r"window\.__DSH_BOOT__")
+SANITIZE_DSH_BOOT_REPLACEMENT = "the boot payload"
+SANITIZE_DSH_DEV_WATCH_RE = re.compile(r"`pnpm run dev:web`")
+SANITIZE_DSH_DEV_WATCH_REPLACEMENT = "the web dev command"
+# DSH 运行时上下文由客户端自己拼进 user 消息，里面也有检出路径与 GUI URL。
+# 只在出现运行时上下文标记时改写，普通用户文本保持原样。
+SANITIZE_DSH_CONTEXT_MARKER = "Current runtime context."
+SANITIZE_DSH_SKILL_MARKER = "<available_skills>"
+SANITIZE_DSH_CONTEXT_REWRITES = (
+    (re.compile(r"Current DSH file policy:"), "Current file policy:"),
+    (re.compile(r"the DSH file sandbox"), "the file sandbox"),
+    (re.compile(r"Current DeepSeek Harness implementation checkout:"),
+     "Current implementation checkout:"),
+    (re.compile(r"Current DeepSeek Harness Web GUI URL:"),
+     "Current Web GUI URL:"),
+)
+# 运行时上下文与技能清单里的其余品牌、DSH 缩写也统一改写。
+# 技能清单只改名称后的描述，技能名保持原样，工具仍能按名调用。
+SANITIZE_DSH_USER_IDENTIFIER_REWRITES = (
+    (SANITIZE_DSH_BRAND_RE, SANITIZE_DSH_BRAND_REPLACEMENT),
+    (SANITIZE_DSH_ABBREV_RE, SANITIZE_DSH_ABBREV_REPLACEMENT),
+)
+SANITIZE_DSH_SKILL_LINE_RE = re.compile(r"(?m)^(- `[^`]+`: )(.*)$")
+# DSH 的 system prompt 里有自我介绍、GUI 描述和 @ 路径说明。上游把其中已确认的
 # 连续文本当成非官方渠道的判定依据，命中即返回 HTTP 400，错误消息为 Illegal API
 # invocation from an unapproved channel，与请求规模、tools、stream 无关。
 # 这里只改已确认的片段，其余提示词逐字保留：第一句自我介绍换成中性身份句，
-# 第二句保留模型名；GUI 描述去掉品牌词并改写 URL 从句。品牌词单独出现时
-# 上游放行。
+# 第二句保留模型名；GUI 描述去掉品牌词并改写 URL 从句；文件引用说明只补一个
+# that。其余客户端标识统一换成中性表述，避免后续特征收紧时再次命中。
 SANITIZE_DSH_SYSTEM_REWRITES = (
     (re.compile(r"You are an AI agent powered by DeepSeek Harness\b", re.IGNORECASE),
      "You are a helpful AI assistant"),
@@ -12084,29 +12126,320 @@ SANITIZE_DSH_SYSTEM_REWRITES = (
         r"through the DeepSeek Harness Web GUI whose URL the runtime context names\.",
         re.IGNORECASE),
      "through the GUI whose URL is named in the runtime context."),
+    (SANITIZE_DSH_FILEREF_RE, SANITIZE_DSH_FILEREF_REPLACEMENT),
+    (SANITIZE_DSH_BRAND_RE, SANITIZE_DSH_BRAND_REPLACEMENT),
+    (SANITIZE_DSH_ABBREV_RE, SANITIZE_DSH_ABBREV_REPLACEMENT),
+    (SANITIZE_DSH_WEB_LAUNCH_RE, SANITIZE_DSH_WEB_LAUNCH_REPLACEMENT),
+    (SANITIZE_DSH_BOOT_RE, SANITIZE_DSH_BOOT_REPLACEMENT),
+    (SANITIZE_DSH_DEV_WATCH_RE, SANITIZE_DSH_DEV_WATCH_REPLACEMENT),
 )
+# assistant 历史与 system 共用同一组规则。上游对 assistant 里的身份句、GUI 段、
+# 文件引用段和客户端标识同样判定，分开维护会让新规则漏掉历史消息。
+SANITIZE_DSH_ASSISTANT_REWRITES = SANITIZE_DSH_SYSTEM_REWRITES
 
 
-def _sanitize_dsh_system_text(text):
-    for pattern, replacement in SANITIZE_DSH_SYSTEM_REWRITES:
+def _sanitize_dsh_text(text, rewrites):
+    for pattern, replacement in rewrites:
         text = pattern.sub(replacement, text)
     return text
 
 
-def sanitize_dsh_system(content):
-    """改写 system 消息里的 DSH 自我介绍，其余内容原样返回。"""
+def _sanitize_dsh_content(content, rewrites):
     if isinstance(content, str):
-        return _sanitize_dsh_system_text(content)
+        return _sanitize_dsh_text(content, rewrites)
     if isinstance(content, list):
         out = []
         for part in content:
             if (isinstance(part, dict) and part.get("type") == "text"
                     and isinstance(part.get("text"), str)):
                 part = dict(part)
-                part["text"] = _sanitize_dsh_system_text(part["text"])
+                part["text"] = _sanitize_dsh_text(part["text"], rewrites)
             out.append(part)
         return out
     return content
+
+
+def sanitize_dsh_system(content):
+    """改写 system 消息里的 DSH 提示词片段，其余内容原样返回。"""
+    return _sanitize_dsh_content(content, SANITIZE_DSH_SYSTEM_REWRITES)
+
+
+def sanitize_dsh_assistant(content):
+    """改写 assistant 历史里的 DSH 提示词片段，其余内容原样返回。"""
+    return _sanitize_dsh_content(content, SANITIZE_DSH_ASSISTANT_REWRITES)
+
+
+def _sanitize_dsh_skill_block(text):
+    def rewrite(match):
+        body = _sanitize_dsh_text(match.group(2), SANITIZE_DSH_USER_IDENTIFIER_REWRITES)
+        return match.group(1) + body
+    return SANITIZE_DSH_SKILL_LINE_RE.sub(rewrite, text)
+
+
+def _sanitize_dsh_user_context_text(text):
+    if SANITIZE_DSH_CONTEXT_MARKER in text:
+        text = _sanitize_dsh_text(text, SANITIZE_DSH_CONTEXT_REWRITES)
+    if SANITIZE_DSH_SKILL_MARKER in text:
+        text = _sanitize_dsh_skill_block(text)
+    return text
+
+
+def sanitize_dsh_user_context(content):
+    """改写 DSH 运行时上下文与技能描述里的客户端标识，其他用户内容原样返回。"""
+    if isinstance(content, str):
+        return _sanitize_dsh_user_context_text(content)
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if (isinstance(part, dict) and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)):
+                part = dict(part)
+                part["text"] = _sanitize_dsh_user_context_text(part["text"])
+            out.append(part)
+        return out
+    return content
+
+
+def _canonical_schema(value):
+    """递归按键名排序 JSON 对象，数组顺序保持不变。"""
+    if isinstance(value, dict):
+        return {key: _canonical_schema(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [_canonical_schema(item) for item in value]
+    return value
+
+
+def _dsh_tool_neutralization_enabled():
+    try:
+        return wb_settings.dsh_tool_neutralization(ACCOUNTS_DIR)
+    except Exception:
+        return False
+
+
+def _neutralized_tool(tool):
+    if not isinstance(tool, dict):
+        return tool
+    out = dict(tool)
+    fn = out.get("function")
+    if isinstance(fn, dict):
+        fn = dict(fn)
+        out["function"] = fn
+        target = fn
+    else:
+        target = out
+    for key in ("description", "title"):
+        if isinstance(target.get(key), str):
+            target[key] = _sanitize_dsh_text(
+                target[key], SANITIZE_DSH_USER_IDENTIFIER_REWRITES)
+    for key in ("parameters", "input_schema"):
+        if isinstance(target.get(key), dict):
+            target[key] = _canonical_schema(target[key])
+    return out
+
+
+def neutralize_dsh_tool_defs(body):
+    """无损处理工具定义：描述里的 DSH 标识改写，schema 键顺序规范化。
+
+    工具名、参数名、类型、枚举与必填项一律不动，保证调用契约不变。
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return
+    body["tools"] = [_neutralized_tool(tool) for tool in tools]
+
+
+DSH_TOOL_ALIASES = {
+    "ask_user_question": "ask_user",
+    "create_goal": "set_goal",
+    "get_goal": "read_goal",
+    "update_goal": "edit_goal",
+    "interrupt_agent": "stop_agent",
+    "job_kill": "stop_job",
+    "job_list": "list_jobs",
+    "job_output": "read_job",
+    "present": "show_deliverables",
+    "schedule_create": "create_reminder",
+    "schedule_delete": "delete_reminder",
+    "schedule_list": "list_reminders",
+    "schedule_update": "update_reminder",
+    "send_message": "message_agent",
+    "subagent": "delegate",
+    "subagent_fork": "delegate_with_context",
+    "todo_write": "write_todo",
+    "working_directory": "cwd",
+}
+def _tool_function(tool):
+    if not isinstance(tool, dict):
+        return None
+    fn = tool.get("function")
+    return fn if isinstance(fn, dict) else tool
+
+
+def _rewrite_tool_tokens_content(content, aliases, pattern):
+    if isinstance(content, str):
+        return pattern.sub(lambda m: aliases[m.group(0)], content) if aliases else content
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if (isinstance(part, dict) and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)):
+                part = dict(part)
+                part["text"] = _rewrite_tool_tokens_content(
+                    part["text"], aliases, pattern)
+            out.append(part)
+        return out
+    return content
+
+
+def _rename_tool_choice(choice, aliases):
+    if isinstance(choice, str):
+        return aliases.get(choice, choice)
+    if isinstance(choice, dict):
+        choice = dict(choice)
+        fn = choice.get("function")
+        if isinstance(fn, dict) and fn.get("name") in aliases:
+            fn = dict(fn)
+            fn["name"] = aliases[fn["name"]]
+            choice["function"] = fn
+        elif choice.get("name") in aliases:
+            choice["name"] = aliases[choice["name"]]
+    return choice
+
+
+DSH_PROMPT_MARKERS = (
+    "DeepSeek Harness",
+    "Tokens prefixed with @ are paths the user explicitly referenced",
+    "Current DSH file policy",
+)
+DSH_REQUEST_MARKERS = ("dsh_session_log", "dsh_plugin_packages")
+DSH_SIGNATURE_TOOLS = frozenset(DSH_TOOL_ALIASES)
+
+
+def _content_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part.get("text") or "" for part in content
+            if isinstance(part, dict) and part.get("type") == "text")
+    return ""
+
+
+def is_dsh_payload(payload):
+    """判断请求是否来自 DSH，避免影响其他客户端的同名工具。"""
+    if not isinstance(payload, dict):
+        return False
+    if any(marker in payload for marker in DSH_REQUEST_MARKERS):
+        return True
+    names = set()
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            fn = _tool_function(tool)
+            name = fn.get("name") if isinstance(fn, dict) else None
+            if isinstance(name, str):
+                names.add(name)
+    if len(names & DSH_SIGNATURE_TOOLS) >= 3:
+        return True
+    for msg in payload.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") == "system":
+            text = _content_text(msg.get("content"))
+            if any(marker in text for marker in DSH_PROMPT_MARKERS):
+                return True
+    return False
+
+
+def apply_dsh_tool_aliases(payload):
+    """按本请求实际提供的工具生成别名，返回 别名 -> 原名 的映射。
+
+    只由 Chat Completions 路由调用；Responses 与 Anthropic Messages 路由
+    不做别名映射，保持客户端原名，避免缺少回映射时返回未知工具名。
+    """
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return {}
+    present = []
+    for tool in tools:
+        fn = _tool_function(tool)
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if isinstance(name, str):
+            present.append(name)
+    active = {}
+    taken = set(present)
+    for name in dict.fromkeys(present):
+        alias = DSH_TOOL_ALIASES.get(name)
+        if alias and alias not in taken:
+            active[name] = alias
+            taken.add(alias)
+    if not active:
+        return {}
+    pattern = re.compile(r"\b(?:%s)\b" % "|".join(
+        sorted((re.escape(name) for name in active), key=len, reverse=True)))
+    renamed = []
+    for tool in tools:
+        fn = _tool_function(tool)
+        name = fn.get("name") if isinstance(fn, dict) else None
+        alias = active.get(name)
+        if alias:
+            tool = dict(tool)
+            fn = dict(fn)
+            fn["name"] = alias
+            if isinstance(tool.get("function"), dict):
+                tool["function"] = fn
+            else:
+                tool = fn
+        renamed.append(tool)
+    payload["tools"] = renamed
+    if "tool_choice" in payload:
+        payload["tool_choice"] = _rename_tool_choice(
+            payload.get("tool_choice"), active)
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        rewritten = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                msg = dict(msg)
+                calls = msg.get("tool_calls")
+                if isinstance(calls, list):
+                    new_calls = []
+                    for call in calls:
+                        if isinstance(call, dict):
+                            call = dict(call)
+                            fn = call.get("function")
+                            if isinstance(fn, dict) and fn.get("name") in active:
+                                fn = dict(fn)
+                                fn["name"] = active[fn["name"]]
+                                call["function"] = fn
+                        new_calls.append(call)
+                    msg["tool_calls"] = new_calls
+                if msg.get("role") in ("system", "assistant", "user"):
+                    msg["content"] = _rewrite_tool_tokens_content(
+                        msg.get("content"), active, pattern)
+                elif msg.get("role") in ("tool", "function"):
+                    name = msg.get("name")
+                    if name in active:
+                        msg["name"] = active[name]
+            rewritten.append(msg)
+        payload["messages"] = rewritten
+    return {alias: name for name, alias in active.items()}
+
+
+def restore_dsh_tool_names(obj, reverse):
+    """把响应里的工具别名还原成客户端原始工具名。"""
+    if not reverse:
+        return
+    if isinstance(obj, dict):
+        fn = obj.get("function")
+        if isinstance(fn, dict) and fn.get("name") in reverse:
+            fn["name"] = reverse[fn["name"]]
+        if (obj.get("type") in ("tool_use", "function_call", "custom_tool_call")
+                and obj.get("name") in reverse):
+            obj["name"] = reverse[obj["name"]]
+        for value in obj.values():
+            restore_dsh_tool_names(value, reverse)
+    elif isinstance(obj, list):
+        for value in obj:
+            restore_dsh_tool_names(value, reverse)
 
 
 def sanitize_messages(messages):
@@ -12114,8 +12447,13 @@ def sanitize_messages(messages):
     for m in messages or []:
         if isinstance(m, dict):
             item = dict(m)
-            if item.get("role") == "system" and "content" in item:
+            role = item.get("role")
+            if role == "system" and "content" in item:
                 item["content"] = sanitize_dsh_system(item["content"])
+            elif role == "assistant" and "content" in item:
+                item["content"] = sanitize_dsh_assistant(item["content"])
+            elif role == "user" and "content" in item:
+                item["content"] = sanitize_dsh_user_context(item["content"])
             if "content" in item:
                 item["content"] = sanitize_content(item["content"])
             if isinstance(item.get("reasoning_content"), str):
@@ -13263,8 +13601,10 @@ def apply_prompt_mode(messages):
     return messages
 
 
-def build_upstream_body(payload):
+def build_upstream_body(payload, dsh_request=None):
     model = payload.get("model") or ""
+    if dsh_request is None:
+        dsh_request = bool(payload.get("tools")) and is_dsh_payload(payload)
     # Resolve the effective thinking state before the backfill below: while
     # thinking is on, the upstream requires reasoning_content on every
     # assistant message, whether or not the client kept a reasoning trace.
@@ -13321,6 +13661,8 @@ def build_upstream_body(payload):
             pass
     normalize_tool_choice(body)
     normalize_tools(body)
+    if body.get("tools") and dsh_request and _dsh_tool_neutralization_enabled():
+        neutralize_dsh_tool_defs(body)
     normalize_stop(body)
     if "max_tokens" not in body:
         default_max = model_default_max_output_tokens(model)
@@ -19334,6 +19676,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, "enable_anthropic_messages must be true or false", "invalid_request_error")
             wb_settings.set_enable_anthropic_messages(ACCOUNTS_DIR, raw)
             reply["enable_anthropic_messages"] = raw
+        if "dsh_tool_neutralization" in payload:
+            raw = payload.get("dsh_tool_neutralization")
+            if not isinstance(raw, bool):
+                return self._error(400, "dsh_tool_neutralization must be true or false", "invalid_request_error")
+            wb_settings.set_dsh_tool_neutralization(ACCOUNTS_DIR, raw)
+            reply["dsh_tool_neutralization"] = raw
         if "free_model_credit_fallback" in payload:
             raw = payload.get("free_model_credit_fallback")
             if not isinstance(raw, bool):
@@ -21463,7 +21811,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_responses(payload)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
-        forwarded = build_upstream_body(payload)
+        tool_alias = {}
+        dsh_request = bool(payload.get("tools")) and is_dsh_payload(payload)
+        if dsh_request and _dsh_tool_neutralization_enabled():
+            tool_alias = apply_dsh_tool_aliases(payload)
+        forwarded = build_upstream_body(payload, dsh_request=dsh_request)
         given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
         log(
@@ -21543,11 +21895,14 @@ class Handler(BaseHTTPRequestHandler):
         with upstream:
             if want_stream:
                 return self._chat_stream_response(
-                    upstream, model, fp, account, t_start, effort=effort)
+                    upstream, model, fp, account, t_start, effort=effort,
+                    tool_alias=tool_alias)
             return self._chat_nonstream_response(
-                upstream, model, fp, account, t_start, effort=effort)
+                upstream, model, fp, account, t_start, effort=effort,
+                tool_alias=tool_alias)
 
-    def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None):
+    def _chat_stream_response(self, upstream, model, fp, account, t_start, effort=None,
+                              tool_alias=None):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -21592,7 +21947,12 @@ class Handler(BaseHTTPRequestHandler):
                             write_chunk(chat_text_chunk(model, action[1]))
                     else:
                         synthesized_calls = True
-                        for payload in chat_tool_call_chunks(model, action[1]):
+                        calls = action[1]
+                        if tool_alias:
+                            for call in calls:
+                                if isinstance(call, dict) and call.get("name") in tool_alias:
+                                    call["name"] = tool_alias[call["name"]]
+                        for payload in chat_tool_call_chunks(model, calls):
                             write_chunk(payload)
 
             try:
@@ -21612,6 +21972,8 @@ class Handler(BaseHTTPRequestHandler):
                         maybe = json.loads(data)
                     except Exception:
                         maybe = None
+                    if maybe is not None and tool_alias:
+                        restore_dsh_tool_names(maybe, tool_alias)
                     if isinstance(maybe, dict):
                         failure = upstream_error_text(maybe)
                         if failure:
@@ -21736,7 +22098,8 @@ class Handler(BaseHTTPRequestHandler):
                              fp=fp, account=account.uid, key=self._key_id(), effort=effort)
             return
 
-    def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None):
+    def _chat_nonstream_response(self, upstream, model, fp, account, t_start, effort=None,
+                                 tool_alias=None):
         try:
             result = aggregate_stream(upstream, model, None)
         except Exception as exc:
@@ -21747,6 +22110,8 @@ class Handler(BaseHTTPRequestHandler):
         first_at = result.get("first_chunk_at")
         # Measured from request arrival so streaming and non-streaming are comparable.
         first_ms = int((first_at - t_start) * 1000) if first_at else None
+        if tool_alias:
+            restore_dsh_tool_names(result, tool_alias)
         record_upstream_usage(upstream, model, result.get("usage"), stream=False,
                      elapsed_ms=wall, ttft_ms=first_ms,
                      gen_ms=(wall - first_ms) if first_ms is not None else None,

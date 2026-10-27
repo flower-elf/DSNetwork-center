@@ -2,7 +2,7 @@
 # wb-proxy-center · OpenWrt 版
 #
 # 纯 Python 包（只用标准库，零 pip 依赖），与 CPU 架构无关，
-# 因此 PKGARCH:=all，产物是 workbuddy2api-0.3.3-r1.apk（架构 all）。
+# 因此 PKGARCH:=all，产物是 workbuddy2api-0.4.0-r1.apk（架构 all）。
 #
 # 在 OpenWrt SDK 里构建：
 #   sh wrt/openwrt/build-apk.sh <SDK 目录> [应用源码目录]
@@ -19,7 +19,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=workbuddy2api
-PKG_VERSION:=0.3.3
+PKG_VERSION:=0.4.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT

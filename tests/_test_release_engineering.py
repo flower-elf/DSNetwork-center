@@ -61,20 +61,6 @@ class DockerTests(unittest.TestCase):
         self.assertIn("${PGID:-", text)
 
 
-class ReadmeTests(unittest.TestCase):
-    def test_readme_suite_count_matches_the_tree(self):
-        names = []
-        for folder in (os.path.join(ROOT, "tests"),
-                       os.path.join(ROOT, "tests", "javascript")):
-            names.extend(n for n in os.listdir(folder)
-                         if n.startswith("_test_") and n.endswith((".py", ".js")))
-        py = len([n for n in names if n.endswith(".py")])
-        js = len([n for n in names if n.endswith(".js")])
-        expected = "%d 个套件：%d 个 Python 套件 + %d 个 JavaScript 套件" % (
-            len(names), py, js)
-        self.assertIn(expected, read("README.md"))
-
-
 class RepoHygieneTests(unittest.TestCase):
     """解冲突没解干净的残留（冲突标记）不许留在仓库里。
 

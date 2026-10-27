@@ -6,6 +6,7 @@ import { toast, toastError } from '../../ui/toast.js';
 export function createAdvancedTab(page) {
   const form = {
     anthropicMessages: false,
+    dshToolNeutralization: false,
     freeFallback: false,
     promptCacheKey: false,
     affinityDebug: false,
@@ -23,6 +24,7 @@ export function createAdvancedTab(page) {
   // 表单字段是驼峰，设置接口用下划线；环境变量清单按接口字段上报。
   const ENV_KEYS = {
     anthropicMessages: 'enable_anthropic_messages',
+    dshToolNeutralization: 'dsh_tool_neutralization',
     freeFallback: 'free_model_credit_fallback',
     promptCacheKey: 'prompt_cache_key',
     affinityDebug: 'affinity_debug',
@@ -35,6 +37,7 @@ export function createAdvancedTab(page) {
   function stateOf(view) {
     return {
       anthropicMessages: view.enable_anthropic_messages === true,
+      dshToolNeutralization: view.dsh_tool_neutralization === true,
       freeFallback: view.free_model_credit_fallback === true,
       promptCacheKey: view.prompt_cache_key === true,
       affinityDebug: view.affinity_debug === true,
@@ -81,6 +84,7 @@ export function createAdvancedTab(page) {
     try {
       const view = await page.save({
         enable_anthropic_messages: form.anthropicMessages,
+        dsh_tool_neutralization: form.dshToolNeutralization,
         free_model_credit_fallback: form.freeFallback,
         prompt_cache_key: form.promptCacheKey,
         affinity_debug: form.affinityDebug,
@@ -151,6 +155,11 @@ export function createAdvancedTab(page) {
               name: 'Anthropic Messages 入口',
               field: 'anthropicMessages',
               desc: '打开 /v1/messages 入口。网关会把 Anthropic 请求翻译成 Chat 或 Responses 请求，cache_control 会被忽略，长会话可能明显增加积分消耗。默认关闭。',
+            })}
+            ${switchRow({
+              name: '对 DSH 工具调用进行处理',
+              field: 'dshToolNeutralization',
+              desc: '通用化工具调用，避免问题。仅作用于 Chat Completions，默认关闭。',
             })}
             ${switchRow({
               name: '亲和调试日志',

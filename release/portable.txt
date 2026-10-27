@@ -24,7 +24,6 @@
 # 清单里（新增模块或静态资源忘了登记会直接红），且清单里的路径都存在。
 
 LICENSE
-README.md
 
 start-wb-proxy.bat
 start-wb-proxy.command
