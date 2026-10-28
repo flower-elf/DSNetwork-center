@@ -12,6 +12,7 @@ import * as acct from './actions.js';
 import { PRODUCTS, productLabel, modelSelection, deniedModels } from './logic.js';
 
 const REALM_LABEL = { cn: '国内版 (www.workbuddy.cn)', intl: '国际版 (www.workbuddy.ai)' };
+const REALM_NAME = { cn: '国内版', intl: '国际版' };
 
 /** 二维码只用 SVG 一种形态，按链接缓存，重新生成链接时才重算。 */
 const qrCache = new Map();
@@ -36,19 +37,50 @@ export function openAddAccountDialog(options = {}) {
   const initial = options.realm === 'cn' || options.realm === 'intl' ? options.realm : getState().viewRealm;
   let realm = initial;
   let product = 'workbuddy';
+  let mode = options.mode === 'apikey' ? 'apikey' : 'oauth';
+  let apiKey = '';
+  let apiNickname = '';
+  let apiBusy = false;
+  let apiError = '';
   let phase = 'idle';        // idle | starting | waiting | ok | failed
   let state = '';
   let authUrl = '';
+  let loginDomain = '';
   let message = '';
   let failures = 0;
   let timer = null;
   let closed = false;
 
   const ctl = openDialog({
-    title: '添加账号 (OAuth)',
-    desc: () => '先选择要登录的版本和客户端，再打开链接或用手机扫码完成授权。授权完成后账号会自动加入账号池，所选客户端就是这个账号的出站身份。',
+    title: () => (mode === 'apikey' ? '添加 API Key 账号' : '添加账号'),
+    desc: () => (mode === 'apikey'
+      ? '粘贴企业版控制台签发的静态 Key。添加前会先验证企业额度，验证失败不会写入账号池。'
+      : '先选择要登录的版本和客户端，再打开链接或用手机扫码完成授权。授权完成后账号会自动加入账号池，所选客户端就是这个账号的出站身份。'),
     width: 460,
     body: () => html`
+      <div class="realm-choice">
+        <span class="field-label">添加方式</span>
+        ${segmented([
+          { id: 'oauth', label: 'OAuth 授权' },
+          { id: 'apikey', label: 'API Key' },
+        ], mode, switchMode)}
+      </div>
+      ${mode === 'apikey' ? html`
+        <label class="field">
+          <span class="field-label">API Key</span>
+          <input class="input" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="ck_..." .value=${apiKey}
+                 @input=${(event) => { apiKey = event.target.value; }}>
+          <span class="field-hint">企业版 CodeBuddy 控制台签发，形如 ck_&lt;id&gt;.&lt;secret&gt;；只适用于国内版。</span>
+        </label>
+        <label class="field">
+          <span class="field-label">备注名（可选）</span>
+          <input class="input" maxlength="100" placeholder="例如：设计团队" .value=${apiNickname}
+                 @input=${(event) => { apiNickname = event.target.value; }}>
+        </label>
+        ${apiError ? notice('warn', apiError) : nothing}
+        <p class="text-2xs muted">验证通过后出站身份默认 CLI，可在账号行切换。</p>
+      ` : html`
       <div class="realm-choice">
         <span class="field-label">登录到哪个版本</span>
         ${segmented([
@@ -88,12 +120,16 @@ export function openAddAccountDialog(options = {}) {
           <div class="step-t">等待授权回调，本弹窗每 2 秒自动检测一次</div>
         </div>
         ${message ? html`<p class="step-message ${phase === 'failed' ? 'tone-warning' : 'muted'}">${message}</p>` : nothing}
-      </div>`,
-    foot: () => html`
+      </div>`}`,
+    foot: () => (mode === 'apikey' ? html`
+      <button class="btn btn-ghost" @click=${() => ctl.close()}>关闭</button>
+      <button class="btn btn-primary" ?disabled=${apiBusy} @click=${busyClick(commitApiKey)}>
+        ${apiBusy ? icon('LoaderCircle', 'spin') : icon('KeyRound')}验证并添加
+      </button>` : html`
       <button class="btn btn-ghost" @click=${() => ctl.close()}>关闭</button>
       <button class="btn btn-primary" ?disabled=${phase === 'starting'} @click=${busyClick(() => startLogin())}>
         ${phase === 'starting' ? icon('LoaderCircle', 'spin') : icon('RefreshCw')}重新生成链接
-      </button>`,
+      </button>`),
     // 弹窗一关就停止轮询并通知服务端取消这次登录，避免留下没人认领的登录窗口。
     onClose: () => {
       closed = true;
@@ -109,9 +145,12 @@ export function openAddAccountDialog(options = {}) {
   }
 
   function stepOneText() {
-    if (phase === 'starting') return '正在向 ' + REALM_LABEL[realm] + ' 申请授权链接';
+    if (phase === 'starting') return '正在向 ' + REALM_NAME[realm] + ' 申请授权链接';
     if (phase === 'failed') return '申请授权链接没有成功，可以点下方「重新生成链接」再试';
-    return '已向 ' + REALM_LABEL[realm] + ' 申请授权链接';
+    if (loginDomain) {
+      return '已向 ' + REALM_NAME[realm] + ' (' + loginDomain + ') 申请授权链接';
+    }
+    return '已向 ' + REALM_NAME[realm] + ' 申请授权链接';
   }
 
   function stopPolling() {
@@ -145,6 +184,7 @@ export function openAddAccountDialog(options = {}) {
     stopPolling();
     await cancelCurrent();
     authUrl = '';
+    loginDomain = '';
     message = '';
     failures = 0;
     phase = 'starting';
@@ -153,6 +193,7 @@ export function openAddAccountDialog(options = {}) {
       const started = await acct.startLogin(realm, product);
       state = started.state;
       authUrl = started.authUrl;
+      loginDomain = started.domain || '';
       phase = 'waiting';
       message = '正在等待授权完成，完成后会自动加入账号池。';
       ctl.update();
@@ -197,8 +238,55 @@ export function openAddAccountDialog(options = {}) {
     }
   }
 
+  async function switchMode(next) {
+    if (next === mode) return;
+    mode = next;
+    apiError = '';
+    ctl.update();
+    if (mode === 'apikey') {
+      stopPolling();
+      await cancelCurrent();
+      phase = 'idle';
+      authUrl = '';
+      loginDomain = '';
+      message = '';
+      ctl.update();
+      return;
+    }
+    await startLogin();
+  }
+
+  async function commitApiKey() {
+    const key = apiKey.trim();
+    if (!key) {
+      apiError = '请先填入 API Key';
+      ctl.update();
+      return;
+    }
+    apiBusy = true;
+    apiError = '';
+    ctl.update();
+    try {
+      const result = await acct.addApiKey(key, apiNickname.trim());
+      const probe = (result && result.probe) || {};
+      const usage = probe.used != null
+        ? '，已用 ' + probe.used + (probe.limit != null ? ' / ' + probe.limit : '')
+        : '';
+      toast.success('API Key 账号已加入账号池',
+        (result && result.nickname ? result.nickname : '新账号') + usage);
+      acct.notifyAccountsChanged();
+      apiKey = '';
+      ctl.close();
+    } catch (err) {
+      apiError = err.message || '验证失败，账号没有写入';
+    } finally {
+      apiBusy = false;
+      ctl.update();
+    }
+  }
+
   ctl.dismissible = true;
-  startLogin();
+  if (mode === 'oauth') startLogin();
   return ctl;
 }
 
@@ -304,13 +392,7 @@ export function openImportDialog({ onDone } = {}) {
     ctl.update();
     try {
       doc = parseDoc(await file.text());
-      let picked;
-      if (Array.isArray(doc)) picked = doc;
-      else if (doc && Array.isArray(doc.accounts)) picked = doc.accounts;
-      else if (doc && (doc.accessToken || doc.auth)) picked = [doc];
-      else throw new Error('文件里没有找到账号，应当是 accounts 数组或单个账号对象');
-      if (!picked.length) throw new Error('账号列表是空的');
-      rows = picked;
+      rows = doc;
       fileName = file.name;
       preview = await acct.importPreview(doc).then((response) => response.result || {});
     } catch (err) {
@@ -364,8 +446,9 @@ export function openImportDialog({ onDone } = {}) {
   return ctl;
 }
 
-/** 账号备注：只保存在本机账号文件里，最长 100 字，留空即清除。 */
-export function openNoteDialog(account, { onDone } = {}) {
+/** 账号备注：只保存在本机账号文件里，留空即清除。 */
+export function openNoteDialog(account, { onDone, limits } = {}) {
+  const maxNote = Number(limits && limits.noteMax) || 100;
   let value = String(account.note || '');
   let busy = false;
   const name = account.nickname || String(account.uid || '').slice(0, 8);
@@ -377,9 +460,9 @@ export function openNoteDialog(account, { onDone } = {}) {
     body: () => html`
       <label class="field">
         <span class="field-label">备注内容</span>
-        <input class="input" autofocus maxlength="100" placeholder="例如：张叔叔" .value=${value}
+        <input class="input" autofocus maxlength=${maxNote} placeholder="例如：张叔叔" .value=${value}
                @input=${(e) => { value = e.target.value; }}>
-        <span class="field-hint">最长 100 字，只保存在本机，不会写进上游。</span>
+        <span class="field-hint">最长 ${maxNote} 字，只保存在本机，不会写进上游。</span>
       </label>`,
     foot: () => html`
       <button class="btn btn-ghost" @click=${() => ctl.close()}>取消</button>
@@ -388,8 +471,8 @@ export function openNoteDialog(account, { onDone } = {}) {
 
   async function save() {
     const text = value.trim();
-    if ([...text].length > 100) {
-      toast.warn('备注太长了', '备注最长 100 字');
+    if ([...text].length > maxNote) {
+      toast.warn('备注太长了', '备注最长 ' + maxNote + ' 字');
       return;
     }
     busy = true;

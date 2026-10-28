@@ -25,7 +25,7 @@ def session_id(uid: str) -> str:
 
 
 def generate_request_id(uid: str) -> str:
-    """生成 X-Request-ID：32 位无连字符 hex，与 5.8.4 客户端一致。
+    """生成 X-Request-ID：32 位无连字符 hex，与官方客户端一致。
 
     真实客户端的请求 id 与账号无关，每条随机，因此按进程随机生成即可。
     uid 参数只为兼容既有调用点。

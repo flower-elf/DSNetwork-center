@@ -197,6 +197,7 @@ assert.equal(Math.round(issued.pct), 82, '这次签发到到期共 55 天，剩�
 assert.equal(logic.tokenExpiryView(base({ expiresAt: sec(now) + 55 * 86400, issuedAt: sec(now) }), now).pct, 100, '刚签发的 55 天令牌取满格');
 assert.equal(logic.tokenExpiryView(base({ expiresAt: sec(now) + 30 * 86400, issuedAt: sec(now) + 60 * 86400 }), now).pct, null, '签发时间晚于到期时间时不画进度条');
 assert.deepEqual(logic.tokenExpiryView(base({ expiresAt: sec(now) - 1 }), now), { remain: -1, text: '已过期', pct: 0, tone: 'danger' });
+assert.deepEqual(logic.tokenExpiryView(base({ apiKey: true, expiresAt: 0 }), now), { remain: null, text: '长期有效', pct: null, tone: 'success' });
 assert.equal(logic.tokenExpiryView(base({ expiresAt: sec(now) + 3600 }), now).tone, 'danger');
 assert.equal(logic.tokenExpiryView(base({ expiresAt: sec(now) + 3 * 86400 }), now).tone, 'warning');
 const unknown = logic.tokenExpiryView(base({ expiresAt: 0, expiresIn: '未知' }), now);
@@ -212,6 +213,8 @@ assert.equal(logic.parsePriorityInput('-1').ok, false);
 assert.equal(logic.parsePriorityInput('').ok, false);
 assert.equal(logic.parsePriorityInput('abc').ok, false);
 assert.equal(logic.parsePriorityInput('3.5').ok, false);
+assert.deepEqual(logic.parsePriorityInput(500, { priorityMax: 500 }), { ok: true, value: 500 });
+assert.equal(logic.parsePriorityInput(501, { priorityMax: 500 }).ok, false);
 
 // ---- 单账号单模型的并发上限：0 或空表示不限
 assert.deepEqual(logic.parseConcurrencyInput(''), { ok: true, value: 0 });
@@ -222,6 +225,9 @@ assert.equal(logic.parseConcurrencyInput('1001').ok, false);
 assert.equal(logic.parseConcurrencyInput('-1').ok, false);
 assert.equal(logic.parseConcurrencyInput('2.5').ok, false);
 assert.equal(logic.parseConcurrencyInput('abc').ok, false);
+assert.deepEqual(logic.parseConcurrencyInput(40, { concurrencyMax: 40 }), { ok: true, value: 40 });
+assert.equal(logic.parseConcurrencyInput(41, { concurrencyMax: 40 }).ok, false);
+assert.equal(logic.accountLimits({ priorityMax: 5, concurrencyMax: 6, noteMax: 7 }).noteMax, 7);
 assert.ok(logic.parseConcurrencyInput('1001').message.includes('0 表示不限'),
   '拒绝时要说清填写 0 表示不限，否则操作员不知道怎么关掉');
 

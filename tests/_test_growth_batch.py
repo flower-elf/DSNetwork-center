@@ -137,6 +137,27 @@ class GrowthBatchSettleTests(unittest.TestCase):
         self.assertEqual(events[0]["id"], "ex_xQHHD1u5Jkua")
         self.assertEqual(events[0]["name"], "无畏契约拼豆专家")
 
+    def test_new_expert_tasks_use_registered_expert_ids(self):
+        cases = {
+            "expert_use_maidehao": ("ex_GDl31WahyIH0", "中国电商运营专家"),
+            "expert_use_douyinyin": ("ex_FbY5nlWTqDod", "抖音策略师"),
+            "expert_use_shangjia_xuanchuan": ("ex_Weo3x2EZuSDm",
+                                             "商家宣传页与海报设计师"),
+            "expert_use_bowangwang": ("ex_WZY136wV5aMt", "直播电商教练"),
+        }
+        for code, (expert_id, name) in cases.items():
+            with self.subTest(code=code):
+                self.assertEqual(T.TASK_SPECS[code]["expert"], (expert_id, name))
+                self.assertEqual(T.automation_for({"task_code": code}),
+                                 ("auto", ""))
+                events = []
+                T.report_events = lambda acc, evs, base=None: (
+                    events.extend(evs) or True)
+                T._emit_events(FakeAccount(), _task(code), [], 0)
+                self.assertEqual(len(events), 1, events)
+                self.assertEqual(events[0]["id"], expert_id)
+                self.assertEqual(events[0]["name"], name)
+
     def test_already_claimed_not_reclaimed(self):
         # 刷新后状态已是 claimed，直接移出，不再调用 claim_task。
         claimed = []
@@ -323,6 +344,7 @@ class ActivityReportGateTests(unittest.TestCase):
         acc.uid = "u-activity"
         acc.realm = "cn"
         acc.path = ""
+        acc.is_api_key = False
         acc.is_enterprise = lambda: False
         return acc
 

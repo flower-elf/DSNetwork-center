@@ -28,7 +28,14 @@ def set_logger(fn):
     完全不可见，上游改版与「今天没有任务」看起来一模一样。
     """
     global _log
+    previous = _log
     _log = fn or (lambda msg: None)
+    return previous
+
+def _has_personal_program(account):
+    """账号是否适用签到/成长/活跃这套个人体系；测试替身默认适用。"""
+    return bool(getattr(account, "has_personal_program", lambda: True)())
+
 
 _gates_lock = threading.Lock()
 _gates = {}
@@ -103,6 +110,20 @@ TASK_SPECS = {
     "WorkBuddy_Valorant": {"kind": "expert", "target": 1, "reward": 100,
                            "expert": ("ex_xQHHD1u5Jkua", "无畏契约拼豆专家"),
                            "name": "体验「无畏契约拼豆专家」"},
+    # 专家体验任务各 50 积分，专家 id 取自任务跳转链接；事件必须用真实 id。
+    "expert_use_maidehao": {"kind": "expert", "target": 1, "reward": 50,
+                            "expert": ("ex_GDl31WahyIH0", "中国电商运营专家"),
+                            "name": "体验「中国电商运营专家」"},
+    "expert_use_douyinyin": {"kind": "expert", "target": 1, "reward": 50,
+                             "expert": ("ex_FbY5nlWTqDod", "抖音策略师"),
+                             "name": "体验「抖音策略师」"},
+    "expert_use_shangjia_xuanchuan": {"kind": "expert", "target": 1, "reward": 50,
+                                      "expert": ("ex_Weo3x2EZuSDm",
+                                                 "商家宣传页与海报设计师"),
+                                      "name": "体验「商家宣传页与海报设计师」"},
+    "expert_use_bowangwang": {"kind": "expert", "target": 1, "reward": 50,
+                              "expert": ("ex_WZY136wV5aMt", "直播电商教练"),
+                              "name": "体验「直播电商教练」"},
     "wb_wechat_oa_subscribe_task": {"unforgeable": True, "reward": 100,
                                     "reason": "需在微信关注「腾讯 WorkBuddy」公众号满 24 小时",
                                     "name": "关注官方公众号"},
@@ -193,7 +214,7 @@ def query_growth_tasks(account):
     失败与「上游没有任务」必须区分：网络或应答异常时 ok 为 False，调用方据此
     保留失败状态，不会把故障当成任务下线。
     """
-    if getattr(account, "is_enterprise", lambda: False)():
+    if not _has_personal_program(account):
         return True, []
     url = CHAT_BASE + "/v2/activity/growth/tasks"
     req = urllib.request.Request(url, headers=account.headers("chat"))
@@ -242,8 +263,10 @@ def fetch_growth_tasks(account):
 
 def fetch_growth_summary(account):
     """查询连续打卡、猫猫旅行与能量余额。"""
-    headers = account.headers("chat")
     out = {"energy": 0, "streak_days": 0, "travel": {"state": "unknown"}}
+    if not _has_personal_program(account):
+        return out
+    headers = account.headers("chat")
     # 1. 能量
     try:
         req = urllib.request.Request(CHAT_BASE + "/v2/activity/growth/energy", headers=headers)
@@ -565,8 +588,9 @@ def _travel_depart(account, lid):
 @growth_guard("该账号的猫猫旅行正在执行，请稍后再试")
 def do_cat_travel(account):
     """检查并执行猫猫旅行，含领奖与派出。"""
-    if getattr(account, "is_enterprise", lambda: False)():
-        return {"ok": True, "action": "skip", "msg": "企业版账号无成长体系，跳过"}
+    if not _has_personal_program(account):
+        return {"ok": True, "action": "skip",
+                "msg": "企业版或静态 API Key 账号没有成长体系，跳过"}
     headers = account.headers("chat")
     # 1. 查询状态
     try:
@@ -781,10 +805,10 @@ def _progress_one(account, t, logs, gap):
 def run_growth_tasks(account, gap=1.0):
     """完整执行批量成长任务点亮与领奖。"""
     if account.realm != "cn":
-        return {"ok": False, "msg": "国际版不适用国内成长任务中心", "logs": []}
-    if getattr(account, "is_enterprise", lambda: False)():
-        return {"ok": True, "msg": "企业版账号无成长体系，跳过", "logs": []}
-
+        return {"ok": False, "msg": "成长任务中心仅支持国内版账号", "logs": []}
+    if not _has_personal_program(account):
+        return {"ok": True, "msg": "企业版或静态 API Key 账号没有成长体系，跳过",
+                "logs": []}
     logs = []
     logs.append(f"开始为账号 {account.nickname or account.uid[:8]} 运行成长任务自动化")
     # 先取一次任务列表再执行：auto 前置、批量接取与逐任务点亮都基于这份列表。
@@ -879,9 +903,10 @@ def run_night_growth(account):
     """夜猫子任务 black_cat：每日 23:00-08:00 上报 1 次 GLM-5.2 夜间对话事件，
     每天计 1 次、累计 3 天后可领奖。白天调用会跳过。"""
     if account.realm != "cn":
-        return {"ok": False, "msg": "国际版不适用国内成长任务中心", "logs": [], "earned_credit": 0}
-    if getattr(account, "is_enterprise", lambda: False)():
-        return {"ok": True, "msg": "企业版账号无成长体系，跳过", "logs": [], "earned_credit": 0}
+        return {"ok": False, "msg": "成长任务中心仅支持国内版账号", "logs": [], "earned_credit": 0}
+    if not _has_personal_program(account):
+        return {"ok": True, "msg": "企业版或静态 API Key 账号没有成长体系，跳过",
+                "logs": [], "earned_credit": 0}
     logs = []
     name = account.nickname or account.uid[:8]
     if not in_night_window():
@@ -948,8 +973,8 @@ def run_streak_bonus(account):
     """
     if account.realm != "cn":
         return {"ok": False, "msg": "连登管家仅限国内版账号"}
-    if getattr(account, "enterprise_id", None):
-        return {"ok": True, "msg": "企业版账号无成长体系，跳过"}
+    if not _has_personal_program(account):
+        return {"ok": True, "msg": "企业版或静态 API Key 账号没有成长体系，跳过"}
 
     headers = account.headers("chat")
     logs = []

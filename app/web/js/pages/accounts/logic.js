@@ -191,13 +191,33 @@ export function activeRequestsOf(account) {
   return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
+/** 服务端下发的数值上限；缺少时使用本地默认值。 */
+export function accountLimits(source) {
+  const raw = source && typeof source === 'object' ? source : {};
+  const number = (key, fallback) => {
+    const value = Number(raw[key]);
+    return Number.isFinite(value) && value >= 0 ? value : fallback;
+  };
+  return {
+    priorityDefault: number('priorityDefault', PRIORITY_DEFAULT),
+    priorityMax: number('priorityMax', PRIORITY_MAX),
+    concurrencyMax: number('concurrencyMax', CONCURRENCY_MAX),
+    weightMin: number('weightMin', 1),
+    weightMax: number('weightMax', 100),
+    noteMax: number('noteMax', 100),
+    apiKeyPrefixes: Array.isArray(raw.apiKeyPrefixes) && raw.apiKeyPrefixes.length
+      ? raw.apiKeyPrefixes : ['ck_', 'pt_'],
+  };
+}
+
 /** 并发上限校验：0 或空表示不限，其余必须是正整数；与服务端 normalise_concurrency_limit 同一口径。 */
-export function parseConcurrencyInput(raw) {
+export function parseConcurrencyInput(raw, limits) {
+  const max = accountLimits(limits).concurrencyMax;
   const text = String(raw == null ? '' : raw).trim();
   if (text === '') return { ok: true, value: 0 };
   const value = Number(text);
-  if (!Number.isInteger(value) || value < 0 || value > CONCURRENCY_MAX) {
-    return { ok: false, message: '并发上限需要 0 到 ' + CONCURRENCY_MAX + ' 之间的整数，填写 0 表示不限，本次没有发送请求' };
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    return { ok: false, message: '并发上限需要 0 到 ' + max + ' 之间的整数，填写 0 表示不限，本次没有发送请求' };
   }
   return { ok: true, value };
 }
@@ -341,6 +361,9 @@ export function creditBarPct(account, now = Date.now()) {
 
 /** 令牌有效期进度：剩余秒数、百分比与色调；进度以签发到到期的实际时长为满格，拿不到签发时间则 pct 为 null。 */
 export function tokenExpiryView(account, now = Date.now()) {
+  if (account && account.apiKey) {
+    return { remain: null, text: '长期有效', pct: null, tone: 'success' };
+  }
   const ms = toMillis(account && account.expiresAt);
   if (ms === null) {
     return { remain: null, text: String((account && account.expiresIn) || '未知'), pct: 0, tone: 'muted' };
@@ -361,11 +384,12 @@ function remainText(seconds) {
 }
 
 /** 优先级输入框的校验，返回提交值或写给用户的原因。 */
-export function parsePriorityInput(raw) {
+export function parsePriorityInput(raw, limits) {
+  const max = accountLimits(limits).priorityMax;
   const text = String(raw == null ? '' : raw).trim();
   const value = text === '' ? Number.NaN : Number(text);
-  if (!Number.isInteger(value) || value < 0 || value > PRIORITY_MAX) {
-    return { ok: false, message: '优先级需要 0 到 ' + PRIORITY_MAX + ' 之间的整数，本次没有发送请求' };
+  if (!Number.isInteger(value) || value < 0 || value > max) {
+    return { ok: false, message: '优先级需要 0 到 ' + max + ' 之间的整数，本次没有发送请求' };
   }
   return { ok: true, value };
 }

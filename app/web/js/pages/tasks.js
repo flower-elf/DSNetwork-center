@@ -201,8 +201,8 @@ export function mount(host) {
       const result = await acct.dailyChatPending(pending.map((account) => account.uid));
       const results = result.results || [];
       if (!results.length) toast.warn('名单里的账号没有执行');
-      else if (anyOk(results)) toast.success('未活跃打卡', summarizeResults(results, { okText: '打卡成功' }));
-      else toast.warn('未活跃打卡', summarizeResults(results));
+      else if (anyOk(results)) toast.success('未活跃账号打卡', summarizeResults(results, { okText: '打卡成功' }));
+      else toast.warn('未活跃账号打卡', summarizeResults(results));
       await refresh();
     } catch (err) {
       toastError('打卡失败', err);
@@ -399,7 +399,7 @@ export function mount(host) {
           </div>
           <div class="row-wrap">
             <button class="btn btn-primary btn-sm" title="今天还没打卡的已启用国际版账号；已经打过的不再打第二遍"
-                    @click=${busyClick(doDailyChatPending)}>${icon('CalendarCheck')}未活跃打卡一键打卡</button>
+                    @click=${busyClick(doDailyChatPending)}>${icon('CalendarCheck')}未活跃账号一键打卡</button>
             <button class="btn btn-outline btn-sm" title="只建网页端会话，不发送桌面端对话；会消耗少量积分"
                     @click=${doDailyChatWeb}>${icon('Globe')}网页通道打卡</button>
           </div>

@@ -35,9 +35,6 @@ class Scheduler:
         # Guards against overlapping runs: trigger_now() spawns a thread per
         # click, and a manual trigger can also land on top of the hourly job.
         self._run_lock = threading.Lock()
-        # Surface task-level failures (dead endpoints, upstream shape changes)
-        # in the same log the panel shows.
-        wb_tasks.set_logger(self.log)
 
     def apply_schedule(self, hours=None):
         """按设置更新四组整点时段；不传时从账号目录读取。"""
@@ -51,6 +48,15 @@ class Scheduler:
         self.cat_hours = list(hours.get("cat") or [])
         self.all_hours = sorted(set(self.checkin_hours + self.travel_hours
                                     + self.keepalive_hours + self.cat_hours))
+        if not self.all_hours:
+            # 四组全空按旧数据处理，回落到默认时段；关闭调度器使用总开关。
+            defaults = wb_settings.DEFAULT_SCHEDULER_HOURS
+            self.checkin_hours = list(defaults["checkin"])
+            self.travel_hours = list(defaults["travel"])
+            self.keepalive_hours = list(defaults["keepalive"])
+            self.cat_hours = list(defaults["cat"])
+            self.all_hours = sorted(set(self.checkin_hours + self.travel_hours
+                                        + self.keepalive_hours + self.cat_hours))
         self._calc_next_fire()
 
     def log(self, msg, tag=None):
@@ -102,10 +108,11 @@ class Scheduler:
         # 启动后先等待主服务就绪；stop() 要让这段等待立刻退出。
         if stop_event.wait(10):
             return
-        try:
-            self._execute_cycle("启动初次初始化巡检")
-        except Exception as exc:
-            self.log(f"初次巡检异常: {exc}")
+        if self.enabled:
+            try:
+                self._execute_cycle("启动后首次巡检")
+            except Exception as exc:
+                self.log(f"首次巡检异常：{exc}")
 
         while not stop_event.is_set():
             self._calc_next_fire()
@@ -127,6 +134,11 @@ class Scheduler:
                 return
 
     def _calc_next_fire(self):
+        if not self.all_hours:
+            # apply_schedule() 会把全空时段回退为默认值；这里兜底，防止直接
+            # 清空时段后没有下一个整点。
+            self.next_run_time = "未设置"
+            return
         now = wb_tasks.cst_now()
         cur_h = now.tm_hour
         next_h = None
@@ -164,6 +176,13 @@ class Scheduler:
             self._run_lock.release()
 
     def _run_cycle(self, trigger_reason="周期巡检", force=False):
+        previous = wb_tasks.set_logger(self.log)
+        try:
+            return self._run_cycle_inner(trigger_reason, force)
+        finally:
+            wb_tasks.set_logger(previous)
+
+    def _run_cycle_inner(self, trigger_reason="周期巡检", force=False):
         self.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S", wb_tasks.cst_now())
         proxy = sys.modules.get("wb_proxy") or sys.modules.get("__main__")
         if getattr(proxy, "stand_down_active", lambda: False)():

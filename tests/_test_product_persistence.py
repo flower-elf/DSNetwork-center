@@ -1,14 +1,17 @@
-"""账号的对外身份必须跨重启保留(issue #76):加载读取凭据文件里的 product 字段,面板选择器与 429 身份切换写入的值重启后仍生效。
+"""账号的对外身份必须跨重启保留（issue #76）。
 
-面板的 WB / VSC / CLI 选择器与 429 身份切换都会改写 account.product,每条保存
-路径都把它写回凭据文件。加载曾经忽略这个字段,重启后悄悄回到默认值。
+面板选择器与 429 身份切换写入的 product 字段保存在凭据文件里，加载时读回，
+因此重启后仍是同一个出站身份。
 
-[5]-[7] 同时钉住出站身份:三套身份都要带会话头族(缺了上游回 400 / code
-11-128,`conversation id missing`),桌面端的版本 / UA / agent 头,以及 id 形态
-(带连字符的 UUIDv4 与 32 位 hex)。国内版取值来自 5.8.3 安装包,国际版来自
+面板的 WB、VSC、CLI 选择器与 429 身份切换都会改写 account.product，每条保存
+路径都把它写回凭据文件，加载时按它恢复出站身份。
+
+[5]-[7] 同时钉住出站身份：三套身份都要带会话头族（缺少时上游返回 400 / code
+11-128，`conversation id missing`），桌面端的版本 / UA / agent 头，以及 id 形态
+（带连字符的 UUIDv4 与 32 位 hex）。国内版取值来自 5.9.3 安装包，国际版来自
 5.8.4 抓包。
 
-不联网:账号由字典构造,写入临时目录。
+不联网：账号由字典构造，写入临时目录。
 """
 import json
 import os
@@ -85,9 +88,25 @@ check("to_dict() writes it, so the next save keeps it",
       cn.to_dict().get("product") == "vscode", cn.to_dict().get("product"))
 check("the chat endpoint follows it",
       cn.chat_base_url() == wb_identity.endpoint_for("cn", "vscode")[0], cn.chat_base_url())
-check("CN products share the verified host",
-      cn.chat_base_url() == wb_identity.endpoint_for("cn", "workbuddy")[0],
-      cn.chat_base_url())
+check("the CN VSCode plugin uses the internal endpoint",
+      cn.chat_base_url() == "https://copilot.tencent.com", cn.chat_base_url())
+check("the intl VSCode plugin uses the external endpoint",
+      wb_identity.endpoint_for("intl", "vscode")[0]
+      == "https://www.codebuddy.ai")
+check("an old VSCode credential uses the internal endpoint domain",
+      cn.headers().get("X-Domain") == "copilot.tencent.com",
+      cn.headers().get("X-Domain"))
+cli_old = A.Account(credential("cli", realm="cn", domain="www.workbuddy.cn"))
+check("an old CLI credential uses the codebuddy endpoint domain",
+      cli_old.headers().get("X-Domain") == "www.codebuddy.cn",
+      cli_old.headers().get("X-Domain"))
+check("billing keeps the credential domain",
+      cli_old.headers(purpose="billing").get("X-Domain") == "www.workbuddy.cn",
+      cli_old.headers(purpose="billing").get("X-Domain"))
+custom = A.Account(credential("cli", realm="cn", domain="ai.example.com"))
+check("a custom domain is preserved",
+      custom.headers().get("X-Domain") == "ai.example.com",
+      custom.headers().get("X-Domain"))
 desktop = A.Account(credential("workbuddy", realm="cn", domain="www.workbuddy.cn"))
 check("the CN desktop uses the product chat endpoint",
       desktop.chat_base_url() == "https://www.workbuddy.cn",
@@ -102,11 +121,10 @@ check("the outbound headers follow it",
 
 print()
 print("[5] the outbound identity carries the conversation header family")
-# 上游的渠道校验在请求完全没有会话 id 时回 400 / code 11-128
-# （`conversation id missing`，displayTips「这次调用没通过渠道校验」）。三套
-# 身份都得带这套头：VSCode / CLI 一直带，桌面端（所有账号默认的那套）原来
-# 一个都没有。形态按 5.8.4 抓包：会话 id 是带连字符的 UUID，请求/消息 id 是
-# 32 位无连字符 hex。
+# 上游的渠道校验在请求完全没有会话 id 时返回 400 / code 11-128
+# （`conversation id missing`，displayTips「这次调用没通过渠道校验」）。这三种
+# 身份都要带这组标头：VSCode、CLI 与桌面端（所有账号默认使用的那组）。形态按
+# 桌面端对话请求的抓包：会话 id 是带连字符的 UUID，请求/消息 id 是 32 位无连字符 hex。
 CONV_HEADERS = ("X-Conversation-ID", "X-Conversation-Request-ID",
                 "X-Root-Request-ID", "X-Conversation-Message-ID")
 HEX32 = ("X-Request-ID", "X-Conversation-Request-ID", "X-Root-Request-ID",
@@ -139,7 +157,7 @@ check("request ids are 32 hex UUIDv4",
       and uuid.UUID(b4).version == 4, (a4, b4))
 
 print()
-print("[6] the desktop identity matches the 5.8.4 capture")
+print("[6] the desktop identity matches the official desktop clients")
 d = wb_identity.build_identity_headers("workbuddy", "intl", "u1", "tok")
 check("X-IDE-Version is 5.8.4", d.get("X-IDE-Version") == "5.8.4",
       d.get("X-IDE-Version"))
@@ -147,10 +165,12 @@ check("the UA is the captured one",
       d.get("User-Agent") == "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0",
       d.get("User-Agent"))
 check("X-Product is SaaS", d.get("X-Product") == "SaaS", d.get("X-Product"))
-check("X-Agent-Type / X-Agent-Purpose / X-Agent-Intent",
-      (d.get("X-Agent-Type"), d.get("X-Agent-Purpose"), d.get("X-Agent-Intent"))
-      == ("main", "conversation", "craft"),
-      (d.get("X-Agent-Type"), d.get("X-Agent-Purpose"), d.get("X-Agent-Intent")))
+check("X-Agent-Type / X-Agent-Purpose / X-Agent-Intent / X-Agent-Runtime",
+      (d.get("X-Agent-Type"), d.get("X-Agent-Purpose"), d.get("X-Agent-Intent"),
+       d.get("X-Agent-Runtime"))
+      == ("main", "conversation", "craft", "other"),
+      (d.get("X-Agent-Type"), d.get("X-Agent-Purpose"), d.get("X-Agent-Intent"),
+       d.get("X-Agent-Runtime")))
 check("X-Private-Data is true", d.get("X-Private-Data") == "true")
 check("the trace family is present",
       all(d.get(k) for k in ("X-Trace-ID", "traceparent", "b3",
@@ -160,12 +180,21 @@ check("traceparent follows the W3C shape",
       and str(d.get("traceparent", "")).endswith("-01"), d.get("traceparent"))
 check("the CN desktop keeps its own version and UA",
       wb_identity.build_identity_headers("workbuddy", "cn", "u1", "tok")["X-IDE-Version"]
-      == "5.8.3" and
+      == "5.9.3" and
       wb_identity.build_identity_headers("workbuddy", "cn", "u1", "tok")["User-Agent"]
-      == "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0")
-check("the CN chat endpoint is the 5.8.3 product endpoint",
+      == "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0")
+check("the CN chat endpoint is the CN product endpoint",
       wb_identity.endpoint_for("cn", "workbuddy")[0]
       == "https://www.workbuddy.cn")
+check("the CLI intl endpoint is codebuddy.ai",
+      wb_identity.endpoint_for("intl", "cli")[0]
+      == "https://www.codebuddy.ai")
+check("the CLI CN endpoint is codebuddy.cn",
+      wb_identity.endpoint_for("cn", "cli")[0]
+      == "https://www.codebuddy.cn")
+check("the CLI CN identity defaults to the codebuddy.cn domain",
+      wb_identity.build_identity_headers(
+          "cli", "cn", "u1", "tok")["X-Domain"] == "www.codebuddy.cn")
 check("X-Domain follows the credential domain",
       wb_identity.build_identity_headers(
           "workbuddy", "cn", "u1", "tok",

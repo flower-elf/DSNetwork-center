@@ -101,6 +101,11 @@ export function importPreview(doc) {
   return postJSON('/accounts/import', { data: doc, dryRun: true });
 }
 
+/** 添加静态 API Key 账号；服务端先验证企业额度再保存。 */
+export function addApiKey(key, nickname) {
+  return postJSON('/accounts/add-api-key', { key, nickname });
+}
+
 export function importCommit(rows, overwrite) {
   return postJSON('/accounts/import', { data: rows, overwrite });
 }

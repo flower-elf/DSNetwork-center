@@ -407,6 +407,9 @@ class _Account(object):
     uid = "u-1"
     proxy = None
 
+    def auth_headers(self):
+        return {"Authorization": "Bearer " + self.access_token}
+
 
 class _FakePool(object):
     def representative(self, realm=None):

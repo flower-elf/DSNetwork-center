@@ -1,4 +1,4 @@
-# VS Code 渠道的出站身分：UA 与版本头必须来自同一组值。
+# VS Code 渠道的出站身份：UA 与版本头必须来自同一组值。
 import os
 import sys
 import unittest
@@ -16,7 +16,7 @@ class VSCodeIdentityTest(unittest.TestCase):
         headers = wb_identity.build_identity_headers(
             "vscode", "intl", "uid-1", "token-1")
         self.assertEqual(headers["X-IDE-Type"], "VSCode")
-        self.assertEqual(headers["X-IDE-Version"], "1.142.0")
+        self.assertEqual(headers["X-IDE-Version"], "1.143.1")
         self.assertEqual(headers["X-Product-Version"], "4.12.39997873")
         self.assertEqual(headers["X-Agent-Type"], "main")
         self.assertEqual(headers["X-Agent-Purpose"], "conversation")
@@ -32,7 +32,7 @@ class CliIdentityTest(unittest.TestCase):
         headers = wb_identity.build_identity_headers(
             "cli", "intl", "uid-1", "token-1")
         self.assertEqual(headers["X-IDE-Type"], "CLI")
-        self.assertEqual(headers["X-IDE-Version"], "2.161.0")
+        self.assertEqual(headers["X-IDE-Version"], "2.177.1")
         self.assertEqual(headers["X-Agent-Type"], "main")
         self.assertEqual(headers["X-Agent-Purpose"], "conversation")
         self.assertEqual(headers["X-Agent-Runtime"], "other")
@@ -40,6 +40,15 @@ class CliIdentityTest(unittest.TestCase):
             headers["User-Agent"],
             "CLI/%s CodeBuddy/%s" % (
                 headers["X-IDE-Version"], headers["X-IDE-Version"]))
+        # 官方 CLI 会按可用父跨度与 traceFlags 动态取值；下面只固定网关
+        # 生成的根跨度形态，不声称与官方逐字节相同。
+        trace = headers["X-B3-TraceId"]
+        span = headers["X-B3-SpanId"]
+        self.assertEqual(headers["X-Trace-ID"], trace)
+        self.assertEqual(headers["traceparent"], "00-%s-%s-01" % (trace, span))
+        self.assertEqual(headers["b3"], "%s-%s-1" % (trace, span))
+        self.assertEqual(headers["X-B3-Sampled"], "1")
+        self.assertNotIn("X-B3-ParentSpanId", headers)
 
 
 class PrivateDataTest(unittest.TestCase):

@@ -373,5 +373,85 @@ class ParseConcurrencyTests(unittest.TestCase):
                           "没有这个账号时要返回 None，路由据此回 404")
 
 
+class ParseAccountSetTests(unittest.TestCase):
+    """/accounts/set 先校验全部字段，再写入任何一项。"""
+
+    def test_invalid_later_field_rejects_the_whole_payload(self):
+        changes, problem = P.parse_account_set({"priority": 5, "weight": 999})
+        self.assertIsNone(changes)
+        self.assertEqual(problem, "weight out of range (1-100)")
+
+    def test_valid_fields_are_normalised(self):
+        changes, problem = P.parse_account_set({
+            "weight": "5", "priority": 7, "concurrencyLimit": "12",
+            "enabled": 1,
+        })
+        self.assertEqual(problem, "")
+        self.assertEqual(changes, {"weight": 5, "priority": 7,
+                                   "concurrencyLimit": 12, "enabled": True})
+
+    def test_empty_payload_names_the_fields(self):
+        changes, problem = P.parse_account_set({})
+        self.assertIsNone(changes)
+        self.assertIn("nothing to update", problem)
+
+    def test_published_limits_match_server_constants(self):
+        limits = P.account_limits()
+        self.assertEqual(limits["priorityMax"], wb_accounts.MAX_ACCOUNT_PRIORITY)
+        self.assertEqual(limits["concurrencyMax"],
+                         wb_accounts.MAX_ACCOUNT_CONCURRENCY)
+        self.assertEqual(limits["weightMax"], wb_accounts.MAX_ACCOUNT_WEIGHT)
+        self.assertEqual(limits["noteMax"], wb_accounts.MAX_ACCOUNT_NOTE)
+        self.assertEqual(limits["apiKeyPrefixes"],
+                         list(P.wb_identity.API_KEY_PREFIXES))
+
+
+class SetRouteAtomicTests(unittest.TestCase):
+    """/accounts/set 先校验全部字段，再写入任何一项。"""
+
+    class _Handler(object):
+        def __init__(self):
+            self.code = None
+            self.payload = None
+
+        def _error(self, code, message, err_type="server_error"):
+            self.code = code
+            self.payload = message
+            return None
+
+        def _json(self, code, obj):
+            self.code = code
+            self.payload = obj
+            return None
+
+    def setUp(self):
+        self._original_pool = P.POOL
+
+    def tearDown(self):
+        P.POOL = self._original_pool
+
+    def test_an_invalid_later_field_writes_nothing(self):
+        target = account("uid-set", priority=100)
+        P.POOL = pool_with(target)
+        handler = self._Handler()
+        P.Handler._route_accounts_set(handler, {
+            "uid": "uid-set", "priority": 5, "weight": 999,
+        })
+        self.assertEqual(handler.code, 400)
+        self.assertEqual(P.POOL.get("uid-set").priority, 100,
+                         "校验失败时前面的 priority 不得写入")
+
+    def test_valid_fields_are_applied_together(self):
+        target = account("uid-set", priority=100)
+        P.POOL = pool_with(target)
+        handler = self._Handler()
+        P.Handler._route_accounts_set(handler, {
+            "uid": "uid-set", "priority": 5, "weight": 2,
+        })
+        self.assertEqual(handler.code, 200)
+        self.assertEqual(P.POOL.get("uid-set").priority, 5)
+        self.assertEqual(P.POOL.get("uid-set").weight, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

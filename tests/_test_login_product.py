@@ -1,7 +1,7 @@
 """添加账号时选择的官方客户端决定登录参数，也成为新账号的出站身份。
 
 auth/state 的 platform 参数取客户端产品配置中的 authentication.attributes.platform：
-国内版桌面端 5.8.3 为 workbuddy，国际版桌面端 5.8.4 为 workbuddy-ai，VS Code
+国内版桌面端 5.9.3 为 workbuddy，国际版桌面端 5.8.4 为 workbuddy-ai，VS Code
 插件为 VSCode，CodeBuddy CLI 为 CLI。登录完成后，账号的 product 与登录时选择的
 客户端一致，重启后读回同一个值。
 
@@ -106,6 +106,8 @@ class LoginProductTests(unittest.TestCase):
                 reloaded = {a.uid: a for a in wb_accounts.AccountPool(directory).load()}
                 self.assertEqual(reloaded[uid].product, product)
                 endpoint = wb_identity.endpoint_for(realm, product)[0]
+                self.assertEqual(started["domain"],
+                                 wb_identity.endpoint_for(realm, product)[1])
                 auth_urls = [u for u in upstream.urls if "/auth/" in u]
                 self.assertTrue(all(u.startswith(endpoint) for u in auth_urls), auth_urls)
 
@@ -121,6 +123,14 @@ class LoginProductTests(unittest.TestCase):
                         self.assertIn("Content-Type", headers)
                     else:
                         self.assertNotIn("Content-Type", headers)
+                    if product in (wb_identity.PRODUCT_VSCODE,
+                                   wb_identity.PRODUCT_CLI):
+                        if "auth/state" in url:
+                            self.assertEqual(
+                                headers["X-Domain"],
+                                wb_identity.endpoint_for(realm, product)[1])
+                        else:
+                            self.assertNotIn("X-Domain", headers)
                     self.assertEqual(headers["User-Agent"],
                                      wb_identity.identity_user_agent(realm, product))
                     for name in ("X-No-Authorization", "X-No-User-Id",

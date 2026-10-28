@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
@@ -109,6 +110,29 @@ class PanelStatusTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual((info["accounts"], info["accounts_ready"]), (4, 2))
         self.assertIn("api_key_set", info)
+
+
+class StartupUserAgentTests(unittest.TestCase):
+    def test_each_present_realm_gets_its_own_desktop_ua(self):
+        accounts = [
+            SimpleNamespace(realm="intl"),
+            SimpleNamespace(realm="cn"),
+            SimpleNamespace(realm="cn"),
+        ]
+        self.assertEqual(proxy.startup_user_agents(accounts), [
+            ("cn", proxy.wb_accounts.REALM_CONFIGS["cn"]["chat_ua"]),
+            ("intl", proxy.wb_accounts.REALM_CONFIGS["intl"]["chat_ua"]),
+        ])
+
+    def test_a_realm_without_accounts_is_skipped(self):
+        self.assertEqual(proxy.startup_user_agents([SimpleNamespace(realm="cn")]), [
+            ("cn", proxy.wb_accounts.REALM_CONFIGS["cn"]["chat_ua"]),
+        ])
+
+    def test_no_accounts_or_unknown_realms_print_nothing(self):
+        self.assertEqual(proxy.startup_user_agents([]), [])
+        self.assertEqual(proxy.startup_user_agents(None), [])
+        self.assertEqual(proxy.startup_user_agents([SimpleNamespace(realm="other")]), [])
 
 
 if __name__ == "__main__":

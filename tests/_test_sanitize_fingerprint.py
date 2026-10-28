@@ -417,6 +417,26 @@ class DshToolNeutralizationTests(unittest.TestCase):
     def test_non_dsh_tools_untouched(self):
         self.assertEqual(self._body(True, dsh=False)["tools"], self.TOOLS)
 
+    def test_dsh_marker_survives_alias_and_is_not_sent(self):
+        tools = [
+            {"type": "function", "function": {
+                "name": "job_output",
+                "description": "Read a job.",
+                "parameters": {"type": "object", "properties": {
+                    "b": {"type": "string"}, "a": {"type": "string"}}}}},
+            {"type": "function", "function": {"name": "job_list"}},
+            {"type": "function", "function": {"name": "present"}},
+        ]
+        payload = {"model": "deepseek-v4.1-flash",
+                   "messages": [{"role": "user", "content": "hi"}],
+                   "tools": tools}
+        self.assertTrue(P.prepare_dsh_tool_aliases(payload))
+        body = P.build_upstream_body(payload)
+        self.assertNotIn("_dsh_request", body)
+        params = body["tools"][0]["function"]["parameters"]
+        self.assertEqual(list(params["properties"]), ["a", "b"])
+        self.assertEqual(body["tools"][0]["function"]["name"], "read_job")
+
     def test_enabled_keeps_contract_and_reduces_identifiers(self):
         body = self._body(True)
         fn = body["tools"][0]["function"]
@@ -522,6 +542,55 @@ class DshToolAliasTests(unittest.TestCase):
         self.assertEqual(
             payload["messages"][0]["tool_calls"][0]["function"]["name"],
             "job_output")
+
+    def _sse(self, chunks):
+        return [("data: " + json.dumps(c) + "\n").encode("utf-8")
+                for c in chunks] + [b"data: [DONE]\n"]
+
+    def test_messages_stream_restores_tool_name(self):
+        chunks = [
+            {"id": "c1", "model": "m", "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1",
+                "function": {"name": "read_job", "arguments": "{}"}}]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+        frames = list(P.stream_messages_events(
+            iter(self._sse(chunks)), "m", {}, tool_alias={"read_job": "job_output"}))
+        names = []
+        for frame in frames:
+            for line in frame.decode("utf-8").splitlines():
+                if line.startswith("data: "):
+                    try:
+                        obj = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    block = obj.get("content_block") or {}
+                    if block.get("type") == "tool_use":
+                        names.append(block.get("name"))
+        self.assertEqual(names, ["job_output"])
+
+    def test_responses_stream_restores_tool_name(self):
+        chunks = [
+            {"id": "c1", "model": "m", "choices": [{"delta": {"tool_calls": [{
+                "index": 0, "id": "call_1",
+                "function": {"name": "read_job", "arguments": "{}"}}]}}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        ]
+        frames = list(P.stream_responses_events(
+            iter(self._sse(chunks)), "m",
+            {"base_body": {}, "tool_alias": {"read_job": "job_output"}}))
+        names = []
+        for frame in frames:
+            for line in frame.decode("utf-8").splitlines():
+                if line.startswith("data: "):
+                    try:
+                        obj = json.loads(line[6:])
+                    except ValueError:
+                        continue
+                    item = obj.get("item") or {}
+                    if item.get("type") == "function_call":
+                        names.append(item.get("name"))
+        self.assertIn("job_output", names)
 
     def test_restore_names_in_nonstream_and_stream_shapes(self):
         reverse = {"read_job": "job_output", "delegate": "subagent"}

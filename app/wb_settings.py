@@ -2359,12 +2359,22 @@ def set_hidden_pages(accounts_dir, pages):
 
 
 SCHEDULER_GROUPS = ("checkin", "travel", "keepalive", "cat")
+SCHEDULER_ENABLED_KEY = "scheduler_enabled"
 DEFAULT_SCHEDULER_HOURS = {
     "checkin": [9, 21],
     "travel": [9, 21],
     "keepalive": [22],
     "cat": [1],
 }
+
+
+def scheduler_enabled(accounts_dir):
+    """调度器总开关；缺失时视为开启，只有显式 false 才关闭。"""
+    return _flag(accounts_dir, SCHEDULER_ENABLED_KEY, True)
+
+
+def set_scheduler_enabled(accounts_dir, enabled):
+    return _set_flag(accounts_dir, SCHEDULER_ENABLED_KEY, enabled)
 
 
 def _strict_hours(value, group):
@@ -2407,24 +2417,32 @@ def scheduler_hours(accounts_dir):
     """后台排程各组的整点时段。
 
     缺失或写坏的组回到默认值（09:00/21:00、22:00、01:00）；显式留空表示
-    这一组不运行。读取不改文件，下一次面板保存才会写回。
+    该组不运行，但四组全空按未设置处理，回落到默认值；关闭调度器使用
+    总开关。读取不改文件，下一次面板保存才会写回。
     """
     raw = load(accounts_dir).get("scheduler_hours")
     if not isinstance(raw, dict):
         return {group: list(DEFAULT_SCHEDULER_HOURS[group])
                 for group in SCHEDULER_GROUPS}
-    return {group: _read_hours(raw.get(group), DEFAULT_SCHEDULER_HOURS[group])
-            for group in SCHEDULER_GROUPS}
+    hours = {group: _read_hours(raw.get(group), DEFAULT_SCHEDULER_HOURS[group])
+             for group in SCHEDULER_GROUPS}
+    if not any(hours.values()):
+        # 全空是合法的旧数据，但不该被当成“关闭”；关闭请使用显式总开关。
+        return {group: list(DEFAULT_SCHEDULER_HOURS[group])
+                for group in SCHEDULER_GROUPS}
+    return hours
 
 
 def set_scheduler_hours(accounts_dir, hours):
-    """保存四组整点时段，返回归一化后的值。"""
+    """保存四组整点时段，返回归一化后的值；四组全空时拒绝保存。"""
     if not isinstance(hours, dict):
         raise ValueError("scheduler_hours 必须是对象")
     cleaned = {
         group: _strict_hours(hours.get(group, DEFAULT_SCHEDULER_HOURS[group]), group)
         for group in SCHEDULER_GROUPS
     }
+    if not any(cleaned.values()):
+        raise ValueError("至少保留一个整点；要关闭调度器请使用调度器总开关")
     with _lock:
         data = load(accounts_dir)
         data["scheduler_hours"] = cleaned

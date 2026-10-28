@@ -601,6 +601,7 @@ def handle(handler, payload):
     custom_names = P.custom_tool_names(resp_req.get("tools"))
     chat_req = P.responses_to_chat(resp_req)
     namespace_map = chat_req.pop("_namespace_map", None)
+    tool_alias = {} if namespace_map else P.prepare_dsh_tool_aliases(chat_req)
     request_meta = {
         "tools": resp_req.get("tools") or [],
         "tool_choice": resp_req.get("tool_choice", "auto"),
@@ -618,18 +619,20 @@ def handle(handler, payload):
         if want_stream:
             return _messages_stream(handler, upstream, model, custom_names, request_meta,
                                     chat_req, namespace_map, fp, account, t_start,
-                                    session_key, effort)
+                                    session_key, effort, tool_alias=tool_alias)
         return _messages_nonstream(handler, upstream, model, custom_names, request_meta,
                                    chat_req, namespace_map, fp, account, t_start,
-                                   session_key, effort)
+                                   session_key, effort, tool_alias=tool_alias)
 
 
 def _messages_stream(handler, upstream, model, custom_names, request_meta, chat_req,
-                     namespace_map, fp, account, t_start, session_key, effort):
+                     namespace_map, fp, account, t_start, session_key, effort,
+                     tool_alias=None):
     _stream_headers(handler)
     writer = MessageStreamWriter(model, input_tokens=_input_estimate(chat_req))
     holder = {"usage": None, "custom_names": custom_names,
               "request_meta": request_meta, "namespace_map": namespace_map,
+              "tool_alias": tool_alias,
               "base_body": chat_req, "base_messages": chat_req.get("messages"),
               "session_key": session_key,
               "realm": handler._request_realm() or P.CURRENT_REALM}
@@ -686,7 +689,8 @@ def _messages_stream(handler, upstream, model, custom_names, request_meta, chat_
 
 
 def _messages_nonstream(handler, upstream, model, custom_names, request_meta, chat_req,
-                        namespace_map, fp, account, t_start, session_key, effort):
+                        namespace_map, fp, account, t_start, session_key, effort,
+                        tool_alias=None):
     sources = []
     rounds = 0
     web_tools = P.web_tools_active(chat_req)
@@ -698,6 +702,8 @@ def _messages_nonstream(handler, upstream, model, custom_names, request_meta, ch
                           elapsed_ms=int((time.time() - t_start) * 1000),
                           account=account.uid)
             return handler._anthropic_error(502, "upstream stream error: %s" % exc)
+        if tool_alias:
+            P.restore_dsh_tool_names(chat_obj, tool_alias)
         calls = P.internal_calls_from_chat(chat_obj, web_tools=web_tools)
         if not calls:
             break

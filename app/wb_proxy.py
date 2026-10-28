@@ -539,7 +539,7 @@ _catalog_raw_meta = {}
 #: WB_PROXY_CATALOG_DIR 覆盖。
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(APP_DIR)
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CATALOG_CACHE_DIR = os.environ.get("WB_PROXY_CATALOG_DIR") \
     or os.path.join(PROJECT_DIR, "catalog")
 # 用量记账：每个上游响应都带 usage 块，网关同时为每个请求写一行 JSONL。
@@ -6475,6 +6475,19 @@ def account_views(realm=None):
         return []
     return POOL.list_public(realm=realm)
 
+
+def account_limits():
+    """Panel and server share one set of account field limits."""
+    return {
+        "priorityDefault": wb_accounts.DEFAULT_ACCOUNT_PRIORITY,
+        "priorityMax": wb_accounts.MAX_ACCOUNT_PRIORITY,
+        "concurrencyMax": wb_accounts.MAX_ACCOUNT_CONCURRENCY,
+        "weightMin": 1,
+        "weightMax": wb_accounts.MAX_ACCOUNT_WEIGHT,
+        "noteMax": wb_accounts.MAX_ACCOUNT_NOTE,
+        "apiKeyPrefixes": list(wb_identity.API_KEY_PREFIXES),
+    }
+
 # --------------------------------------------------------- 积分获取历史（发放记录）
 # 上游对每个账号返回一份积分包清单（免费套餐、每日活跃奖励的 Bonus Pack、活动包…），
 # 每个包带面额、发放时间与到期时间。看板的「积分获取历史」就是这份清单的合并视图：
@@ -11309,14 +11322,15 @@ def remote_config_headers(account, realm, ua=None):
     realm's fixed desktop UA rather than the account's current identity.
     """
     cfg = wb_accounts.get_realm_config(realm)
-    return {
+    headers = {
         "Accept": "application/json, text/plain, */*",
         "User-Agent": ua or cfg["chat_ua"],
         "Origin": cfg["origin"],
         "Referer": cfg["origin"] + "/",
-        "Authorization": "Bearer " + account.access_token,
         "X-User-Id": account.uid,
     }
+    headers.update(account.auth_headers())
+    return headers
 
 
 def _agent_model_lists(payload):
@@ -12352,8 +12366,8 @@ def is_dsh_payload(payload):
 def apply_dsh_tool_aliases(payload):
     """按本请求实际提供的工具生成别名，返回 别名 -> 原名 的映射。
 
-    只由 Chat Completions 路由调用；Responses 与 Anthropic Messages 路由
-    不做别名映射，保持客户端原名，避免缺少回映射时返回未知工具名。
+    Chat、Responses 与 Anthropic Messages 路由收到 chat 请求后调用本函数；
+    返回时由各自的转换器解析 chat 对象或 SSE 块，还原原始工具名。
     """
     tools = payload.get("tools")
     if not isinstance(tools, list):
@@ -12422,6 +12436,16 @@ def apply_dsh_tool_aliases(payload):
             rewritten.append(msg)
         payload["messages"] = rewritten
     return {alias: name for name, alias in active.items()}
+
+
+def prepare_dsh_tool_aliases(payload):
+    """按设置与 DSH 检测结果准备别名；关闭或非 DSH 时返回空映射。"""
+    if not payload.get("tools") or not _dsh_tool_neutralization_enabled():
+        return {}
+    if not is_dsh_payload(payload):
+        return {}
+    payload["_dsh_request"] = True
+    return apply_dsh_tool_aliases(payload)
 
 
 def restore_dsh_tool_names(obj, reverse):
@@ -13604,6 +13628,8 @@ def apply_prompt_mode(messages):
 def build_upstream_body(payload, dsh_request=None):
     model = payload.get("model") or ""
     if dsh_request is None:
+        dsh_request = payload.get("_dsh_request")
+    if dsh_request is None:
         dsh_request = bool(payload.get("tools")) and is_dsh_payload(payload)
     # Resolve the effective thinking state before the backfill below: while
     # thinking is on, the upstream requires reasoning_content on every
@@ -14457,6 +14483,49 @@ def parse_account_priority(value):
     if not 0 <= value <= wb_accounts.MAX_ACCOUNT_PRIORITY:
         return None, "priority must be a whole number between 0 and 9999"
     return value, ""
+
+
+def parse_account_set(payload):
+    """Validate an /accounts/set payload; returns (changes, error).
+
+    Validation runs before any field is applied so a later invalid field cannot
+    leave the earlier ones persisted (2026-10 audit).
+    """
+    changes = {}
+    if "proxySlot" in payload:
+        changes["proxySlot"] = payload.get("proxySlot")
+    if "proxy" in payload:
+        changes["proxy"] = payload.get("proxy")
+    if "enabled" in payload:
+        changes["enabled"] = bool(payload.get("enabled"))
+    if "weight" in payload:
+        try:
+            weight = int(payload.get("weight"))
+        except (TypeError, ValueError):
+            return None, "weight must be an integer between 1 and %d" % wb_accounts.MAX_ACCOUNT_WEIGHT
+        if not 1 <= weight <= wb_accounts.MAX_ACCOUNT_WEIGHT:
+            return None, "weight out of range (1-%d)" % wb_accounts.MAX_ACCOUNT_WEIGHT
+        changes["weight"] = weight
+    if "priority" in payload:
+        priority, problem = parse_account_priority(payload.get("priority"))
+        if problem:
+            return None, problem
+        changes["priority"] = priority
+    if "concurrencyLimit" in payload:
+        limit, problem = wb_accounts.normalise_concurrency_limit(
+            payload.get("concurrencyLimit"))
+        if problem:
+            return None, problem
+        changes["concurrencyLimit"] = limit
+    if "note" in payload:
+        changes["note"] = payload.get("note")
+    if "disabledModels" in payload:
+        changes["disabledModels"] = payload.get("disabledModels")
+    if not changes:
+        return None, ("nothing to update: pass 'enabled', 'proxy', 'proxySlot', "
+                      "'weight', 'priority', 'concurrencyLimit', 'note' or "
+                      "'disabledModels'")
+    return changes, ""
 
 
 def parse_test_model(value):
@@ -16803,9 +16872,10 @@ def _anthropic_estimate_chat_tokens(chat):
     return sum(estimate_tokens(value) for value in values if value)
 
 
-def stream_messages_events(raw_iter, model, holder=None):
+def stream_messages_events(raw_iter, model, holder=None, tool_alias=None):
     """把 chat-completions SSE 流转成 Anthropic Messages SSE 帧。"""
     holder = holder if isinstance(holder, dict) else {}
+    tool_alias = tool_alias or {}
     state = {
         "started": False,
         "done": False,
@@ -16945,7 +17015,8 @@ def stream_messages_events(raw_iter, model, holder=None):
                 entry["id"] = _anthropic_text(call.get("id"))
             fn = call.get("function") if isinstance(call.get("function"), dict) else {}
             if fn.get("name"):
-                entry["name"] = _anthropic_text(fn.get("name"))
+                name = _anthropic_text(fn.get("name"))
+                entry["name"] = tool_alias.get(name, name)
             args = fn.get("arguments") if fn.get("arguments") is not None else ""
             if not entry["opened"] and (entry["id"] or entry["name"] or args):
                 if state["thinking_open"]:
@@ -17134,6 +17205,7 @@ def stream_responses_events(upstream, model, holder):
     saw_done = False
     custom_names = set(holder.get("custom_names") or ())
     ns_map = holder.get("namespace_map") or {}
+    tool_alias = holder.get("tool_alias") or {}
     # 由反向代理代为执行的网络工具调用，收集起来不转发给客户端
     _internal_calls = {}
     # Only reach for same-named calls when this request's definitions were the
@@ -17291,7 +17363,7 @@ def stream_responses_events(upstream, model, holder):
                     "type": "function_call",
                     "status": "completed",
                     "call_id": dc.get("id") or _new_id("call_"),
-                    "name": dc.get("name") or "",
+                    "name": tool_alias.get(dc.get("name"), dc.get("name")) or "",
                     "arguments": dc.get("arguments") or "{}",
                 }
                 stamp_namespace(fc_item, ns_map)
@@ -17462,6 +17534,8 @@ def stream_responses_events(upstream, model, holder):
                 idx = tc.get("index", 0)
                 fn = tc.get("function") or {}
                 fn_name = fn.get("name") or ""
+                if fn_name:
+                    fn_name = tool_alias.get(fn_name, fn_name)
                 fn_args = fn.get("arguments") or ""
                 call_id = tc.get("id") or ""
                 # web_search / web_fetch 由反向代理执行，不转发给客户端
@@ -18543,8 +18617,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._get_v1_usage(query)
         if path == "/usage/recent":
             return self._get_usage_recent(query)
-        if path == "/accounts/credits/detail":
-            return self._get_account_credits_detail(query)
         if path == "/accounts/credits":
             return self._get_accounts_credits()
         if path == "/accounts/credits/grants":
@@ -18859,15 +18931,25 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(400, str(exc), "invalid_request_error")
         return self._json(200, payload)
 
+    def _refresh_account_credits(self, targets):
+        """Refresh a list of accounts and return per-account rows."""
+        results = []
+        for account in targets:
+            if account is None:
+                continue
+            res = account.fetch_credits()
+            results.append({"uid": account.uid, "ok": res.get("ok", False),
+                            "credits": account.credits,
+                            "error": res.get("error", "")})
+        return results
+
     def _get_accounts_credits(self):
         if not self._authorized():
             return
         if stand_down_active():
             return self._error(503, stand_down_message(GatewayStandDown(
                 STAND_DOWN.get("detail") or "")), "overloaded_error")
-        # Refresh credits for all accounts
-        for a in (POOL.accounts if POOL else []):
-            a.fetch_credits()
+        self._refresh_account_credits(POOL.accounts if POOL else [])
         return self._json(200, {"accounts": account_views()})
 
     def _get_account_credits_grants(self):
@@ -18881,40 +18963,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         return self._json(200, credit_grants())
 
-    def _get_account_credits_detail(self, query):
-        if not self._authorized():
-            return
-        uid = (query.get("uid") or [""])[0]
-        refresh = (query.get("refresh") or ["0"])[0] in ("1", "true", "yes")
-        if not POOL:
-            return self._json(200, {"ok": False, "error": "账号池未初始化"})
-        account = POOL.get(uid) if uid else None
-        if not account:
-            if POOL.accounts:
-                account = POOL.accounts[0]
-            else:
-                return self._json(200, {"ok": False, "error": "未找到指定账号"})
-
-        if refresh or not account.credits or not account.credits.get("packages"):
-            res = account.fetch_credits()
-            if not res.get("ok"):
-                return self._json(200, {
-                    "ok": False,
-                    "uid": account.uid,
-                    "nickname": account.nickname,
-                    "realm": account.realm,
-                    "credits": account.credits,
-                    "error": res.get("error", "获取积分明细失败")
-                })
-
-        return self._json(200, {
-            "ok": True,
-            "uid": account.uid,
-            "nickname": account.nickname,
-            "realm": account.realm,
-            "credits": account.credits
-        })
-
     def _get_accounts(self, query):
         if not self._authorized():
             return
@@ -18925,6 +18973,7 @@ class Handler(BaseHTTPRequestHandler):
             "accounts": account_views(realm=query.get('realm', [None])[0] or CURRENT_REALM),
             "storage": ACCOUNTS_DIR,
             "usable": POOL.count_ready() if POOL else 0,
+            "limits": account_limits(),
             "stand_down": stand_down_state(),
         })
 
@@ -20359,10 +20408,8 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"data": payload}
         if not isinstance(payload, dict):
             return self._error(400, "expected a JSON object", "invalid_request_error")
-        if path in ("/accounts/credits", "/accounts/credits/fetch"):
-            return self._route_accounts_credits_fetch(payload)
-        if path == "/accounts/credits/detail":
-            return self._route_account_credits_detail(payload)
+        if path == "/accounts/credits":
+            return self._route_accounts_credits(payload)
         if path == "/tasks/run":
             return self._route_tasks_run(payload)
         if path == "/tasks/travel":
@@ -20407,6 +20454,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._route_accounts_delete(payload)
         if path == "/accounts/import":
             return self._route_accounts_import(payload)
+        if path == "/accounts/add-api-key":
+            return self._route_accounts_add_api_key(payload)
         return self._error(404, "unknown account endpoint", "invalid_request_error")
     def _route_accounts_product(self, payload):
         """切换出站身份（cli <-> workbuddy），并即时返回结果。
@@ -20456,7 +20505,7 @@ class Handler(BaseHTTPRequestHandler):
             "accounts": account_views(),
         })
 
-    def _route_accounts_credits_fetch(self, payload):
+    def _route_accounts_credits(self, payload):
         uid = payload.get("uid")
         realm = payload.get("realm")
         if uid:
@@ -20465,45 +20514,8 @@ class Handler(BaseHTTPRequestHandler):
             targets = [a for a in POOL.accounts if a.realm == realm]
         else:
             targets = list(POOL.accounts)
-        results = []
-        for account in targets:
-            if account is None:
-                continue
-            res = account.fetch_credits()
-            results.append({"uid": account.uid, "ok": res.get("ok", False),
-                            "credits": account.credits, "error": res.get("error", "")})
+        results = self._refresh_account_credits(targets)
         return self._json(200, {"results": results, "accounts": account_views()})
-
-    def _route_account_credits_detail(self, payload):
-        if not self._authorized():
-            return
-        uid = payload.get("uid")
-        refresh = payload.get("refresh", True)
-        if not POOL:
-            return self._json(200, {"ok": False, "error": "账号池未初始化"})
-        account = POOL.get(uid) if uid else None
-        if not account:
-            return self._json(200, {"ok": False, "error": "未找到指定账号"})
-
-        if refresh or not account.credits or not account.credits.get("packages"):
-            res = account.fetch_credits()
-            if not res.get("ok"):
-                return self._json(200, {
-                    "ok": False,
-                    "uid": account.uid,
-                    "nickname": account.nickname,
-                    "realm": account.realm,
-                    "credits": account.credits,
-                    "error": res.get("error", "获取积分明细失败")
-                })
-
-        return self._json(200, {
-            "ok": True,
-            "uid": account.uid,
-            "nickname": account.nickname,
-            "realm": account.realm,
-            "credits": account.credits
-        })
 
     def _route_tasks_run(self, payload):
         if not POOL:
@@ -20659,8 +20671,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _route_scheduler_toggle(self, payload):
         if SCHEDULER:
-            SCHEDULER.enabled = not SCHEDULER.enabled
-            SCHEDULER.log(f"用户切换调度器状态为: {'启用' if SCHEDULER.enabled else '暂停'}")
+            enabled = not SCHEDULER.enabled
+            wb_settings.set_scheduler_enabled(ACCOUNTS_DIR, enabled)
+            SCHEDULER.enabled = enabled
+            SCHEDULER.log(f"用户把调度器切换为：{'启用' if enabled else '暂停'}")
             return self._json(200, SCHEDULER.status())
         return self._json(200, {"ok": False, "msg": "调度器未初始化"})
 
@@ -20750,7 +20764,9 @@ class Handler(BaseHTTPRequestHandler):
     def _route_accounts_checkin(self, payload):
         uid = payload.get("uid")
         invalidate_tasks_cache()          # 签到会改连续打卡状态，成长任务快照随之作废
-        targets = [POOL.get(uid)] if uid else [a for a in (POOL.accounts if POOL else []) if a.realm == "cn"]
+        targets = ([POOL.get(uid)] if uid
+                   else [a for a in (POOL.accounts if POOL else [])
+                         if a.has_personal_program()])
         results = []
         for account in targets:
             if account is None:
@@ -20768,7 +20784,7 @@ class Handler(BaseHTTPRequestHandler):
         if uid:
             targets = [POOL.get(uid)]
         elif isinstance(uids, list):
-            # 「未活跃打卡一键打卡」：面板把今天还没打过卡的国际版账号列成名单送进来，
+            # 「未活跃账号一键打卡」：面板把今天还没打过卡的国际版账号列成名单送进来，
             # 这里只按名单精确执行——已经打过的那批不再打第二遍（重复打卡不给积分，
             # 只白烧账号额度），名单外的账号也不碰。
             #
@@ -20911,6 +20927,10 @@ class Handler(BaseHTTPRequestHandler):
         for account in targets:
             if account is None:
                 continue
+            if not account.can_refresh():
+                results.append({"uid": account.uid, "ok": True,
+                                "msg": "API Key 长期有效，无需刷新"})
+                continue
             ok = account.refresh()
             account.save(ACCOUNTS_DIR)
             results.append({"uid": account.uid, "ok": ok, "error": account.last_error})
@@ -21013,78 +21033,63 @@ class Handler(BaseHTTPRequestHandler):
         uid = payload.get("uid")
         if not uid:
             return self._error(400, "uid required")
-        # Each field is applied on its own so a caller can change one thing
-        # without restating the others; at least one must be present.
+        changes, problem = parse_account_set(payload)
+        if problem:
+            return self._error(400, problem)
+        if POOL.get(uid) is None:
+            return self._error(404, "no such account")
         updated = None
-        if "proxySlot" in payload:
-            updated = POOL.set_proxy_slot(uid, payload.get("proxySlot"))
+        if "proxySlot" in changes:
+            updated = POOL.set_proxy_slot(uid, changes["proxySlot"])
             if updated is None:
                 return self._error(404, "no such account")
             log("account %s proxy slot set to %s"
                 % (uid[:8], updated.get("proxySlot") or "(direct)"))
-        if "proxy" in payload:
-            updated = POOL.set_proxy(uid, payload.get("proxy"))
+        if "proxy" in changes:
+            updated = POOL.set_proxy(uid, changes["proxy"])
             if updated is None:
                 return self._error(404, "no such account")
             log("account %s proxy set to %s"
                 % (uid[:8], updated.get("proxy") or "(direct)"))
-        if "enabled" in payload:
-            updated = POOL.set_enabled(uid, bool(payload.get("enabled")))
+        if "enabled" in changes:
+            updated = POOL.set_enabled(uid, changes["enabled"])
             if updated is None:
                 return self._error(404, "no such account")
-            if payload.get("enabled"):
+            if changes["enabled"]:
                 clear_stand_down()
             log("account %s %s"
-                % (uid[:8], "enabled" if payload.get("enabled") else "disabled"))
-        if "weight" in payload:
-            try:
-                weight = int(payload.get("weight"))
-            except (TypeError, ValueError):
-                return self._error(400, "weight must be an integer between 1 and 100")
-            if not 1 <= weight <= 100:
-                return self._error(400, "weight out of range (1-100)")
-            updated = POOL.set_weight(uid, weight)
+                % (uid[:8], "enabled" if changes["enabled"] else "disabled"))
+        if "weight" in changes:
+            updated = POOL.set_weight(uid, changes["weight"])
             if updated is None:
                 return self._error(404, "no such account")
-            log("account %s weight set to %d" % (uid[:8], weight))
-        if "priority" in payload:
-            priority, problem = parse_account_priority(payload.get("priority"))
-            if problem:
-                return self._error(400, problem)
-            updated = POOL.set_priority(uid, priority)
+            log("account %s weight set to %d" % (uid[:8], changes["weight"]))
+        if "priority" in changes:
+            updated = POOL.set_priority(uid, changes["priority"])
             if updated is None:
                 return self._error(404, "no such account")
-            log("account %s priority set to %d" % (uid[:8], priority))
-        if "concurrencyLimit" in payload:
-            limit, problem = wb_accounts.normalise_concurrency_limit(
-                payload.get("concurrencyLimit"))
-            if problem:
-                return self._error(400, problem)
-            updated = POOL.set_concurrency_limit(uid, limit)
+            log("account %s priority set to %d" % (uid[:8], changes["priority"]))
+        if "concurrencyLimit" in changes:
+            updated = POOL.set_concurrency_limit(uid, changes["concurrencyLimit"])
             if updated is None:
                 return self._error(404, "no such account")
-            log("account %s concurrency limit set to %d" % (uid[:8], limit))
-        if "note" in payload:
-            updated = POOL.set_note(uid, payload.get("note"))
+            log("account %s concurrency limit set to %d"
+                % (uid[:8], changes["concurrencyLimit"]))
+        if "note" in changes:
+            updated = POOL.set_note(uid, changes["note"])
             if updated is None:
                 return self._error(404, "no such account")
             log("account %s note set (%d chars)"
                 % (uid[:8], len(updated.get("note") or "")))
-        if "disabledModels" in payload:
+        if "disabledModels" in changes:
             # 人工黑名单：这些模型不再派给该账号，其他模型与别的账号都不受影响。
             # 传空数组 = 清空禁用。
-            updated = POOL.set_disabled_models(uid, payload.get("disabledModels"))
+            updated = POOL.set_disabled_models(uid, changes["disabledModels"])
             if updated is None:
                 return self._error(404, "no such account")
             log("account %s disabled models: %s"
                 % (uid[:8],
                    ",".join(updated.get("disabledModels") or []) or "(none)"))
-        if updated is None:
-            return self._error(
-                400,
-                "nothing to update: pass 'enabled', 'proxy', 'proxySlot', "
-                "'weight', 'priority', 'concurrencyLimit', 'note' or 'disabledModels'"
-            )
         return self._json(200, {"account": updated})
 
     def _route_accounts_set_all(self, payload):
@@ -21101,6 +21106,49 @@ class Handler(BaseHTTPRequestHandler):
         removed = POOL.remove(uid)
         log("account %s deleted" % uid[:8])
         return self._json(200, {"deleted": removed, "accounts": account_views()})
+
+    def _route_accounts_add_api_key(self, payload):
+        """新增静态 API Key 账号；先探测一次企业额度端点，成功才保存。"""
+        key = str(payload.get("key") or payload.get("accessToken") or "").strip()
+        if not key:
+            return self._error(400, "key is required", "invalid_request_error")
+        if not wb_identity.is_api_key_token(key):
+            return self._error(
+                400,
+                "not a static API key: expected the ck_/pt_ prefix from the "
+                "CodeBuddy API console",
+                "invalid_request_error")
+        try:
+            account = wb_accounts.api_key_account(
+                key, payload.get("nickname") or "", payload.get("uid") or "")
+        except Exception as exc:
+            return self._error(400, "cannot build account: %s" % exc,
+                               "invalid_request_error")
+        if not account.uid:
+            return self._error(400, "cannot derive a uid from this key",
+                               "invalid_request_error")
+        probe = account.probe_api_key(apply_credits=True)
+        if not probe.get("ok"):
+            return self._error(
+                400,
+                "the key did not pass the balance probe, so it was not saved: %s"
+                % (probe.get("error") or "unknown error"),
+                "invalid_request_error")
+        probe.pop("credits", None)
+        existed = POOL.get(account.uid) is not None if POOL else False
+        POOL.add(account)
+        log("account added (api key): uid=%s probe=ok(%s/%s)"
+            % (account.uid[:8], probe.get("used"), probe.get("limit")),
+            tag="accounts")
+        return self._json(200, {
+            "ok": True,
+            "uid": account.uid,
+            "nickname": account.nickname or account.uid[:8],
+            "updated": existed,
+            "probe": probe,
+            "account": account.public(),
+            "accounts": account_views(),
+        })
 
     def _route_accounts_import(self, payload):
         # Import a previously exported document (or any hand-written list
@@ -21177,6 +21225,12 @@ class Handler(BaseHTTPRequestHandler):
         custom_names = custom_tool_names(all_tools)
         chat_req = responses_to_chat(payload)
         ns_map = chat_req.pop("_namespace_map", None)
+        if ns_map:
+            if bool(chat_req.get("tools")) and is_dsh_payload(chat_req):
+                chat_req["_dsh_request"] = True
+            tool_alias = {}
+        else:
+            tool_alias = prepare_dsh_tool_aliases(chat_req)
         # Echo these back on the response object; see chat_to_response.
         request_meta = {
             "tools": all_tools,
@@ -21255,13 +21309,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._responses_stream_response(
                     upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                     base_body=chat_req, session_key=session_key, realm=req_realm,
-                    effort=effort)
+                    effort=effort, tool_alias=tool_alias)
             return self._responses_nonstream_response(
                 upstream, model, custom_names, request_meta, fp, account, t_start, ns_map,
                 base_body=chat_req, session_key=session_key, realm=req_realm,
-                effort=effort)
+                effort=effort, tool_alias=tool_alias)
 
-    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, lease=None):
+    def _responses_stream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, lease=None, tool_alias=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -21272,6 +21326,7 @@ class Handler(BaseHTTPRequestHandler):
         holder = {"usage": None, "custom_names": custom_names,
                   "request_meta": request_meta,
                   "namespace_map": namespace_map,
+                  "tool_alias": tool_alias,
                   "base_body": base_body,
                   "base_messages": (base_body or {}).get("messages"),
                   "session_key": session_key,
@@ -21374,7 +21429,7 @@ class Handler(BaseHTTPRequestHandler):
                      fp=fp, account=account.uid, key=self._key_id(), effort=effort)
         return
 
-    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, lease=None):
+    def _responses_nonstream_response(self, upstream, model, custom_names, request_meta, fp, account, t_start, namespace_map=None, base_body=None, session_key=None, realm=None, effort=None, lease=None, tool_alias=None):
         # 跟流式那条一样：客户端声明 web_search / web_fetch 时由反向代理代为执行。
         # 中间那几轮对客户端不可见，最后才组成一个 Responses 对象返回；不这样
         # 做的话 web_search 的 function_call 会直接漏给客户端，客户端只会回
@@ -21399,6 +21454,8 @@ class Handler(BaseHTTPRequestHandler):
                              account=account.uid, key=self._key_id())
                 return self._error(502, f"upstream stream error: {exc}")
             total_usage = sum_usage(total_usage, chat_obj.get("usage"))
+            if tool_alias:
+                restore_dsh_tool_names(chat_obj, tool_alias)
             calls = internal_calls_from_chat(chat_obj, web_tools=web_tools)
             if not calls:
                 break
@@ -21462,6 +21519,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_req = messages_to_chat(payload)
         except ValueError as exc:
             return self._anthropic_error(400, str(exc), "invalid_request_error")
+        tool_alias = prepare_dsh_tool_aliases(chat_req)
         model = chat_req.get("model") or "unknown"
         want_stream = bool(chat_req.get("stream"))
         session_key = extract_session_key(self.headers, chat_req)
@@ -21539,17 +21597,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._messages_stream_response(
                     upstream, model, fp, account, t_start,
                     base_body=chat_req, session_key=session_key,
-                    realm=req_realm, effort=effort)
+                    realm=req_realm, effort=effort, tool_alias=tool_alias)
             return self._messages_nonstream_response(
                 upstream, model, fp, account, t_start,
                 base_body=chat_req, session_key=session_key,
-                realm=req_realm, effort=effort)
+                realm=req_realm, effort=effort, tool_alias=tool_alias)
 
     def _messages_nonstream_response(self, upstream, model, fp, account, t_start,
                                      base_body=None, session_key=None, realm=None,
-                                     effort=None):
+                                     effort=None, tool_alias=None):
         try:
             chat_obj = aggregate_stream(upstream, model, None)
+            if tool_alias:
+                restore_dsh_tool_names(chat_obj, tool_alias)
             result = chat_to_messages(chat_obj)
             wall = int((time.time() - t_start) * 1000)
             record_upstream_usage(upstream, model, chat_obj.get("usage"), stream=False, elapsed_ms=wall,
@@ -21568,7 +21628,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _messages_stream_response(self, upstream, model, fp, account, t_start,
                                   base_body=None, session_key=None, realm=None,
-                                  session_meta=None, effort=None):
+                                  session_meta=None, effort=None, tool_alias=None):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
@@ -21579,7 +21639,8 @@ class Handler(BaseHTTPRequestHandler):
         holder = {"usage": None}
         first_ms = None
         try:
-            for frame in stream_messages_events(upstream, model, holder):
+            for frame in stream_messages_events(upstream, model, holder,
+                                                tool_alias=tool_alias):
                 if first_ms is None:
                     first_ms = int((time.time() - t_start) * 1000)
                 self.wfile.write(frame)
@@ -21811,10 +21872,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_responses(payload)
         # Diagnostics: what the client actually asked for, and what we forward.
         # Only the knobs that change behaviour are logged - never message text.
-        tool_alias = {}
         dsh_request = bool(payload.get("tools")) and is_dsh_payload(payload)
-        if dsh_request and _dsh_tool_neutralization_enabled():
-            tool_alias = apply_dsh_tool_aliases(payload)
+        tool_alias = prepare_dsh_tool_aliases(payload)
         forwarded = build_upstream_body(payload, dsh_request=dsh_request)
         given = client_effort_of(payload) or payload.get("reasoning") \
             or payload.get("thinking") or payload.get("enable_thinking")
@@ -22175,7 +22234,7 @@ def _apply_cli_overrides(args):
         args.host = "0.0.0.0"
     if args.user_agent:
         wb_accounts.USER_AGENT = args.user_agent.strip()
-        log("user-agent : %s (override)" % wb_accounts.USER_AGENT)
+        log("user-agent override : %s" % wb_accounts.USER_AGENT)
     if args.usage_dir:
         USAGE_DIR = os.path.abspath(args.usage_dir)
         USAGE_LOG = os.path.join(USAGE_DIR, "usage.jsonl")
@@ -22286,6 +22345,7 @@ def _bootstrap_runtime(args):
     global SCHEDULER
     from wb_scheduler import Scheduler
     SCHEDULER = Scheduler(POOL)
+    SCHEDULER.enabled = wb_settings.scheduler_enabled(ACCOUNTS_DIR)
     SCHEDULER.start()
     # 目录兜底：每天至少从上游 API 取一次（活跃使用的部署里 300s 缓存早就
     # 刷得更新，这个线程只兜长时间没人访问 / 一直吃缓存文件或内置快照）。
@@ -22320,6 +22380,13 @@ def _bootstrap_runtime(args):
     )
     UPDATES.start()
     return api_key_generated
+
+def startup_user_agents(accounts):
+    """按有账号的区域返回官方桌面客户端的对话 UA，顺序为国内版、国际版。"""
+    realms = {getattr(account, "realm", "") for account in accounts or ()}
+    return [(realm, wb_accounts.REALM_CONFIGS[realm]["chat_ua"])
+            for realm in ("cn", "intl") if realm in realms]
+
 
 def _report_first_run(args):
     if args.info:
@@ -22370,7 +22437,9 @@ def _log_startup_summary(args, api_key_generated):
     log("realm      : %s (%s)" % (
         CURRENT_REALM,
         "www.workbuddy.ai" if CURRENT_REALM == "intl" else "www.workbuddy.cn"))
-    log("user-agent : %s" % wb_accounts.USER_AGENT)
+    # 只列该区域官方桌面客户端的对话 UA；VSC / CLI 身份按账号另算。
+    for realm, ua in startup_user_agents(POOL.accounts):
+        log("user-agent : %-4s %s" % (realm, ua))
     if args.host == "0.0.0.0":
         ips = local_ip_addresses() or ["<this-pc-ip>"]
         print()

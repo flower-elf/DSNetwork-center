@@ -159,7 +159,7 @@ export function createAdvancedTab(page) {
             ${switchRow({
               name: '对 DSH 工具调用进行处理',
               field: 'dshToolNeutralization',
-              desc: '通用化工具调用，避免问题。仅作用于 Chat Completions，默认关闭。',
+              desc: '把 DSH 工具调用的名称替换为通用名称，避免被上游识别。默认关闭。',
             })}
             ${switchRow({
               name: '亲和调试日志',

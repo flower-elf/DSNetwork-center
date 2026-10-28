@@ -24,6 +24,7 @@ export function mount(host) {
     slots: [],
     activity: {},
     standDown: null,
+    limits: null,
     query: '',
     filter: 'all',
     sort: 'default',
@@ -97,6 +98,7 @@ export function mount(host) {
       const payload = accountsResult.value || {};
       S.accounts = payload.accounts || [];
       S.standDown = payload.stand_down || null;
+      S.limits = payload.limits || null;
       S.error = '';
     }
     if (auxResult.status === 'fulfilled') {
@@ -198,8 +200,8 @@ export function mount(host) {
       applyAccountPayload(result);
       await refresh();
       if (!results.length) toast.warn('名单里的账号没有执行');
-      else if (logic.anyOk(results)) toast.success('未活跃打卡', logic.summarizeResults(results, { okText: '打卡成功' }));
-      else toast.warn('未活跃打卡', logic.summarizeResults(results));
+      else if (logic.anyOk(results)) toast.success('未活跃账号打卡', logic.summarizeResults(results, { okText: '打卡成功' }));
+      else toast.warn('未活跃账号打卡', logic.summarizeResults(results));
     } catch (err) {
       toastError('打卡失败', err);
     }
@@ -370,18 +372,26 @@ export function mount(host) {
     }
   }
 
-  function onPriorityChange(account, raw) {
-    const parsed = logic.parsePriorityInput(raw);
+  function onNumberChange(raw, { parse, current, commit }) {
+    const parsed = parse(raw);
     if (!parsed.ok) {
       toast.warn(parsed.message);
       draw();
       return;
     }
-    if (parsed.value === logic.priorityOf(account)) {
+    if (parsed.value === current) {
       draw();
       return;
     }
-    setPriority(account.uid, parsed.value);
+    commit(parsed.value);
+  }
+
+  function onPriorityChange(account, raw) {
+    onNumberChange(raw, {
+      parse: (value) => logic.parsePriorityInput(value, S.limits),
+      current: logic.priorityOf(account),
+      commit: (value) => setPriority(account.uid, value),
+    });
   }
 
   async function setPriority(uid, priority) {
@@ -438,6 +448,8 @@ export function mount(host) {
           <div class="row-wrap">
             <span class="strong">${account.nickname || uid.slice(0, 8)}</span>
             ${realmBadge(account.realm)}
+            ${account.apiKey ? badge('API Key', 'muted', {
+              small: true, title: account.credentialMask || '静态 API Key' }) : nothing}
             ${(account.disabledModels || []).length ? badge(
               '排除 ' + account.disabledModels.length + ' 个模型', 'muted',
               { small: true, title: logic.disabledModelsTitle(account) }) : nothing}
@@ -595,41 +607,54 @@ export function mount(host) {
       </select>`;
   }
 
+  function numberCell(account, { field, draftField, value, min, max, title, onChange }) {
+    return html`
+      <input class="input input-num input-sm input-${field}" type="number" min=${min} max=${max} step="1"
+             data-draft=${draftField} data-uid=${logic.uidAttr(account.uid)}
+             title=${title}
+             .value=${live(value)}
+             @change=${(event) => onChange(event.target.value)}>`;
+  }
+
   function priorityInput(account) {
+    const limits = logic.accountLimits(S.limits);
     const draft = logic.draftFor(S.draft, logic.uidAttr(account.uid), 'priority');
     const value = draft === null ? String(logic.priorityOf(account)) : draft;
-    return html`
-      <input class="input input-num input-sm input-priority" type="number" min="0" max="9999" step="1"
-             data-draft="priority" data-uid=${logic.uidAttr(account.uid)}
-             title="调用优先级：数字越小越先被选中，数字相同的按轮询顺序。默认 100，允许 0 到 9999。"
-             .value=${live(value)}
-             @change=${(event) => onPriorityChange(account, event.target.value)}>`;
+    return numberCell(account, {
+      field: 'priority',
+      draftField: 'priority',
+      value,
+      min: 0,
+      max: limits.priorityMax,
+      title: '调用优先级：网关先选数字较小的账号，数字相同的账号按轮询顺序选择。默认 '
+        + limits.priorityDefault + '，允许 0 到 ' + limits.priorityMax + '。',
+      onChange: (raw) => onPriorityChange(account, raw),
+    });
   }
 
   function concurrencyInput(account) {
+    const limits = logic.accountLimits(S.limits);
     const draft = logic.draftFor(S.draft, logic.uidAttr(account.uid), 'concurrency');
     const value = draft === null ? String(logic.concurrencyOf(account)) : draft;
     const busy = logic.activeRequestsOf(account);
-    return html`
-      <input class="input input-num input-sm input-concurrency" type="number" min="0" max="1000" step="1"
-             data-draft="concurrency" data-uid=${logic.uidAttr(account.uid)}
-             title=${'单账号单模型的并发上限：同一账号每个模型各自计数，0 表示不限。当前正在服务 ' + busy + ' 个请求。'}
-             .value=${live(value)}
-             @change=${(event) => onConcurrencyChange(account, event.target.value)}>`;
+    return numberCell(account, {
+      field: 'concurrency',
+      draftField: 'concurrency',
+      value,
+      min: 0,
+      max: limits.concurrencyMax,
+      title: '单账号单模型的并发上限：同一账号每个模型各自计数，0 表示不限。当前正在服务 '
+        + busy + ' 个请求。',
+      onChange: (raw) => onConcurrencyChange(account, raw),
+    });
   }
 
   function onConcurrencyChange(account, raw) {
-    const parsed = logic.parseConcurrencyInput(raw);
-    if (!parsed.ok) {
-      toast.warn(parsed.message);
-      draw();
-      return;
-    }
-    if (parsed.value === logic.concurrencyOf(account)) {
-      draw();
-      return;
-    }
-    setConcurrencyLimit(account.uid, parsed.value);
+    onNumberChange(raw, {
+      parse: (value) => logic.parseConcurrencyInput(value, S.limits),
+      current: logic.concurrencyOf(account),
+      commit: (value) => setConcurrencyLimit(account.uid, value),
+    });
   }
 
   async function setConcurrencyLimit(uid, concurrencyLimit) {
@@ -649,12 +674,14 @@ export function mount(host) {
       <div class="row-actions">
         <button class="btn btn-ghost btn-icon btn-xs" title="测试：用这个账号向它自己的端点发送一条 hi 请求"
                 @click=${busyClick(() => testAccount(account))}>${icon('Zap')}</button>
-        <button class="btn btn-ghost btn-icon btn-xs" title="刷新 Token：向腾讯换取新的访问令牌并保存"
-                @click=${busyClick(() => refreshToken(account))}>${icon('KeyRound')}</button>
+        ${account.apiKey ? nothing : html`
+          <button class="btn btn-ghost btn-icon btn-xs" title="刷新 Token：向腾讯换取新的访问令牌并保存"
+                  @click=${busyClick(() => refreshToken(account))}>${icon('KeyRound')}</button>`}
         <button class="btn btn-ghost btn-icon btn-xs" title="模型排除：这个账号不接的模型"
                 @click=${() => openModelExcludeDialog(account, { onDone: () => refresh() })}>${icon('CircleSlash')}</button>
-        <button class="btn btn-ghost btn-icon btn-xs" title="备注：只保存在本机，最长 100 字"
-                @click=${() => openNoteDialog(account)}>${icon('StickyNote')}</button>
+        <button class="btn btn-ghost btn-icon btn-xs"
+                title=${'备注：只保存在本机，最长 ' + logic.accountLimits(S.limits).noteMax + ' 字'}
+                @click=${() => openNoteDialog(account, { limits: S.limits })}>${icon('StickyNote')}</button>
         <button class="btn btn-ghost btn-icon btn-xs" title="导出这个账号"
                 @click=${busyClick(() => exportOne(account))}>${icon('Download')}</button>
         <button class="btn btn-ghost btn-icon btn-xs" title=${account.enabled ? '停用这个账号' : '启用这个账号'}
@@ -763,7 +790,7 @@ export function mount(host) {
         icon: 'Users',
         title: '账号池里还没有账号',
         desc: '登录一个腾讯账号之后，网关才能把请求转发出去，账号的积分与令牌状态也会显示在这里。',
-        action: html`<button class="btn btn-primary btn-sm" @click=${() => openAddAccountDialog()}>${icon('UserPlus')}添加账号 (OAuth)</button>`,
+        action: html`<button class="btn btn-primary btn-sm" @click=${() => openAddAccountDialog()}>${icon('UserPlus')}添加账号</button>`,
       });
     }
     if (kind === 'realm') {
@@ -771,7 +798,7 @@ export function mount(host) {
         icon: 'Users',
         title: realmLabel(realm) + '还没有账号',
         desc: '账号池里没有属于这个版本的账号，其它版本的账号不会显示在这里。可以切换右上角「查看的版本」，或者登录一个该版本的账号。',
-        action: html`<button class="btn btn-primary btn-sm" @click=${() => openAddAccountDialog({ realm })}>${icon('UserPlus')}添加账号 (OAuth)</button>`,
+        action: html`<button class="btn btn-primary btn-sm" @click=${() => openAddAccountDialog({ realm })}>${icon('UserPlus')}添加账号</button>`,
       });
     }
     return emptyState({
@@ -830,7 +857,7 @@ export function mount(host) {
   function headerActions(realm) {
     const acts = logic.realmActions(realm);
     return html`
-      <button class="btn btn-primary btn-sm" @click=${() => openAddAccountDialog({ realm })}>${icon('UserPlus')}添加账号 (OAuth)</button>
+      <button class="btn btn-primary btn-sm" @click=${() => openAddAccountDialog({ realm })}>${icon('UserPlus')}添加账号</button>
       <button class="btn btn-outline btn-sm" title="直接向腾讯查询各账号当前积分，上游缓存的积分可能滞后数小时"
               @click=${busyClick(refreshCredits)}>${icon('RefreshCw')}刷新积分</button>
       ${acts.checkin ? html`
@@ -838,7 +865,7 @@ export function mount(host) {
                 @click=${busyClick(doCheckin)}>${icon('Fuel')}${activity.BUDDY_LABEL}签到</button>` : nothing}
       ${acts.dailyChat ? html`
         <button class="btn btn-outline btn-sm" title="今天还没打卡的已启用国际版账号；已经打过的不再打第二遍"
-                @click=${busyClick(doDailyChatPending)}>${icon('CalendarCheck')}未活跃打卡一键打卡</button>` : nothing}
+                @click=${busyClick(doDailyChatPending)}>${icon('CalendarCheck')}未活跃账号一键打卡</button>` : nothing}
       ${acts.dailyChatWeb ? html`
         <button class="btn btn-outline btn-sm" title="只建网页端会话，官方每日活跃只认网页端对话；会消耗少量积分"
                 @click=${doDailyChatWeb}>${icon('Globe')}网页通道打卡</button>` : nothing}

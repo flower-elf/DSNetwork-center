@@ -2,6 +2,7 @@
 
 import base64
 import json
+import re
 import secrets
 import uuid
 
@@ -15,17 +16,17 @@ DESKTOP_VERSION_INTL = "5.8.4"
 # Electron 主进程的旁路请求 msg-center / conversations 使用
 # workbuddy-ai/⋯⋯ workbuddy-ai/⋯⋯，属于另一条链路，不能照抄。
 DESKTOP_UA_INTL = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"
-# 国内版 5.8.3 安装包 WorkBuddy-win32-x64-user-5.8.3.41334564：product.json 的
-# productName 与 applicationName 都是 WorkBuddy，sidecar 把 CLIENT_INFO_PLATFORM
-# 固定成 WorkBuddy，UA 首两段因此同名。内置 CLI 2.161.0 由 cli/package.json 的
-# publishConfig.customPackage.version 给出。
-DESKTOP_VERSION_CN = "5.8.3"
-DESKTOP_UA_CN = "WorkBuddy/5.8.3 WorkBuddy/5.8.3 CLI/2.161.0"
+# 国内版 5.9.3：product.json 的 productName 与 applicationName 都是 WorkBuddy，
+# sidecar 把 CLIENT_INFO_PLATFORM 固定成 WorkBuddy，UA 首两段因此同名。内置
+# CLI 2.165.0 由 cli/package.json 的 version 给出。
+DESKTOP_VERSION_CN = "5.9.3"
+DESKTOP_UA_CN = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
 
-DEFAULT_IDE_VERSION = "2.161.0"
+# 独立 CodeBuddy CLI 的最新版本，取自 npm 包 @tencent-ai/codebuddy-code。
+DEFAULT_IDE_VERSION = "2.177.1"
 # CodeBuddy 插件在标准 VS Code 宿主里的身份：X-IDE-Version 取 vscode.version，
 # X-Product-Version 与 UA 次段取插件 package.json 的 version。
-DEFAULT_VSCODE_VERSION = "1.142.0"
+DEFAULT_VSCODE_VERSION = "1.143.1"
 DEFAULT_VSCODE_PLUGIN_VERSION = "4.12.39997873"
 
 PRODUCT_DESKTOP = "workbuddy"
@@ -33,12 +34,51 @@ PRODUCT_VSCODE = "vscode"
 PRODUCT_CLI = "cli"
 VALID_PRODUCTS = (PRODUCT_DESKTOP, PRODUCT_VSCODE, PRODUCT_CLI)
 
+# 静态 API Key 由 CodeBuddy 平台签发，形如 ck_<id>.<secret>；pt_ 同属一套
+# 签发体系。它不是 JWT，不能按段数校验，只能按前缀识别。
+API_KEY_PREFIXES = ("ck_", "pt_")
+
+
+def is_api_key_token(token):
+    """静态 Key 必须是 ck_/pt_ 前缀，且 <id> 与 <secret> 两段都非空。"""
+    text = str(token or "")
+    for prefix in API_KEY_PREFIXES:
+        if text.startswith(prefix):
+            key_id, dot, secret = text[len(prefix):].partition(".")
+            return bool(key_id and dot and secret)
+    return False
+
+
+def api_key_id(token):
+    """ck_<id>.<secret> 的 <id> 段；净化后可拼进文件名。"""
+    text = str(token or "")
+    for prefix in API_KEY_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    if "." in text:
+        text = text.split(".", 1)[0]
+    return re.sub(r"[^A-Za-z0-9_-]", "", text)
+
+
+def auth_headers(token, api_key=None):
+    """OAuth 与静态 API Key 共用的鉴权头。
+
+    静态 Key 同时发送 Authorization 与 X-API-Key：只发送前者时上游仍返回 200，
+    但模型清单会缺少几个模型，且没有任何提示。
+    """
+    token = str(token or "")
+    headers = {"Authorization": "Bearer " + token}
+    if (is_api_key_token(token) if api_key is None else api_key):
+        headers["X-API-Key"] = token
+    return headers
+
 # 各官方客户端 OAuth 登录时 auth/state 携带的 platform 参数，取自客户端产品配置
-# 的 authentication.attributes.platform，缺省时取顶层 platform：
-#   国内版桌面端 5.8.3（WorkBuddy-win32-x64-user-5.8.3.41334564）为 workbuddy，
+# 的 authentication.attributes.platform，缺失时取顶层 platform：
+#   国内版桌面端 5.9.3 为 workbuddy，
 #   国际版桌面端 5.8.4（WorkBuddy-intl-win32-x64-user-5.8.4.41366630）为 workbuddy-ai，
 #   VS Code 插件 4.12.39997873 为 VSCode，
-#   CodeBuddy CLI 2.168.2 为 CLI。
+#   CodeBuddy CLI 2.177.1 为 CLI。
 _LOGIN_PLATFORMS = {
     ("cn", PRODUCT_DESKTOP): "workbuddy",
     ("intl", PRODUCT_DESKTOP): "workbuddy-ai",
@@ -70,14 +110,14 @@ def normalize_product(value):
 
 _ENDPOINTS = {
     ("intl", PRODUCT_DESKTOP): ("https://www.workbuddy.ai", "www.workbuddy.ai"),
-    ("intl", PRODUCT_VSCODE): ("https://www.workbuddy.ai", "www.workbuddy.ai"),
-    # www.codebuddy.ai 在实测网络上无法解析：getaddrinfo 失败，系统解析器
-    # 返回 0.0.0.1 sinkhole。国际版 CLI 身份因此走 workbuddy.ai 边缘节点，
-    # 该节点接受 CLI 头并正常响应。
-    ("intl", PRODUCT_CLI): ("https://www.workbuddy.ai", "www.workbuddy.ai"),
+    # VS Code 插件的产品配置分内部与外部两套：内部 endpoint 是
+    # copilot.tencent.com，外部 endpoint 是 www.codebuddy.ai。
+    ("intl", PRODUCT_VSCODE): ("https://www.codebuddy.ai", "www.codebuddy.ai"),
+    # CLI 使用自己的官方域名，与桌面端、VS Code 插件分开。
+    ("intl", PRODUCT_CLI): ("https://www.codebuddy.ai", "www.codebuddy.ai"),
     ("cn", PRODUCT_DESKTOP): ("https://www.workbuddy.cn", "www.workbuddy.cn"),
-    ("cn", PRODUCT_VSCODE): ("https://www.workbuddy.cn", "www.workbuddy.cn"),
-    ("cn", PRODUCT_CLI): ("https://www.workbuddy.cn", "www.workbuddy.cn"),
+    ("cn", PRODUCT_VSCODE): ("https://copilot.tencent.com", "copilot.tencent.com"),
+    ("cn", PRODUCT_CLI): ("https://www.codebuddy.cn", "www.codebuddy.cn"),
 }
 
 
@@ -104,7 +144,7 @@ def new_message_id():
 
 
 def trace_headers():
-    """5.8.4 对话请求带的链路头族：traceparent / b3 / X-B3-* / X-Trace-ID。
+    """对话请求带的链路头族：traceparent / b3 / X-B3-* / X-Trace-ID。
 
     main 请求还带 X-B3-ParentSpanId，该值需要真实的父子调用关系，网关无法
     提供，因此不伪造；辅助请求本来也不带这个头。
@@ -181,6 +221,7 @@ def build_identity_headers(product, realm, uid, token,
             "X-Agent-Intent": "craft",
             "X-Agent-Purpose": "conversation",
             "X-Agent-Type": "main",
+            "X-Agent-Runtime": "other",
             "X-IDE-Name": "WorkBuddy",
             "X-IDE-Type": "WorkBuddy",
             "X-IDE-Version": client_ver,
@@ -188,7 +229,6 @@ def build_identity_headers(product, realm, uid, token,
             "X-Domain": str(domain or endpoint_for(realm, product)[1]),
             "User-Agent": chat_ua,
             "X-User-Id": str(uid or "anonymous"),
-            "Authorization": "Bearer " + str(token or ""),
             "X-Conversation-ID": conv,
             "X-Conversation-Request-ID": conv_req_id,
             "X-Root-Request-ID": conv_req_id,
@@ -211,7 +251,6 @@ def build_identity_headers(product, realm, uid, token,
             "X-Domain": str(domain or endpoint_for(realm, product)[1]),
             "User-Agent": identity_user_agent(realm, product),
             "X-User-Id": str(uid or "anonymous"),
-            "Authorization": "Bearer " + str(token or ""),
             "X-Conversation-ID": conv,
             "X-Conversation-Request-ID": conv_req_id,
             "X-Root-Request-ID": conv_req_id,
@@ -232,13 +271,15 @@ def build_identity_headers(product, realm, uid, token,
             "X-Domain": str(domain or endpoint_for(realm, product)[1]),
             "User-Agent": identity_user_agent(realm, product),
             "X-User-Id": str(uid or "anonymous"),
-            "Authorization": "Bearer " + str(token or ""),
             "X-Conversation-ID": conv,
             "X-Conversation-Request-ID": conv_req_id,
             "X-Root-Request-ID": conv_req_id,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
+        headers.update(trace_headers())
+
+    headers.update(auth_headers(token))
 
     # 网关不提供数据用途选项，统一声明数据私有：true 表示不参与模型优化。
     headers["X-Private-Data"] = "true"

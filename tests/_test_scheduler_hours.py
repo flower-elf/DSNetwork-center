@@ -17,6 +17,7 @@ _TMP = isolated_data_dirs("wb-scheduler-hours-")
 
 import wb_scheduler  # noqa: E402
 import wb_settings  # noqa: E402
+import wb_tasks  # noqa: E402
 
 
 class FakePool(object):
@@ -49,6 +50,28 @@ class SchedulerHoursSettingsTests(unittest.TestCase):
         self.assertEqual(saved["checkin"], [9, 21])
         self.assertEqual(saved["keepalive"], [])
         self.assertEqual(wb_settings.scheduler_hours(self.directory), saved)
+
+    def test_an_all_empty_schedule_is_refused(self):
+        with self.assertRaises(ValueError):
+            wb_settings.set_scheduler_hours(
+                self.directory,
+                {group: [] for group in wb_settings.SCHEDULER_GROUPS})
+
+    def test_stored_all_empty_hours_fall_back_to_defaults(self):
+        with wb_settings._lock:
+            data = wb_settings.load(self.directory)
+            data["scheduler_hours"] = {group: []
+                                       for group in wb_settings.SCHEDULER_GROUPS}
+            wb_settings.save(self.directory, data)
+        self.assertEqual(wb_settings.scheduler_hours(self.directory),
+                         wb_settings.DEFAULT_SCHEDULER_HOURS)
+
+    def test_the_scheduler_switch_defaults_to_on_and_persists(self):
+        self.assertTrue(wb_settings.scheduler_enabled(self.directory))
+        wb_settings.set_scheduler_enabled(self.directory, False)
+        self.assertFalse(wb_settings.scheduler_enabled(self.directory))
+        wb_settings.set_scheduler_enabled(self.directory, True)
+        self.assertTrue(wb_settings.scheduler_enabled(self.directory))
 
     def test_out_of_range_hours_are_refused(self):
         with self.assertRaises(ValueError):
@@ -92,6 +115,23 @@ class SchedulerHoursTests(unittest.TestCase):
                                   "keepalive": [23], "cat": [0]})
         self.assertEqual(scheduler.all_hours, [0, 6, 7, 23])
         self.assertEqual(scheduler.next_run_time is not None, True)
+
+    def test_an_all_empty_schedule_falls_back_to_defaults(self):
+        scheduler = wb_scheduler.Scheduler(FakePool(os.environ["ACCOUNTS_DIR"]))
+        scheduler.apply_schedule({"checkin": [], "travel": [],
+                                  "keepalive": [], "cat": []})
+        self.assertEqual(scheduler.all_hours, [1, 9, 21, 22])
+        self.assertNotEqual(scheduler.next_run_time, "未设置")
+
+    def test_a_cycle_restores_the_previous_task_logger(self):
+        scheduler = wb_scheduler.Scheduler(FakePool(os.environ["ACCOUNTS_DIR"]))
+        sentinel = lambda msg: None
+        previous = wb_tasks.set_logger(sentinel)
+        try:
+            scheduler._run_cycle()
+            self.assertIs(wb_tasks._log, sentinel)
+        finally:
+            wb_tasks.set_logger(previous)
 
 
 class _ScheduledAccount(object):
