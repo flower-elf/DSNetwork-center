@@ -1,12 +1,3 @@
-"""wb_scheduler.py —— 后台定时调度器 (Scheduler)
-
-负责常驻后台自动执行：
-1. Token 保活 (Keepalive)：定期检查 Token 剩余寿命，不足 2 小时自动调用 Refresh Token。
-2. 每日签到 (Daily Checkin)：每日定时为所有国内版账号自动签到领积分。
-3. 对话活跃上报 (Activity Report)：每日定时为国内版账号上报轻量会话事件，点亮连登与热力墙。
-4. 猫猫旅行与日常结算 (Cat Travel & Welfare)：自动派出猫猫旅行或领取归来奖励。
-5. 状态持久化与看板展示：暴露状态、执行记录、支持手动立即触发与开关切换。
-"""
 import threading
 import time
 import random
@@ -32,8 +23,7 @@ class Scheduler:
         self.next_run_time = None
         self.logs = []
         self.apply_schedule()
-        # 防止巡检重叠：trigger_now() 每次点击都起一个线程，手动触发也可能
-        # 压在整点任务上。
+        # 防止巡检重叠：trigger_now() 每次点击都起线程，手动触发也可能压在整点任务上。
         self._run_lock = threading.Lock()
 
     def apply_schedule(self, hours=None):
@@ -116,7 +106,6 @@ class Scheduler:
             cur_hour = now.tm_hour
             cur_min = now.tm_min
             if self.enabled:
-                # 到达设定的整点前 1 分钟内触发
                 if cur_min == 0 and cur_hour in self.all_hours:
                     reason = f"整点排程命中 ({cur_hour}:00)"
                     try:
@@ -130,8 +119,7 @@ class Scheduler:
 
     def _calc_next_fire(self):
         if not self.all_hours:
-            # apply_schedule() 会把全空时段回退为默认值；这里兜底，防止直接
-            # 清空时段后没有下一个整点。
+            # apply_schedule() 会把全空时段回退为默认值；这里兜底，防止清空后没有下一个整点。
             self.next_run_time = "未设置"
             return
         now = wb_tasks.cst_now()
@@ -213,7 +201,6 @@ class Scheduler:
                 time.sleep(random.uniform(wb_settings.TASK_JITTER_MIN, upper))
             processed += 1
             uid8 = acc.uid[:8] if acc.uid else "?"
-            # 1. 检查 Token 剩余寿命 (小于 2 小时自动刷新保活)
             if run_keepalive:
                 exp = acc.expires_at or 0
                 if exp and (exp - time.time()) < 7200:
@@ -224,7 +211,6 @@ class Scheduler:
                     else:
                         self.log(f"! 账号 [{uid8}] Token 保活刷新失败: {acc.last_error}")
 
-            # 2. 如果是国内版账号，检查每日签到与猫猫旅行
             if acc.realm == "cn":
                 if run_checkin:
                     if acc.can_checkin():
@@ -256,7 +242,6 @@ class Scheduler:
                         self.log(f"🐱 账号 [{uid8}] 猫猫日常处理: {tr.get('msg')}")
                     time.sleep(1.0)
 
-                    # 连登管家闭环（补签保连登 -> 礼包/补偿 -> 连登兑换 -> 自动抽奖）
                     bonus = wb_tasks.run_streak_bonus(acc)
                     if bonus.get("logs"):
                         for l in bonus["logs"]:
@@ -264,22 +249,20 @@ class Scheduler:
                         time.sleep(1.0)
 
                 if run_cat:
-                    # 夜猫子任务 black_cat 只在 23:00-08:00 上报计数，
-                    # run_night_growth 自己会判断窗口。
+                    # black_cat 只在 23:00-08:00 上报计数，run_night_growth 自己判断窗口。
                     night = wb_tasks.run_night_growth(acc)
                     for line in night.get("logs", []):
                         self.log(f"🌙 {line}")
                     time.sleep(1.0)
 
-            # 3. 如果是国际版账号，检查每日活跃对话 (送 30/50 积分福利)
             if acc.realm == "intl" and run_checkin:
                 if acc.can_daily_chat():
                     self.log(f"检测到国际版账号 [{uid8}] 今日尚未活跃，执行每日活跃打卡对话")
                     res = acc.daily_chat(trigger="scheduler")
                     if res.get("ok"):
                         daily_chat_count += 1
-                        # 成功时也把网页通道那一轮的结果带上（completed：N 段输出），
-                        # 光看「成功」分不清是真跑完了还是只有桌面腿过了（issue #236）。
+                        # 成功时也把网页通道那一轮的结果带上：光看「成功」分不清是真
+                        # 跑完了还是只有桌面腿过了（issue #236）。
                         self.log(f"✓ 账号 [{uid8}] 每日活跃对话成功: {res.get('msg')}")
                     else:
                         self.log(f"! 账号 [{uid8}] 每日活跃对话失败: {res.get('error') or res.get('msg')}")

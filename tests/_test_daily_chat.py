@@ -512,9 +512,6 @@ class WebChannelTests(unittest.TestCase):
         self.assertFalse(wb_settings.daily_chat_web(directory))
 
 
-
-
-
 class CnCheckinTests(unittest.TestCase):
     def test_already_checked_in_is_treated_as_success(self):
         acc = wb_accounts.Account({"uid": "u-test-cn", "realm": "cn", "accessToken": "token"})
@@ -533,8 +530,6 @@ class CnCheckinTests(unittest.TestCase):
             self.assertTrue(acc.last_checkin)
         finally:
             wb_accounts.http_json = real_http_json
-
-
 
     def test_daily_chat_model_falls_back_when_preferred_is_cooling(self):
         acc = wb_accounts.Account({"uid": "u-fallback", "access_token": "t-fb", "realm": "intl"})

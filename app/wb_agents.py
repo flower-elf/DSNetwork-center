@@ -1,20 +1,9 @@
-"""本地 AI 客户端的一键接入：改写它们的配置，让请求指向本网关。
+"""改写本地 AI 客户端的配置，让请求指向本网关。
 
-识别已安装的客户端（Claude Code、Codex、OpenCode、DSH、Crush、ZCode），改写其配置，
-并把每个动过的文件留一份逐字节备份，一次调用即可还原。
-
-本模块也能当独立配置器运行，用于客户端不在网关机器上的情况（面板的一键接入只能在
-网关主机本机生效，远程浏览器写不了另一台机器的配置文件）：
-
-    python wb_agents.py list
-    python wb_agents.py apply --client codex \
-        --base-url http://gateway:8788/v1 --key sk-...
-    python wb_agents.py restore --client codex
-
-只依赖 Python 标准库。YAML/TOML 的编辑是一个刻意保守的文本级写入器：不动不属于
-自己的行，手写注释与顺序因此得以保留。
+每个动过的文件留逐字节备份，可一次还原（list / apply / restore 子命令）；客户端
+不在本机时可当独立配置器运行，用法见 --help。只依赖标准库；YAML/TOML 是保守的
+文本级写入器，不动不属于自己的行，手写注释与顺序因此保留。
 """
-
 import argparse
 import getpass
 import hashlib
@@ -70,7 +59,6 @@ def _read_bytes(path):
 
 
 def _read_text(path):
-    """读出已有文件的 UTF-8 文本；文件不存在时返回 ""。"""
     try:
         data = _read_bytes(path)
     except FileNotFoundError:
@@ -81,19 +69,17 @@ def _read_text(path):
         raise AgentConfigError("%s is not valid UTF-8: %s" % (path, exc))
 
 
-# 本模块写出的每个文件都带网关 API key（内联，或经同目录 credentials 文件解析的
-# 环境变量引用），所以新文件一律按仅属主权限创建，不走 open() 的 0666 & ~umask
-# （常见 umask 022 下得到 0644）。DSH 在 credentials 文件可被属主以外读取时拒绝
-# 启动，0644 同样会暴露其他客户端的 key。
+# 本模块写出的每个文件都带网关 API key（内联，或经同目录 credentials 文件解析的环境
+# 变量引用），所以新文件一律按仅属主权限创建，不走 open() 的 0666 & ~umask（常见
+# umask 022 下得到 0644，会暴露其他客户端的 key；DSH 在 credentials 可被属主以外
+# 读取时拒绝启动）。
 WRITE_MODE = 0o600
 
 
 def _target_mode(path):
-    """下次写入 `path` 时采用的权限。
-
-    新文件、当前权限比仅属主更宽（或属主自己都读不回）的文件用 `WRITE_MODE`；
-    其余保留文件自身权限，重复接入不会把用户手改的更严权限放宽回去：
-    0600 -> 0600、0400 -> 0400，0644 -> 0600。
+    """下次写入 `path` 时采用的权限。新文件或权限比仅属主更宽（或属主自己都读不回）
+    的文件用 `WRITE_MODE`，其余保留文件自身权限——重复接入不把用户手改的更严权限
+    放宽回去（0600 -> 0600、0400 -> 0400、0644 -> 0600）。
     """
     try:
         current = os.stat(path).st_mode & 0o777
@@ -105,11 +91,9 @@ def _target_mode(path):
 
 
 def _atomic_write(path, data):
-    """tmp + os.replace 原子写入，崩溃不会留下写了一半的配置。
-
-    临时文件按仅属主权限创建（见 `_target_mode`），写完后落到解析出的目标权限。
-    途中任何失败（含 chmod 与 replace）都会删掉临时文件，重试不会被写不进去的
-    残留文件卡住。
+    """tmp + os.replace 原子写入，崩溃不会留下写了一半的配置。临时文件按仅属主权限
+    创建（见 `_target_mode`）；途中任何失败（含 chmod 与 replace）都会删掉临时文件，
+    重试不会被写不进去的残留文件卡住。
     """
     directory = os.path.dirname(path)
     if directory:
@@ -144,10 +128,8 @@ def _atomic_write_bytes(path, data):
 
 
 def _prune_empty_parents(path, home=None):
-    """清掉本模块写配置留下的空目录。
-
-    只删空目录，且上溯到 home 目录即停：home 之上用户自己的目录树（哪怕为空）
-    一律不动，仍有文件的目录绝不删除。
+    """清掉本模块写配置留下的空目录。只删空目录，且上溯到 home 目录即停：home 之上
+    用户自己的目录树（哪怕为空）一律不动，仍有文件的目录绝不删除。
     """
     home = os.path.abspath(home or _resolve_home())
     directory = os.path.dirname(os.path.abspath(path))
@@ -157,7 +139,7 @@ def _prune_empty_parents(path, home=None):
         if not os.path.abspath(directory).startswith(home + os.sep):
             return
         try:
-            os.rmdir(directory)  # 仅在目录为空时成功，保证只删空目录
+            os.rmdir(directory)
         except OSError:
             return
         directory = os.path.dirname(directory)
@@ -182,9 +164,7 @@ def _dump_json(data):
 
 
 def deep_merge(base, patch):
-    """递归合并 patch 到 base；patch 之外的同级键保留。
-
-    返回新 dict，不改动入参。
+    """递归合并 patch 到 base，patch 之外的同级键保留。返回新 dict，不改动入参。
     """
     if not isinstance(base, dict) or not isinstance(patch, dict):
         return patch
@@ -206,10 +186,8 @@ def _yaml_indent(line):
 
 
 def _yaml_key(line):
-    """块式 `key: ...` 行的映射键；不匹配时返回 None。
-
-    冒号后的 inline 值与注释忽略。非 `word: value` 形式的行（列表项、带引号的
-    键）不在支持范围内。
+    """块式 `key: ...` 行的映射键，不匹配时返回 None。冒号后的 inline 值与注释忽略；
+    非 `word: value` 形式的行（列表项、带引号的键）不在支持范围内。
     """
     stripped = line.strip()
     if not stripped or stripped.startswith("#") or stripped.startswith("-"):
@@ -221,9 +199,8 @@ def _yaml_key(line):
 
 
 def _yaml_block_end(lines, start, indent):
-    """`start` 行所开块的结束下标（块后第一行）。
-
-    块覆盖其后所有缩进深于 `indent` 的非空、非注释行。
+    """`start` 行所开块的结束下标（块后第一行）：块覆盖其后所有缩进深于 `indent`
+    的非空、非注释行。
     """
     idx = start + 1
     while idx < len(lines):
@@ -244,9 +221,8 @@ def _yaml_insert_point(lines, start, end, indent):
 
 
 def _yaml_inline_to_block(lines, idx, key, inline_value):
-    """把 `key: <inline>` 展开成 `key:` 加一层嵌套块行。
-
-    只有单行 flow 映射 `{k: v, ...}` 能在该键下展开；其余结构不在支持范围内。
+    """把 `key: <inline>` 展开成 `key:` 加一层嵌套块行；只有单行 flow 映射
+    `{k: v, ...}` 能在该键下展开，其余结构不在支持范围内。
     """
     indent = _yaml_indent(lines[idx])
     value = inline_value.strip()
@@ -268,11 +244,10 @@ def _yaml_inline_to_block(lines, idx, key, inline_value):
 
 
 def yaml_upsert_inline(text, key_path, value):
-    """写入嵌套映射键，值用 inline-flow（JSON 兼容）形式。
-
-    `key_path` 是点分路径（如 "llm-pi-ai.providers.wb-proxy"），叶子按所在缩进写成
-    `wb-proxy: <json value>`。被碰到的那块之外的行逐字节保留；路径上缺失的键会新建，
-    父键当前是 inline `{..}` 映射时先展开成块。超出支持范围的结构抛 AgentConfigError。
+    """写入嵌套映射键，值用 inline-flow（JSON 兼容）形式。`key_path` 是点分路径，叶子
+    按所在缩进写成 `wb-proxy: <json value>`。被碰到的那块之外的行逐字节保留；路径上
+    缺失的键会新建，父键当前是 inline 映射时先展开成块；超出支持范围的结构抛
+    AgentConfigError。
     """
     keys = [part.strip() for part in str(key_path).split(".") if part.strip()]
     if not keys:
@@ -318,10 +293,9 @@ def _yaml_upsert_at(lines, start, end, indent, keys, value_json):
 
 
 def yaml_refs_upsert(text, key, value):
-    """在顶层 `refs:` 块内新增或更新 `key: value`。
-
-    文档还没有 `refs:` 块时在末尾补一个。`refs:` 行已带 inline 值（如 `refs: {}`）
-    不在支持范围内，抛 AgentConfigError，避免静默写坏。
+    """在顶层 `refs:` 块内新增或更新 `key: value`，文档没有该块时在末尾补一个。
+    `refs:` 行已带 inline 值（如 `refs: {}`）不在支持范围内，抛 AgentConfigError，
+    避免静默写坏。
     """
     lines = text.split("\n")
     idx = 0
@@ -372,9 +346,8 @@ def _toml_value(value):
 
 
 def toml_upsert_top_key(text, key, value):
-    """新增或更新顶层 TOML 键（必须位于第一个 [table] 之前）。
-
-    已有的赋值原地替换；缺失的插到最后一个顶层赋值之后，不惊动任何表体。
+    """新增或更新顶层 TOML 键（必须位于第一个 [table] 之前）。已有的赋值原地替换；
+    缺失的插到最后一个顶层赋值之后，不惊动任何表体。
     """
     rendered = "%s = %s" % (key, _toml_value(value))
     lines = text.split("\n")
@@ -601,14 +574,11 @@ def _apply_opencode(paths, ctx):
 
 
 def dsh_reasoning_levels(raw):
-    """DSH 的 {档位: 线上拼写} 映射，取自网关的 `reasoning_efforts` 列表。
-
-    DSH 的模型条目用 `reasoningEfforts` 声明可选思考档位（键=选择器里的档位，
-    值=请求里实际发的拼写）。本路由不在它的内置目录里，所以不声明就没有选择
-    器——`/v1/models` 里的 `reasoning_efforts` 它不读，它只读 id / name /
-    contextWindow / maxTokens。网关声明的档位名就是上游认的拼写，一一照抄即可；
-    固定档位的模型（网关只给 reasoning_fixed_effort）没有列表，就不声明：给了
-    选择器也不会改变上游实际跑的档位。
+    """DSH 的 {档位: 线上拼写} 映射，取自网关的 `reasoning_efforts` 列表。DSH 的模型
+    条目用 `reasoningEfforts` 声明可选思考档位（键=选择器里的档位，值=请求里实际发的
+    拼写）；它只读 id / name / contextWindow / maxTokens，不读 /v1/models 里的
+    reasoning_efforts。固定档位的模型（网关只给 reasoning_fixed_effort）不声明列表：
+    给了选择器也不会改变上游实际跑的档位。
     """
     if isinstance(raw, dict):
         pairs = list(raw.items())
@@ -626,11 +596,10 @@ def dsh_reasoning_levels(raw):
 
 
 def dsh_default_model(text, provider, model):
-    """要写入的 `agent-default-model` 条目，保留不属于本程序的键。
-
-    yaml_upsert_inline() 会整块替换该叶子，只写 {provider, model} 会悄悄丢掉旁边已有
-    的内容（例如 reasoningEffort，也就是默认思考档位在重新接入时消失）。这里先读当前
-    inline 映射再把路由合并上去；块式写法或解析不了的值退回裸的一对，不猜。
+    """要写入的 `agent-default-model` 条目，保留不属于本程序的键。yaml_upsert_inline()
+    会整块替换该叶子，只写 {provider, model} 会悄悄丢掉旁边已有的内容（例如默认思考
+    档位在重新接入时消失）；这里先读当前 inline 映射再把路由合并上去，块式写法或
+    解析不了的值退回裸的一对，不猜。
     """
     out = {"provider": provider, "model": model}
     for line in str(text or "").split("\n"):
@@ -678,9 +647,9 @@ def _apply_dsh(paths, ctx):
         "apiKeyEnv": CREDENTIAL_REF,
         "api": "openai-completions",
         "baseURL": ctx["base_url_v1"],
-        # wb-proxy 不在 DSH 的内置目录里，推理字段的线上形状必须自己说明：
-        # 走标准 reasoning_effort，不发 thinking 块——DeepSeek 系需要的那份
-        # thinking / reasoning_content 由网关补（wb_proxy.build_upstream_body）。
+        # wb-proxy 不在 DSH 的内置目录里，推理字段的线上形状必须自己说明：走标准
+        # reasoning_effort、不发 thinking 块，DeepSeek 系需要的 thinking / reasoning_content
+        # 由网关补（wb_proxy.build_upstream_body）。
         "compat": {"thinkingFormat": "openai", "supportsReasoningEffort": True},
     }
     if models:
@@ -723,19 +692,16 @@ def _apply_crush(paths, ctx):
 
 
 def _apply_zcode(paths, ctx):
-    """在 ZCode 的 provider 配置里新增或更新 wb-proxy 规则。
-
-    规则用稳定的 providerId 定位，重复接入只更新那一条，不会叠出新的；文档里其它内容
-    （别的 provider、顺序、模型规则）原样合并保留。该文件属于 ZCode 应用，运行中会被
-    它重新写回：要在 ZCode 关闭时配置（面板卡片与 CLI 都会提示），否则它下一次保存
-    可能把新条目丢掉。
+    """在 ZCode 的 provider 配置里新增或更新 wb-proxy 规则。规则用稳定的 providerId
+    定位，重复接入只更新那一条、不叠出新的；文档里其它内容原样合并保留。该文件属于
+    ZCode，运行中会被它重新写回：要在 ZCode 关闭时配置（面板卡片与 CLI 都会提示），
+    否则它下一次保存可能把新条目丢掉。
     """
     path = paths["config"]
     data = _load_json(path, "zcode provider config")
     if not data:
-        # 本机还没有 ZCode profile：按 3.x 实际写出的外层结构初始化
-        # （schemaVersion + config + 两个规则容器），全新安装不用先跑一遍
-        # 应用即可配置。
+        # 本机还没有 ZCode profile：按 3.x 实际写出的外层结构初始化（schemaVersion + config
+        # + 两个规则容器），全新安装不用先跑一遍应用即可配置。
         data = {"schemaVersion": 1,
                 "config": {"providerOrder": [],
                            "providerConfigRules": {"providerRules": []}}}
@@ -902,12 +868,9 @@ def _client(client_id):
 # ---------------------------------------------------------------------------
 
 def enrich_agent_models(models, specs):
-    """把只有 id 的模型条目补上网关自己的目录规格。
-
-    看板送来的是一串模型 id，而 DSH、Crush 这类客户端要把规格写进自己的配置，
-    包括上下文窗口、输出上限与思考档位，才会生成对应控件；只写 id 时它们
-    只能使用内置默认值，档位选择器不会出现。`specs` 是模型 id 到规格的映射，
-    条目里显式带来的字段优先，空值不算显式。
+    """把只有 id 的模型条目补上网关自己的目录规格（上下文窗口、输出上限与思考档位）：
+    DSH、Crush 这类客户端要写进规格才会生成对应控件，只写 id 时只能用内置默认值。
+    `specs` 是模型 id 到规格的映射，条目里显式带来的字段优先，空值不算显式。
     """
     if not specs:
         return models
@@ -924,7 +887,6 @@ def enrich_agent_models(models, specs):
 
 
 def overview(accounts_dir, home=None):
-    """面板用的各客户端安装/接入摘要。"""
     home = _resolve_home(home)
     state = _load_state(accounts_dir)
     out = {}
@@ -971,11 +933,9 @@ def overview(accounts_dir, home=None):
 
 
 def plan(client_id, base_url, api_key, model=None, models=None, home=None):
-    """integrate() 将要写入的确切文件内容；不碰任何文件。
-
-    ``files`` 每项带目标 ``path``、新 ``content`` 与文件此前是否 ``existed``，
-    供调用方在备份与写入之前预览接入结果（CLI 的 --dry-run）。integrate() 与
-    预览共用这一个构建器，dry run 打印的内容即实际写入的内容。
+    """integrate() 将要写入的确切文件内容，不碰任何文件。`files` 每项带目标 `path`、
+    新 `content` 与文件此前是否 `existed`，供调用方在备份与写入之前预览（CLI 的
+    --dry-run）；dry run 打印的内容即实际写入的内容。
     """
     client = _client(client_id)
     home = _resolve_home(home)
@@ -1019,10 +979,8 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None):
 
 def integrate(accounts_dir, client_id, base_url, api_key, model=None,
               models=None, home=None):
-    """把 `client_id` 指向本网关；返回写入的内容。
-
-    首次接入备份每个动过文件的原始字节；之后的接入保留最早的 backup，
-    保证 restore 总能回到首次接入之前的状态。
+    """把 `client_id` 指向本网关，返回写入的内容。首次接入备份每个动过文件的原始
+    字节；之后的接入保留最早的 backup，保证 restore 总能回到首次接入之前的状态。
     """
     built = plan(client_id, base_url, api_key, model=model, models=models,
                  home=home)
@@ -1037,10 +995,8 @@ def integrate(accounts_dir, client_id, base_url, api_key, model=None,
         path, content, existed = entry["path"], entry["content"], entry["existed"]
         prior = previous_files.get(path)
         if prior is not None and not prior.get("existed") and existed:
-            # 该文件是之前接入时新建的。内容仍与当时写入的完全一致时算本程序
-            # 所有，restore 直接删除，把我们自己写的字节还原回来没有意义（这是
-            # 文档承诺，且那些字节可能含 API key）；此后被手改过就归还用户，
-            # 照常备份。
+            # 该文件是之前接入时新建的：内容与当时写入的完全一致时算本程序所有，restore 直接
+            # 删除（文档承诺，且那些字节可能含 API key）；此后被手改过就归还用户、照常备份。
             try:
                 if _sha256_bytes(_read_bytes(path)) == prior.get("sha256"):
                     existed = False
@@ -1100,9 +1056,8 @@ def integrate(accounts_dir, client_id, base_url, api_key, model=None,
 
 
 def restore(accounts_dir, client_id, home=None):
-    """撤销 integrate()：把 backup 的原始内容逐字节写回。
-
-    首次接入前不存在的文件删除；该客户端的状态记录清除。
+    """撤销 integrate()：把 backup 的原始内容逐字节写回。首次接入前不存在的文件删除；
+    该客户端的状态记录清除。
     """
     client = _client(client_id)
     home = _resolve_home(home)
@@ -1129,9 +1084,8 @@ def restore(accounts_dir, client_id, home=None):
                 restored.append({"path": path, "action": "deleted"})
             except FileNotFoundError:
                 restored.append({"path": path, "action": "already-absent"})
-            # 接入时连父目录一起新建过。留下空目录会让 probe 把客户端误报成
-            # 已安装（它唯一的配置本来就是我们写的），所以把清空的目录链一并
-            # 剪掉，仍有内容的目录绝不动。
+            # 接入时连父目录一起新建过。留下空目录会让 probe 把客户端误报成已安装（它唯一的配置
+            # 本来就是我们写的），所以把清空的目录链一并剪掉，仍有内容的目录绝不动。
             _prune_empty_parents(path, home)
     state.pop(client_id, None)
     _save_state(accounts_dir, state)
@@ -1143,20 +1097,15 @@ def restore(accounts_dir, client_id, home=None):
 
 
 # ---------------------------------------------------------------------------
-# 独立配置器
+# 独立配置器：面板的一键接入跑在网关进程里，只能改网关所在那台机器的配置（这也是
+# /agents/apply 拒绝非 loopback 调用与容器部署的原因）；CLI 跑在客户端所在机器，
+# 仅经 HTTP 访问网关，网关装在服务器、NAS 或路由器上时仍能服务其他机器的客户端。
 # ---------------------------------------------------------------------------
-#
-# 面板的一键接入跑在网关进程里，只能改网关所在那台机器的配置，这也是
-# /agents/apply 拒绝非 loopback 调用与容器部署的原因。CLI 方向相反：跑在
-# 客户端所在机器，仅经 HTTP（模型列表）访问网关，网关装在服务器、NAS 或
-# 路由器上时仍能服务其他所有机器的客户端。
 
 
 def fetch_models_from_gateway(base_url, api_key, timeout=10):
-    """从网关取模型列表，供需要内嵌模型定义的客户端使用。
-
-    读 OpenAI 兼容的 ``GET /v1/models``，单凭 API key 即可访问（它不是面板
-    路由）。顺带校验 key：401 说明 key 不对，其余错误说明网关或其上游不可达。
+    """从网关取模型列表（GET /v1/models），单凭 API key 即可访问（非面板路由）。
+    顺带校验 key：401 说明 key 不对，其余错误说明网关或其上游不可达。
     """
     base = str(base_url or "").strip().rstrip("/")
     if not re.match(r"^https?://", base):
@@ -1216,10 +1165,8 @@ def fetch_models_from_gateway(base_url, api_key, timeout=10):
 
 
 def _default_state_dir():
-    """独立 CLI 存放状态与 backup 的位置。
-
-    刻意避开网关的 accounts/ 目录：CLI 跑在另一台机器上，各机器自留记录与
-    backup。
+    """独立 CLI 存放状态与 backup 的位置，刻意避开网关的 accounts/ 目录：CLI 跑在
+    另一台机器上，各机器自留记录与 backup。
     """
     return os.path.join(os.path.expanduser("~"), ".wb-agent-config")
 
@@ -1341,10 +1288,9 @@ def main(argv=None):
         if not re.match(r"^https?://", base_url):
             return _cli_error("--base-url must start with http:// or https://")
         key = str(args.key or os.environ.get("WB_PROXY_API_KEY") or "")
-        # 只在有真实控制台时才提示输入。Windows 上 NUL 设备也会让 isatty()
-        # 为真（被拉起或服务方式运行的进程常以它作 stdin），而 getpass 在那里
-        # 直接读 CONIN$，无控制台的进程会永远卡住。stdout 是终端才说明控制台
-        # 存在。
+        # 只在有真实控制台时才提示输入：Windows 上 NUL 设备也会让 isatty() 为真（被拉起或
+        # 服务方式运行的进程常以它作 stdin），而 getpass 在那里直接读 CONIN$，无控制台的
+        # 进程会永远卡住。
         if not key and sys.stdin.isatty() and sys.stdout.isatty():
             try:
                 key = getpass.getpass("Gateway API key: ").strip()

@@ -1,9 +1,8 @@
-"""用量记账与统计：日志折叠与窗口聚合。
+"""用量日志的折叠与窗口聚合。
 
-每次请求写一行 JSONL；统计视图（快照、按账号、时间序列、分析、性能、最近、
-趋势）都从这份日志折叠而来，增量状态落在数据目录。剩余用量估算在
-wb_usage_remaining，聚合状态落盘在 wb_usage_cache。网关运行态（账号池、
-目录、日志）通过 `_gw()` 读活值，测试替换网关属性后立即生效。
+每次请求写一行 JSONL；各统计视图都由这份日志增量折叠，状态落在数据目录。剩余
+用量估算在 wb_usage_remaining，聚合状态落盘在 wb_usage_cache。网关运行态通过
+`_gw()` 读活值，测试替换网关属性后立即生效。
 """
 
 import bisect
@@ -90,7 +89,6 @@ def _gw():
         if _GATEWAY is None:
             import wb_proxy as _GATEWAY
     return _GATEWAY
-
 
 def _empty_stats():
     return {"requests": 0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0,
@@ -330,13 +328,10 @@ def record_usage(model, usage, stream=None, elapsed_ms=None, ttft_ms=None, gen_m
     """把一次结束的请求写成一行 JSONL。
 
     outcome 是终态：completed、client_aborted、upstream_aborted、rate_limited、
-    failed。rate_limited 表示上游限流，响应里可能带恢复时刻。
-    没有 usage 块的请求也写一行并标 usage_missing，它仍计入请求数、成功率与
-    延迟样本，只缺 token 数。
-
-    key 是扣费用的客户端 API Key 的设置 id，不是密钥本身；由调用方显式传入，
-    因为一个 keep-alive 线程服务多个请求，隐式通道会把花费记到错误的 Key。
-    effort 只在模型有推理档位时写入。
+    failed；rate_limited 可能带恢复时刻。没有 usage 块也写一行并标
+    usage_missing，仍计入请求数、成功率与延迟样本。key 是扣费用 API Key 的
+    设置 id，由调用方显式传入：keep-alive 线程服务多个请求，隐式通道会记到
+    错误的 Key。effort 只在模型有推理档位时写入。
     """
     fields = _extract_usage(usage) or {}
     usage_missing = not fields
@@ -412,12 +407,10 @@ def _ensure_dir(path):
     os.makedirs(path, exist_ok=True)
     _ENSURED_DIRS.add(path)
 
-
 def _ensure_dir_retry(directory):
     """目录被外部删掉时重建。"""
     _ENSURED_DIRS.discard(directory)
     _ensure_dir(directory)
-
 
 def _open_write(path, mode="w", newline=None):
     """以写方式打开；目录被外部删掉时重建一次。"""
@@ -426,7 +419,6 @@ def _open_write(path, mode="w", newline=None):
     except FileNotFoundError:
         _ensure_dir_retry(os.path.dirname(path))
         return open(path, mode, encoding="utf-8", newline=newline)
-
 
 def _open_append(path):
     """追加打开；目录被外部删掉时重建一次。"""
@@ -437,7 +429,6 @@ def _open_append(path):
         _ENSURED_DIRS.discard(directory)
         _ensure_dir(directory)
         return open(path, "a", encoding="utf-8")
-
 
 def _persist_usage(row, fail_label):
     """向 JSONL 追加一行用量。每个请求只追加，聚合视图各自重读日志。"""
@@ -680,9 +671,6 @@ def _log_complete_frontier(path=None):
         return 0
     return 0
 
-
-
-
 _snap_cache = {}
 _snap_lock = threading.Lock()
 # 面板每 5 秒轮询一次。TTL 短于轮询间隔会让一半的轮询都做全量扫描；15 秒
@@ -875,13 +863,10 @@ def apply_model_daily_token_limit(refresh=False):
 def apply_daily_guards(refresh=False):
     """一次推进三条每日护栏。
 
-    三条护栏共用输入（一个设置文件、同一批日计数），这里读一次设置、折一次
-    日志、推三次，免去每条护栏各读各扫。各护栏自身语义不变：按 realm 的
-    限额、积分护栏的免费模型豁免，以及「没配限额 -> 计数未知，绝不跳过
-    账号」规则（日志读不出时三份计数都是 None）。
-
-    `refresh` 强制计数折叠绕过 TTL（设置保存路径用它，限额改完立即可见）。
-    三个单护栏入口保留给只想要一条护栏的调用方。
+    三条共用一份设置与同一批日计数：读一次设置、折一次日志、推三次。各自
+    语义不变：按 realm 的限额、积分护栏的免费模型豁免，以及「没配限额 ->
+    计数未知，绝不跳过账号」（日志读不出时三份计数都是 None）。`refresh`
+    强制绕过计数 TTL，设置保存后立即可见。
     """
     if _gw().POOL is None:
         return 0
@@ -1318,14 +1303,10 @@ def _log_resume_ok(state, log_key, path=None):
 def _pricing_inputs(pricing_on=None):
     """cost_for_row() 除行本身之外读到的全部输入。
 
-    比身份不比内容：wb_pricing 把每一项缓存在各自的文件键后，改过的文件会交回
-    另一个对象，比身份让这项检查不占刷新路径——为发现变化而遍历整张价表比变化
-    本身还贵。握着这些对象也是判定可靠的原因：活着的对象的 id 不会被分配给
-    替身。
-
-    总开关关着时 cost_for_row() 根本不打开价表，开关标志就是全部输入。它用与
-    cost_for_row() 相同的无参调用读取——这里传目录的话，两边不一致时会从另一个
-    设置文件作答，指纹就会盯着折叠根本没读过的输入。
+    比身份不比内容：wb_pricing 把每项缓存在文件键之后，改过的文件会交回另一个
+    对象，比遍历整张价表便宜；活着的对象 id 不会被复用，判定因此可靠。总开关
+    关着时 cost_for_row() 不打开价表，开关标志就是全部输入；这里用同样的无参
+    调用读取，两边才指向同一份设置。
     """
     # pricing_on 由调用方传入时不再自己问一次总开关：一次扫描里它只该被问一次
     # （见 _usage_snapshot_uncached / _compute_usage_analytics_uncached），指纹
@@ -1418,17 +1399,11 @@ _pricing_timeline_memo = {}
 def _pricing_timeline_digest(timeline, record):
     """记录里时间线依赖的投影摘要，折叠侧收尾与判定侧共用一份定义。
 
-    投影是 [[行 at, 该行在 timeline_models 里的 {model: pid} 子字典], ...]，
-    摘要取排序 JSON 的 sha1：
-      * backfilled 为真时取整条时间线：那批行的解析扫过全部行，任何追加都可能
-        改变结果；
-      * 否则取 at <= timeline_at 的行外加最早那一行（二分夹逼 index=0 会读它），
-        每行只取相关模型的子字典，无关模型的价变动不进依赖；行本身与 at 都要
-        进投影，at 的增减会挪动二分结果；
-      * unresolved 里提到过的行取自整条时间线，同理。
-
-    timeline_models 为空表示没有依赖，返回 None。结果按时间线对象与记录参数
-    记忆，一次刷新里 5 条状态共用同一份时间线，记录没变时只算一次。
+    投影是 [[行 at, 该行在 timeline_models 里的 {model: pid}], ...]，摘要取排序
+    JSON 的 sha1。backfilled 取整条时间线；否则取 at <= timeline_at 的行外加
+    最早一行（二分夹逼会读它），每行只取相关模型的子字典；unresolved 提到过的
+    行同样取自整条时间线。timeline_models 为空表示没有依赖，返回 None。结果按
+    时间线对象与记录参数记忆，一次刷新里只算一次。
     """
     models = record.get("timeline_models") or ()
     if not models:
@@ -1471,16 +1446,12 @@ def _pricing_timeline_digest(timeline, record):
     return digest
 
 def _priced_note(priced, row, cost, pricing):
-    """把一行「用到的价」记进状态指纹记录（折叠侧；见上面一节）。
+    """把一行「用到的价」记进状态指纹记录（折叠侧）。
 
-    refs 收下解析出来的 pid 的内容摘要（显式引用 + 时间线解析）；无显式引用
-    且成本非零的行另记时间线依赖。总开关关掉（cost 带 disabled）或价表读不
-    出来（pricing 为 None）时不记——前者折叠没读任何价、后者记不完整，两种
-    都由判定侧按「记录对不上」兜底作废。
-
-    热路径开销：每行几次 dict 查找 + 按对象身份记忆的摘要（第一次之后 O(1)），
-    只有无引用非零成本的行（旧前缀，一次性折过）才会碰列表；那批行里落到
-    内置快照的（模型从未进过时间线）再问一次 policy_ref_at 把依赖记准。
+    refs 收下解析出来的 pid 摘要（显式引用与时间线解析）；无显式引用且成本非零
+    的行另记时间线依赖。总开关关掉或价表读不出来时不记，判定侧按「记录对不上」
+    作废。热路径只有几次 dict 查找加按对象身份记忆的摘要；只有无引用非零成本
+    的行才碰列表，其中落到内置快照的再问一次 policy_ref_at。
     """
     if priced is None or pricing is None or not cost:
         return
@@ -1577,13 +1548,10 @@ def _pricing_used_unchanged(record, pricing):
 def _realm_inputs():
     """没有 realm 字段的行归到哪个出口的依据。
 
-    这类行（例如没有账号的错误行）按服务它的账号归属，查不到账号时归到模型的
-    主区域。导入或删除账号都会挪动归属，缓存的聚合因此不能比它活得久。
-
-    当前出口与 uid 到 realm 的映射都从磁盘同步读取，不从活账号池的内存映射
-    读：池只是启动时的快照，「何时加载完」会让同一进程在不同时刻算出不同指纹，
-    重启后刚写下的 checkpoint 反而被判无效。池仍要查，但只用来判断这次折叠能否
-    被冷进程复现（见 _realm_fold_reproducible），不进指纹的值。
+    这类行按服务它的账号归属，查不到账号时归到模型的主区域；导入或删除账号都会
+    挪动归属，所以缓存的聚合不能比它活得久。当前出口与 uid 到 realm 的映射从
+    磁盘同步读取，不从活账号池的内存映射读：池只是启动时的快照，会让同一进程在
+    不同时刻算出不同指纹。池仍要查，但只用于判断这次折叠能否被冷进程复现。
     """
     disk = _account_realm_map()
     if disk is None:
@@ -1655,20 +1623,11 @@ def _realm_fold_reproducible(disk):
 def _scan_usage_from(offset, fold, stop_at=None, skip=None, skip_raw=None, path=None):
     """把 offset 之后的每一行折进 fold(row)，返回 (offset, error)。
 
-    返回的偏移是最后一行处理完的位置。行是整行追加的，末尾没有换行的行留给
-    下一轮，与 _scan_daily_usage() 的规则相同。
-
-    `skip(line)` 在解析前丢弃整行，有窗口的读者传 _line_outside_window()，
-    被窗口排除的行因此只付一次子串搜索；`skip_raw(raw)` 是同一判断在解码前对
-    原始字节执行，读者传 _line_outside_window_bytes()，它只对文本判断也会丢
-    的行返回真，所以被它丢掉的行连解码都省了。
-
-    `stop_at` 把读取限制在 all-time 折叠已覆盖的偏移内，窗口载荷因此与它的
-    all-time 半描述同一批字节。`path` 默认为用量日志。
-
-    日志按二进制读取，偏移按行字节数推进：每行 tell() 比解析本身还贵，而偏移
-    只需是字节计数。`error` 是中断读取的异常，或 None；fold 抛异常时保留已折
-    部分，返回的偏移停在该行末尾，调用方据此重新折叠该行，不从它之后续读。
+    返回的偏移是最后一行处理完的位置；末尾没有换行的行留给下一轮。`skip(line)`
+    在解析前丢弃整行，`skip_raw(raw)` 是同一判断在解码前对字节执行。`stop_at`
+    把读取限制在 all-time 折叠已覆盖的偏移内。偏移按行字节数推进：每行 tell()
+    比解析还贵。`error` 是中断读取的异常；fold 抛异常时保留已折部分，偏移停在
+    该行末尾，调用方据此重新折叠该行。
     """
     if stop_at is not None and offset >= stop_at:
         return offset, None
@@ -1893,18 +1852,11 @@ def _fold_usage_snapshot(row, snap, r, since, until, pricing_on=None, also=None,
                          pricing=None, priced=None):
     """把一行解析结果折进用量快照。
 
-    全时段折叠（只喂偏移之后的行）与窗口折叠（喂整份文件，窗口外的行在解析前
-    丢掉）共用这一个定义。先做区域与窗口判断，下面的请求数、token、按模型与
-    按账号分解因此都描述同一批日志。
-
-    pricing_on 是本次扫描开头问过一次的总开关：聚合只读 known 与 cny，整扫不建
-    悬停明细也不逐行重问，代价是设置改动从下一次扫描起生效。also 是同一行还要
-    折进的其余同形状快照，过滤、算价与字段提取只做一次，最贵的价表查询与区域
-    判定只付一次。
-
-    pricing 是本次扫描开头取到的 _pricing_inputs() 元组，同时当行级记忆的代次，
-    None 表示价表读不出来。priced 是本轮要填的「用到的价」记录，只有推进状态
-    的折叠传它。
+    全时段折叠与窗口折叠共用这一个定义：先做区域与窗口判断，下面的请求数、
+    token、按模型与按账号分解因此都描述同一批日志。pricing_on 是本次扫描开头
+    问过一次的总开关，设置改动从下一次扫描生效。also 是同一行还要折进的其余
+    同形状快照。pricing 来自扫描开头，同时当行级记忆的代次；priced 只有推进
+    状态的折叠传。
     """
     if r and not row_matches_realm(row, r):
         return
@@ -1987,16 +1939,9 @@ def _usage_snap_state_advance(r, pricing_on):
     """取或建状态、采纳 checkpoint、判废归零、记身份指纹，不做折叠。
 
     调用方必须持有 _usage_snap_state_lock。返回本次扫描取到的价表代次，调用方
-    把它传给折叠当行级记忆的代次，与记进状态指纹的是同一份。
-
-    状态指纹记录折叠行真正用到的价（见「用到的价」状态指纹一节）：折叠时逐行
-    更新，扫描成功后用 _pricing_record_close 刷新投影摘要，下次判废时与当前
-    价表重算的结果比对。
-
-    状态是否冷（这次要付全量重折）只看 state["offset"]：大于 0 表示可续折，
-    等于 0 表示状态刚建、刚被判废或 checkpoint 采纳失败。判定不折叠任何行，
-    窗口路径据此分流，重折后两边字节一致。采纳与判废只在这里定义，
-    _usage_snap_state_ready 与窗口冷热判定共用，规则不会漂移。
+    把它传给折叠当行级记忆的代次。状态是否冷只看 state["offset"]：大于 0 表示
+    可续折，等于 0 表示刚建、刚被判废或采纳失败。采纳与判废只在这里定义，
+    _usage_snap_state_ready 与窗口冷热判定共用。
     """
     state = _usage_snap_state.get(r)
     if state is None:
@@ -2030,15 +1975,9 @@ def _usage_snap_state_advance(r, pricing_on):
 def _usage_snap_state_cold(r, pricing_on):
     """窗口请求现在会不会付一次全量重折？True = 会（窗口改走冷扫描）。
 
-    调用方必须已持有 _usage_snap_state_lock。判定就是 all-time 折叠的前半段
-    （_usage_snap_state_advance），不折任何行；为真时窗口半改走按日/按小时
-    分组的冷扫描（_scan_usage_snapshot_window_days / _hours，~1s 量级），
-    重折留给 all-time 视图（_usage_alltime_snapshot）与预热器。
-
-    这条路不写折叠结果，也不改「重折该不该发生」：状态里 offset 仍是 0，
-    下一个 all-time 请求照样从文件头折到文件尾——窗口请求不会把状态冻在
-    冷态。重折发生之后，走不走这条路给出的字节完全相同（冷扫描与日桶/小时
-    桶之和本就是同一批行、同一个求和口径，见两个冷路径函数的 docstring）。
+    调用方必须已持有 _usage_snap_state_lock。判定就是 all-time 折叠的前半段，
+    不折任何行。这条路不写折叠结果，也不改「重折该不该发生」：状态 offset 仍
+    是 0，下一个 all-time 请求照样从头折到尾。重折之后两条路给出的字节相同。
     """
     _usage_snap_state_advance(r, pricing_on)
     return _usage_snap_state[r]["offset"] <= 0
@@ -2106,14 +2045,10 @@ def _usage_alltime_snapshot(r, pricing_on=None):
 def _scan_usage_snapshot_window(r, since, until, pricing_on=None):
     """扫一遍日志，只保留窗口内的行。
 
-    窗口随钟表移动，这里不沿用任何状态，但预过滤会让窗口外的行免去解析与解码，
-    多日日志上的冷启动日/周视图因此不贵。
-
+    窗口随钟表移动，这里不沿用任何状态；预过滤让窗口外的行免去解析与解码。
     边界以 `or None` 传给预过滤，与折叠自身的判断一致：0 是被折叠忽略的边界，
-    预过滤不能把它读成「纪元之后全部丢弃」。
-
-    价表在这里取一次，与 all-time 折叠同一条口径，一次扫描一份快照，本次扫描的
-    行因此可以和别的视图共享定价结果。
+    预过滤不能把它读成「纪元之后全部丢弃」。价表在这里取一次，与 all-time 折叠
+    同一口径，本次扫描的行因此能与别的视图共享定价结果。
     """
     pricing = _pricing_inputs(pricing_on)
     snap = _empty_stats()
@@ -2132,16 +2067,10 @@ def _scan_usage_snapshot_window(r, since, until, pricing_on=None):
 def _usage_snapshot_window_from_days(r, since, until, pricing_on):
     """窗口半快照 = 窗口内的日桶之和，日桶不可用时返回 None。
 
-    先把 all-time 折叠推进到文件尾：日桶与它同一次扫描推进，窗口半与 all-time
-    半因此描述同一段字节。
-
-    until 开放时窗口从起点到文件尾；until 给出时必须是本地午夜，窗口就是起点
-    那天起、until 那天之前的日桶之和。桶按 at 严格切分，恰好落在 until 本地的
-    行归 until 那天那一桶；桶切不出那一刻的行时整条路返回 None（见
-    _closed_window_edge_ok），调用方接着整段扫描。
-
-    状态冷时直接返回 None：那条路要先付一次全量重折，窗口请求不背它，调用方
-    退回按日分组的冷扫描，重折留给 all-time 视图与预热器。
+    先把 all-time 折叠推进到文件尾，两边因此描述同一段字节。until 给出时构成
+    闭窗口且必须是本地午夜，只取 at < until 的日桶；桶切不出那一刻的行时整条
+    路返回 None，调用方接着整段扫描。状态冷时直接返回 None，重折不背在窗口
+    请求上。
     """
     with _usage_snap_state_lock:
         if _usage_snap_state_cold(r, pricing_on):
@@ -2177,19 +2106,12 @@ def _usage_snapshot_window_from_days(r, since, until, pricing_on):
 def _usage_snapshot_window_from_hours(r, since, until, pricing_on):
     """窗口半快照 = 整点窗口内的小时桶之和，小时层不可用时返回 None。
 
-    与日桶版同一条规矩：先把 all-time 折叠推进到文件尾，再从存量桶求和。下列
-    条件缺一不可，任何一条不成立就返回 None，调用方退回按小时分组的冷路径：
-      * 窗口起点是本地整点（见 _hour_window_key）；
-      * days_floor 覆盖窗口起点，因为小时桶挂在日桶上、剪枝跟着日桶走；
-      * 选中的每个日桶都带小时表：某天格点不成立时整张表会被摘掉（见
-        _usage_hour_bucket），这时整个窗口退回扫描，不能只跳过那一天；
-      * 每个小时桶的 at 落在窗口起点加 k 小时的格点上，并与所属日桶对得上，
-        这一条挡住夏令时挪动日边界的情形；
-      * until 给出时也必须落在同一套小时格点上，且直到那一刻没有整秒行
-        （见 _closed_window_edge_ok）。
-
-    状态冷时直接返回 None，调用方退回按小时分组的冷扫描，重折留给 all-time
-    视图与预热器。
+    与日桶版同一条规矩：先推进 all-time 折叠，再从存量桶求和。下列条件缺一
+    不可，否则返回 None 交给冷路径：起点是本地整点；days_floor 覆盖起点；选中
+    的日桶都带小时表（格点不成立时整张表会被摘掉，见 _usage_hour_bucket）；
+    每个小时桶的 at 落在起点加 k 小时的格点上并与所属日桶对得上，这一条挡住
+    夏令时挪动日边界；until 落在同一套格点上且那一刻没有整秒行。状态冷时同样
+    返回 None。
     """
     key = _hour_window_key(since)
     if key is None:
@@ -2249,15 +2171,12 @@ def _usage_snapshot_window_from_hours(r, since, until, pricing_on):
     return snap
 
 def _usage_snapshot_window(r, since, until, pricing_on=None):
-    """窗口半快照：同一窗口由日桶/小时桶相加，其余保持整段扫描。
+    """窗口半快照：同一窗口由日桶或小时桶相加，其余整段扫描。
 
-    只有「两端都落在同一套格点上」的窗口拆得成存量桶的并集：起点是本地
-    午夜、终点（开放或闭）也是本地午夜时用日桶（today / week / month 与
-    「到某天零点」都是），两端落在本地整点上时用小时桶（自定义区间的常见
-    形态，见 _hour_window_key）。闭窗口的右边界按「at < until 的桶」切
-    （见 _closed_window_edge_ok）：那一刻有整秒行时退回整段扫描，结果与
-    改动前逐字节一致——闭窗口本来走的就是这条兜底。起点不落在格点上、
-    或 until 不落格点的窗口同样保持整段扫描。
+    只有两端落在同一套格点上的窗口拆得成存量桶的并集：起点是本地午夜、终点也
+    是本地午夜时用日桶，两端落在本地整点时用小时桶。闭窗口取 at < until 的桶，
+    那一刻有整秒行时退回整段扫描，结果与改动前逐字节一致。起点或 until 不落
+    格点的窗口同样整段扫描。
     """
     if until is None:
         day_key = _window_day_key_safe(since)
@@ -2421,16 +2340,11 @@ def _usage_timeseries_scope(realm, range, since, until, bucket_seconds):
 
 def usage_timeseries(realm=None, range=None, since=None, until=None,
                      bucket_seconds=None, ttl=None):
-    """分析图表用的分桶 token/积分序列。
+    """分桶的 token 与积分序列，桶宽随窗口自动缩放。
 
-    桶宽随窗口自动缩放：分钟（<=6h）、小时（<=14d）、其余按天；显式的
-    bucket_seconds 覆盖自动值。completed 请求贡献 token；所有非
-    client_aborted 的行贡献积分（钱已经花了）。最近的积分请求随载荷一起带出，
-    面板不用另开接口就能显示积分历史。
-
-    缓存包装：指标页打开时 Token 图表轮询这个接口，一次未缓存的调用就要重读
-    重解整份日志。与同级接口共用同一 TTL，重建持锁执行，一波轮询不会各自
-    开扫。
+    分钟（<=6h）、小时（<=14d）、其余按天；显式 bucket_seconds 覆盖自动值。
+    completed 请求贡献 token，所有非 client_aborted 的行贡献积分。最近的积分
+    请求随载荷带出。与同级读接口共用同一 TTL，重建持锁执行。
     """
     ttl = _STATS_TTL if ttl is None else ttl
     r, lo, hi, step, key = _usage_timeseries_scope(realm, range, since, until,
@@ -2471,17 +2385,10 @@ _AT_PREFIX_B = _AT_PREFIX.encode("ascii")
 def _line_outside_window(line, lo, hi):
     """这行日志的 at 可证明落在 [lo, hi] 之外时返回 True。
 
-    任一边界为 None 表示该侧不设限：面板要的 today、this week 只设置起始边界，
-    开放的一侧不能丢行。
-
-    扫描用它免去窗口外行的 json.loads。返回 False 表示「照旧解析」，包括形状
-    匹配但落在窗口内的行，以及任何读不准的行：
-
-    * 键序不同或手改过的行：不以 `{"at": ` 开头，或值后没有逗号；
-    * 整数记号：json.loads 会给出 int，而 int 与 float 的比较在超过 2**53 后
-      不再精确，所以只接受能精确往返的浮点记号；
-    * 后面还有第二个 `"at"` 键：json.loads 取最后一个，这里读到的会是错的。
-      字符串里的转义引号造不出假的 `"at"`，这道检查只对本来就要跳过的行执行。
+    任一边界为 None 表示该侧不设限。扫描用它免去窗口外行的 json.loads；返回
+    False 表示照旧解析，包括任何读不准的行：键序不同或手改过的行；超过 2**53
+    后 int 与 float 比较不再精确，所以只接受能精确往返的浮点记号；后面还有
+    第二个 `"at"` 键时 json.loads 取最后一个，这里读到的会是错的。
     """
     if not line.startswith(_AT_PREFIX):
         return False
@@ -2502,16 +2409,10 @@ def _line_outside_window(line, lo, hi):
 def _line_outside_window_bytes(raw, lo, hi):
     """在未解码的行上执行同一判断，只在文本版也会返回 True 时才返回 True。
 
-    扫描先按字节读再解码，同一判断因此可以在解码前跑，被丢掉的行不会变成文本，
-    窄窗口下的多日日志因此省掉大部分解码。规则与文本版一致，只是按字节读：
-    同样的前缀、第一个逗号、浮点记号要求、窗口比较，以及后面没有第二个 at 键。
-
-    多一条要求：整行必须是 ASCII。它保证字节读到的内容与文本版看到的一致，也
-    避免把无法解码的行放进跳过路径——那种行在文本路径上会以 UnicodeDecodeError
-    中断扫描，跳过它就会折进旧路径从未到达的行。
-
-    False 只表示「照旧解码并检查」，不表示这行在窗口内，边界必须与传给
-    _line_outside_window() 的相同。
+    扫描先按字节读再解码，被丢掉的行不会变成文本，窄窗口下省掉大部分解码。规则
+    与文本版一致，另加一条：整行必须是 ASCII，保证两边看到的内容一致，也不把
+    解不出来的行放进跳过路径——那种行在文本路径上会以 UnicodeDecodeError 中断
+    扫描。False 只表示照旧解码并检查，不表示这行在窗口内。
     """
     if not raw.startswith(_AT_PREFIX_B):
         return False
@@ -2650,15 +2551,12 @@ def _usage_timeseries_uncached(realm, lo, hi, step):
     return _usage_timeseries_scan(realm, lo, hi, step)
 
 def count_usage_rows(realm=None):
-    """缓存的行数：增量折叠 + 子串匹配，不做逐行全量解析。
+    """缓存的行数：增量折叠加子串匹配，不做逐行全量解析。
 
-    没有 `realm` 字段的老行（都是错误行）要走 row_realm 的账号/模型归属回退，
-    这几行照常解析一次，发生在折叠第一次读到它们的时候。
-
-    每次 /usage/recent 轮询都要它渲染页数标签；全量扫文件占掉该端点约一半
-    开销（45 MB 日志实测），所以折叠状态跨调用保留，每次只并入上次之后新增
-    的行——一次轮询的代价等于新增流量。短 TTL 仍保证数字不过时，并把这点
-    代价也从轮询路径上拿掉。
+    每次 /usage/recent 轮询都要它渲染页数标签，全量扫文件占掉该端点约一半开销
+    （45 MB 日志实测），所以折叠状态跨调用保留，每次只并入新增的行。短 TTL 仍
+    保证数字不过时。没有 `realm` 字段的老行要走 row_realm 的归属回退，只在折叠
+    第一次读到它们时解析一次。
     """
     # 先归一化：桶键就是 realm 字符串本身，字面 "all" 会被当成一个永远不存在
     # 的桶（realm_scope 把它映射成 None = 总数）。
@@ -2680,15 +2578,12 @@ _REALM_KEY = '"realm"'
 _REALM_KEY_LEN = len(_REALM_KEY)
 
 def _count_usage_line(state, line):
-    """折一行：总数 + 这一行声明的 realm 桶。
+    """折一行：总数加这一行声明的 realm 桶。
 
-    总数数的是**所有非空行**（包括解析不了的行）。带 realm 字段的行按字段值
-    归桶，取值只认两种间距（`"realm": "x"` 与 `"realm":"x"`）：值读到下一个
-    引号为止——查询用的 realm 不会带引号，字符串里的转义引号也拼不出
-    `"realm"` 这个键文本（同 _line_outside_window 的说明），所以不会误判。
-    同一行重复声明 `"realm"`（手改过的行）按每一处声明的值各计一次。只有
-    完全没有该字段的老行（都是错误行）才解析 JSON 走 row_realm() 的账号/
-    模型回退，解析费用在折叠时只付一次。
+    总数数的是所有非空行，包括解析不了的行。带 realm 字段的行按字段值归桶，
+    取值只认两种间距；值读到下一个引号为止——查询用的 realm 不带引号，转义
+    引号也拼不出 `"realm"` 这个键文本，所以不会误判。手改过的行重复声明时按
+    每处各计一次。只有完全没有该字段的老行才解析 JSON 走 row_realm 回退。
     """
     state["n"] += 1
     counts = state["n_realm"]
@@ -2781,34 +2676,6 @@ def _count_usage_rows_uncached(realm=None):
             return n
         return counts.get(realm, 0)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def usage_filters(realm=None, key=None, status=None, model=None, account=None,
                   ip=None, range=None, since=None, until=None):
     """/usage/recent 的查询字段归一化成过滤字典。"""
@@ -2830,9 +2697,6 @@ def usage_filters(realm=None, key=None, status=None, model=None, account=None,
     if hi is not None:
         out["until"] = hi
     return out
-
-
-
 
 def realm_state_file():
     """持久化 realm 开关的路径。
@@ -3258,23 +3122,10 @@ def _fold_usage_analytics(row, realm, maps, half, pricing_on=None, also=None,
                           pricing=None, priced=None):
     """把一行解析结果折进分析载荷的一半。
 
-    `maps` 持有那一半所折入的四张表，`half` 指明那一半每个条目拥有的 stat
-    字段，所以增量的 all-time 折叠（每个条目的 all_time stat）与窗口轮（同样
-    条目的 window stat）共用同一份「一行贡献什么」的定义。
-
-    key 维度与账号维度刻意分开：一个 key 可以由多个上游账号服务，一个账号也
-    可以服务多个 key，两张表是同一笔花费的两个视图，并不是把花费拆开。
-
-    `also` 是同一行还要折进的那几份 (maps, half) 的序列（按日分桶与按小时
-    分桶的窗口半）。过滤、算价与字段提取只做一次，各份各自累加：折叠本来
-    就要求每侧各记一笔，而 cost_for_row 与 realm 判定是每行最贵的那部分，
-    只该付一次。
-
-    `pricing` 是本次扫描开头取到的 _pricing_inputs() 元组（见
-    _fold_usage_snapshot 的同名参数）。
-
-    `priced` 是本次扫描要填的「用到的价」记录（见「用到的价」状态指纹一节），
-    只有推进状态的那条折叠传它；窗口半/冷扫描传 None。
+    `maps` 是这一半要折入的四张表，`half` 给出条目上的 stat 字段名，all-time
+    与窗口共用同一份「一行贡献什么」的定义。key 与账号是同一笔花费的两个视图，
+    各自累加。`also` 是同一行还要折进的其它 (maps, half)：过滤、算价与字段
+    提取只做一次。`pricing` 来自扫描开头，`priced` 只有推进状态的那条折叠传。
     """
     if realm and not row_matches_realm(row, realm):
         return
@@ -3423,19 +3274,10 @@ def _analytics_state_cold(realm, pricing_on=None):
 def _analytics_state_ready(realm, pricing_on=None):
     """把 `realm` 的 all-time 折叠推进到文件尾，返回 state、offset 与 error。
 
-    调用方必须已持有 _analytics_state_lock。日桶、小时子表与 all-time 折叠
-    共用一次扫描，见 _fold_usage_analytics 的 also 参数；窗口半与 all-time
-    半因此描述同一段字节。
-
-    `hours_keep` 标记这份状态要维护小时子表，其剪枝线比日桶短，见
-    _prune_day_buckets。`max_at` 是折过的最大 at，含 realm 不匹配的行；
-    小时窗口靠它判断窗口上界有没有切掉桶里的行。
-
-    状态指纹记录折叠行真正用到的价，见「用到的价」状态指纹一节。折叠时
-    逐行更新 state["pricing"]，扫描成功后刷时间线投影摘要，判废走
-    _pricing_used_unchanged。采纳 checkpoint 与判废归零都在
-    _analytics_state_advance 里，窗口路径的冷热判定也用那一段；这里只管
-    折到文件尾。
+    调用方必须已持有 _analytics_state_lock。日桶、小时子表与 all-time 共用一次
+    扫描，窗口半与 all-time 半因此描述同一段字节。`hours_keep` 标记这份状态
+    维护小时子表，其剪枝线比日桶短。`max_at` 是折过的最大 at，含 realm 不匹配
+    的行，小时窗口靠它判断上界有没有切掉桶里的行。
     """
     pricing = _analytics_state_advance(realm, pricing_on)
     state = _analytics_state[realm]
@@ -3471,19 +3313,10 @@ def _analytics_state_ready(realm, pricing_on=None):
 def _analytics_window_from_days(realm, day_key, until, pricing_on):
     """窗口半 maps 等于窗口内的日桶之和；日桶不可用时返回 None。
 
-    先确保 all-time 折叠推进到文件尾：日桶与它同一次扫描推进，窗口半与
-    all-time 半因此描述同一段字节。
-
-    until 给出时构成闭窗口，它必须是本地午夜，调用方已按格点判过，这里再
-    校验一次。窗口只取 at < until 的那批日桶：恰好落在 until 上的行归
-    until 那天那一桶，桶按 at 严格切分，见 _usage_hour_bucket；桶切不出
-    那一刻的行，所以那一刻有整秒行时整条路退回 None，见
-    _closed_window_edge_ok，调用方接着整段扫描，结果不变。
-
-    状态冷时直接返回 None，冷状态包括从没折过、刚被价表、realm 或日志判废、
-    以及采纳失败。那条路要先付一次全量重折，窗口请求不承担它：调用方退回
-    按日分组的冷扫描，同一批行、同一个求和口径，逐字节相同；重折留给
-    all-time 半与预热器，见 _analytics_state_cold。
+    先确保 all-time 折叠推进到文件尾，两边描述同一段字节。until 给出时是闭窗口
+    且必须是本地午夜：只取 at < until 的日桶，那一刻有整秒行时整条路退回 None，
+    见 _closed_window_edge_ok。状态冷时直接返回 None，调用方退回按日分组的冷
+    扫描，同一批行、同一口径，逐字节相同。
     """
     with _analytics_state_lock:
         if _analytics_state_cold(realm, pricing_on):
@@ -3516,20 +3349,11 @@ def _analytics_window_from_days(realm, day_key, until, pricing_on):
 def _analytics_window_from_hours(realm, since, until, pricing_on):
     """窗口半 maps 等于窗口内的小时桶之和；小时层不可用时返回 None。
 
-    成立条件缺一不可，任何一条不成立就退回扫描，优先保证正确：
-      * 窗口起点落在本地午夜起算的小时格点上，调用方已判过，这里再按桶校验；
-      * until 开放，或 until 不低于折过的最大 at，否则窗口上界会切掉桶里的
-        行；或 until 落在同一套小时格点上且直到那一刻没有整秒行，见
-        _closed_window_edge_ok。这时窗口只取 at < until 的那批桶，恰好落在
-        until 上的行由边沿账挡回整段扫描；
-      * days_floor 覆盖窗口起点所在的天，更早的天没有桶；
-      * 窗口起点所在的天及其后每一天都有 hours 子表；被剪枝线剪掉、或本地
-        午夜落在不存在的小时里而摘掉的那天，都会让窗口整体退回扫描。
-
-    状态冷时直接返回 None，冷状态包括从没折过、刚被价表、realm 或日志判废、
-    以及采纳失败。那条路要先付一次全量重折，窗口请求不承担它：调用方退回
-    按小时分组的冷扫描，同一批行、同一个求和口径，逐字节相同；重折留给
-    all-time 半与预热器，见 _analytics_state_cold。
+    条件缺一不可，否则退回扫描：起点落在本地小时格点上；until 开放，或不低于
+    折过的最大 at，或落在同一格点且那一刻没有整秒行；days_floor 覆盖起点所在的
+    天；起点那天及其后每一天都有 hours 子表（被剪枝、或午夜不存在而摘掉，都会
+    让整个窗口退回）。状态冷时直接返回 None，调用方退回按小时分组的冷扫描，
+    逐字节相同。
     """
     with _analytics_state_lock:
         if _analytics_state_cold(realm, pricing_on):
@@ -3793,12 +3617,11 @@ def _usage_day_keep_days():
     return _USAGE_DAY_KEEP_DAYS
 
 def _usage_hour_keep_days():
-    """小时桶保留天数，默认 2；WB_USAGE_HOUR_KEEP_HOURS 与面板的「小时层保留」
-    决定它，其次才是 WB_USAGE_HOUR_KEEP_DAYS。
+    """小时桶保留天数，默认 2：先取 WB_USAGE_HOUR_KEEP_HOURS，其次 WB_USAGE_HOUR_KEEP_DAYS。
 
-    两个状态各有一条小时层保留线，snapshot 按天、analytics 按小时；面板只
-    暴露一个「小时层保留」，单位小时，所以这里跟着它走，避免调了一个另一个
-    不动。取值最低为 1 天：小时层至少要能服务今天的整点窗口，否则等于没建。
+    两个状态各有一条小时层保留线，snapshot 按天、analytics 按小时；设置只有一个
+    小时粒度的值，两者跟着它走，避免调了一个另一个不动。最低 1 天：小时层至少
+    要能服务今天的整点窗口。
     """
     hours = _usage_keep_setting("hour_keep_hours")
     if hours:
@@ -3846,12 +3669,9 @@ def _local_day_key(ts):
     """ts 所属的本地日历日，形如 "YYYY-MM-DD"。
 
     日桶的键用字符串日历日，不取午夜 epoch：窗口与日桶的比较就是一次字符串
-    比较，ISO 日期天然有序；查询不必再算一遍本地午夜，也不会被夏令时的日长
-    变化影响。同一套本地日历日规则在折叠与查询两侧都成立。
-
-    结果按 ts 记忆，见「行级结果记忆」：一次冷启动里三个视图各扫一遍日志，
-    每一行都要问一次日键，第二、第三遍直接取。时区被 tzset 换过时表整体
-    作废；不可哈希的 ts，即坏行，不进表，照旧真算并抛出同样的异常。
+    比较，ISO 日期天然有序，也不会被夏令时的日长变化影响。结果按 ts 记忆，
+    一次冷启动里三个视图各扫一遍日志，第二、三遍直接取；时区被 tzset 换过时
+    整表作废，不可哈希的坏行不进表。
     """
     memo = _row_day_memo
     if _row_memo_tz is not time.tzname:
@@ -3896,14 +3716,10 @@ def _window_day_key(since):
 def _hour_window_key(since):
     """窗口起点能由小时桶推导时返回日键与小时序号的元组，否则 None。
 
-    只有起点正好是本地整点的窗口才拆得成整小时桶的并集。小时桶按离那天
-    本地午夜多少个 3600 秒切格点，见 _usage_hour_bucket，所以起点必须同时
-    满足两条：本地墙上时间落在整点，_local_hour_start 能原样还原；并且离
-    本地午夜的距离是 3600 的整数倍。夏令时把日边界挪动，或时区按半小时
-    偏移时，只要 since 不落在格点上就返回 None，退回扫描，优先保证正确。
-
-    整点起点也可能是本地午夜，两者同时成立；调用方先问日桶，所以这条只在
-    起点不是午夜时接住自定义区间的整点窗口。
+    只有起点正好是本地整点的窗口才拆得成整小时桶的并集：本地墙上时间落在整点、
+    _local_hour_start 能原样还原，且离本地午夜的距离是 3600 的整数倍。夏令时
+    挪动日边界或时区按半小时偏移时，只要不落格点就返回 None 退回扫描。整点起点
+    也可能是本地午夜，调用方先问日桶，所以这条只接住非午夜的整点窗口。
     """
     if since is None:
         return None
@@ -3937,14 +3753,10 @@ _CLOSED_WINDOW_HITS_MAX = 256
 def _closed_window_hit_record(state, at):
     """行恰好落在整秒上时记一笔，供闭窗口的桶求和核对边沿。
 
-    桶按 at 严格切分，见 _usage_hour_bucket：闭窗口 [since, until] 与
-    at < until 的那批桶只差恰好落在 until 上的行。所以直到那一刻没有整秒行
-    时，桶的和就是窗口的全部，见 _closed_window_edge_ok。这份账只收真正
-    进了桶的那些行，realm 与剪枝线与折叠同一套判定，记录点因此在
-    _usage_day_bucket 的过滤之后。
-
-    at 不是有限数时，手改日志可能写出 Infinity 或 NaN，整秒判定不成立就
-    跳过；`at // 1` 对这些值不抛异常，不会把一次折叠打断在这里。
+    桶按 at 严格切分：闭窗口 [since, until] 与 at < until 的桶只差恰好落在
+    until 上的行，所以那一刻没有整秒行时桶的和就是窗口的全部。这份账只收真正
+    进了桶的行，realm 与剪枝线跟折叠同一套判定。at 不是有限数就跳过，`at // 1`
+    对那些值不抛异常，不会把一次折叠打断。
     """
     if at != at // 1:
         return
@@ -4114,15 +3926,9 @@ def _usage_day_bucket(state, row, r, factory, day_buckets=None):
 def _prune_day_buckets(state, days, newest_key):
     """丢掉任何窗口都够不到的旧日桶，并把 days_floor 抬到剪枝线。
 
-    days_floor 的语义是这份状态从哪天起是完整的：它就是剪枝线，即最新那天
-    往前 _usage_day_keep_days 天。没剪过时第一次折到新的一天也会把它记下
-    来；比这条线更早的窗口一律退回整段扫描，例如时钟大幅回拨或日志里有
-    远古补写行，宁可多扫一次，不能少算一天。
-
-    analytics 状态还挂着一条更短的小时子表保留线，即 state["hours_keep"]：
-    小时层只为近期的自定义窗口服务，只摘旧天的 "hours" 子表，日桶本身照常
-    留满保留天数。被摘掉的天由查询侧按「这一天还有没有 hours」自己表达，
-    见 _analytics_window_from_hours，所以这里不用另存一个 floor。
+    days_floor 就是剪枝线：最新那天往前 _usage_day_keep_days 天。比它更早的
+    窗口一律退回整段扫描，宁可多扫不能少算。analytics 状态另有一条更短的小时
+    子表保留线 state["hours_keep"]：只摘旧天的 "hours" 子表，日桶照常留满。
     """
     horizon = _local_day_key(_day_key_start(newest_key)
                              - _usage_day_keep_days() * 86400)
@@ -4159,21 +3965,11 @@ def _days_cover(state, day_key):
 def _usage_hour_bucket(state, row, day):
     """这一行该折进哪个小时桶；不该折时返回 None。
 
-    小时桶挂在日桶里的 `hours` 子表，键是离当天本地午夜多少个 3600 秒的
-    字符串，与时间序列的小时子桶同一套格点规则，见 _fold_usage_series：
-    桶的 at 等于日桶 at 加序号乘 3600，所以每个桶恰好覆盖一个整点区间，
-    跨桶求和不会重复也不会漏。
-
-    at 早于日桶 at 的行放不进格点：极少数时区在本地午夜切换夏令时，午夜
-    那一刻不存在。此时整张小时表摘掉并留痕，`hours` 记为 None，求和侧看到
-    没有表就退回按小时分组的冷路径，日桶本身照常，日窗口不受影响。留痕是
-    为了挡住摘掉之后又来了这一天的行、把表重建出来：重建的表缺了被摘掉的
-    那批行，一旦被求和侧选中就是少算。
-
-    hours_floor_at 是小时层的剪枝线：比它早的天不再折小时表。迟写或补写的
-    行可能落回很久以前那天，日桶还留着，但那张表早被剪掉；重新建起来只会
-    得到一张缺了其余小时的表，求和侧一旦用它就会少算，所以这里直接不折。
-    求和侧另有 _hours_cover 挡住更早的窗口。
+    小时桶挂在日桶的 `hours` 子表，键是离本地午夜多少个 3600 秒，桶 at 等于
+    日桶 at 加序号乘 3600。早于日桶 at 的行放不进格点：个别时区在本地午夜切换
+    夏令时，午夜不存在。此时摘掉这张表并把 `hours` 记为 None 留痕，求和侧看到
+    没有表就退回冷路径；留痕挡住后来的行把表重建出来，重建的表缺了被摘掉的行，
+    一旦被选中就是少算。hours_floor_at 是小时层剪枝线，理由相同。
     """
     floor = state.get("hours_floor_at")
     if floor is None or day["at"] < floor:
@@ -4198,11 +3994,9 @@ def _usage_hour_bucket(state, row, day):
 def _prune_hour_buckets(state, days, newest_key):
     """丢掉保留窗口之外的日桶里的小时表，并把 hours_floor_at 抬到剪枝线。
 
-    小时层比日桶保留期短，只服务最近几天的整点窗口，见
-    _USAGE_HOUR_KEEP_DAYS。剪枝按天走，与 _prune_day_buckets 同一套算术，
-    所以实际保留在 keep_days 与 keep_days 加 1 天之间。hours_floor_at 的
-    语义与 days_floor 相同：这份状态的小时层从哪个时刻起是完整的；更早的
-    整点窗口一律退回冷路径，宁可多扫一次，不能少算一个桶。
+    小时层比日桶保留期短，只服务最近几天，见 _USAGE_HOUR_KEEP_DAYS。剪枝按
+    天走，与 _prune_day_buckets 同一套算术。hours_floor_at 与 days_floor 同
+    义：这份状态的小时层从该时刻起完整，更早的整点窗口一律退回冷路径。
     """
     horizon_at = _day_key_start(newest_key) - _usage_hour_keep_days() * 86400
     horizon = _local_day_key(horizon_at)
@@ -4355,16 +4149,9 @@ def _copy_analytics_window_maps(maps):
 def _scan_usage_snapshot_window_days(r, since, until, pricing_on=None):
     """窗口半的冷路径：整段扫一遍，先按日分桶再相加。
 
-    日桶状态不可用时走这里，包括还没折过、被剪枝、折叠出错。结果必须与
-    日桶状态给出的窗口半逐字节一致：窗口起点是本地午夜，until 给出时终点
-    也是本地午夜；两边装的是同一批行、同一个按日分组的求和口径，只是桶
-    一个现折、一个存量。
-
-    状态冷时它是窗口请求的直接答案，不折状态，重折留给 all-time 视图与
-    预热器，见 _usage_snap_state_cold。其余情形它紧跟一次 all-time 折叠：
-    _usage_snapshot_window_from_days 先折到文件尾才发现日桶不够用。行级
-    记忆几乎全中，同一批行刚在 all-time 半算过价与日键。窗口外的行由 skip
-    挡在解析之前，这条路只付窗口内那批行。价表照样在本函数开头取一次。
+    日桶状态不可用时走这里，包括还没折过、被剪枝、折叠出错。结果必须与日桶
+    状态给出的窗口半逐字节一致：同一批行、同一个按日分组的求和口径，只是桶
+    一个现折、一个存量。窗口外的行由 skip 挡在解析之前。
     """
     pricing = _pricing_inputs(pricing_on)
     days = {}
@@ -4398,18 +4185,10 @@ def _scan_usage_snapshot_window_days(r, since, until, pricing_on=None):
 def _scan_usage_snapshot_window_hours(r, since, until, pricing_on=None):
     """窗口半的冷路径：整段扫一遍，先按小时分桶再相加。
 
-    小时层状态不可用时走这里，包括还没折过、被剪枝、折叠出错、那天的格点
-    不成立。结果必须与小时桶状态给出的窗口半逐字节一致：窗口起点是本地
-    整点，until 给出时终点也落在同一套格点上；两边装的是同一批行、同一个
-    按日与小时分组的求和口径，只是桶一个现折、一个存量。
-
-    分组与 _usage_hour_bucket 同一套算术，即日键加离午夜多少个 3600 秒。
-    但这里对 at 早于本地午夜的行照折不误，键可以是负的：状态侧那种行会把
-    整张小时表摘掉、窗口退回这条路径，所以这条路径必须把它们算进去。
-    排序按日键与序号的数值序，与状态侧的遍历顺序一致。
-
-    价表在本函数开头取一次，行级记忆，见「行级结果记忆」，跟着这一批扫描
-    走：同一批行通常刚在 all-time 半算过价与日键，这里几乎全中。
+    小时层不可用时走这里，包括还没折过、被剪枝、折叠出错、那天的格点不成立。
+    结果必须与小时桶状态给出的窗口半逐字节一致。分组与 _usage_hour_bucket 同一
+    套算术，但对 at 早于本地午夜的行照折不误、键可以是负的：状态侧那种行会把
+    整张小时表摘掉并退回这条路径，所以这里必须把它们算进去。
     """
     pricing = _pricing_inputs(pricing_on)
     hours = {}
@@ -4477,18 +4256,11 @@ def _scan_usage_analytics_window_days(realm, since, until, stop_at=None,
 
 def _scan_usage_analytics_window_hours(realm, since, until, stop_at=None,
                                        pricing_on=None):
-    """窗口半 analytics 的冷路径，起点整小时：按小时分桶再相加。
+    """窗口半 analytics 的冷路径：按小时分桶再相加。
 
-    小时层不可用时走这里，包括还没折过、被剪枝、折叠出错、until 切在桶
-    中间。结果必须与小时桶状态给出的窗口半逐字节一致：两边装的是同一批行、
-    同一个按小时分组的求和口径，只是桶一个现折、一个存量。
-
-    分桶与折叠侧同一条规则，即离那天的本地午夜多少秒。本地午夜落在不存在
-    的小时里时这一天的小时键会变成负数，求和照样把它算进去，因为分组只是
-    浮点结合顺序的载体，所以这条冷路径不依赖格点是否成立。
-
-    价表在本函数开头取一次，行级记忆，见「行级结果记忆」，跟着这一批扫描
-    走。
+    小时层不可用时走这里，包括还没折过、被剪枝、折叠出错、until 切在桶中间。
+    结果必须与小时桶状态给出的窗口半逐字节一致。本地午夜落在不存在的小时里时
+    键会变成负数，求和照样算进去，因为分组只是浮点结合顺序的载体。
     """
     pricing = _pricing_inputs(pricing_on)
     days = {}
@@ -4676,13 +4448,9 @@ def _fold_usage_series(row, r, state, day_buckets=None):
 def _usage_series_state_ready(r):
     """把 `r` 的时间序列状态推进到文件尾，返回 state、offset 与 error。
 
-    调用方必须已持有 _series_state_lock。时间序列折叠不算价，所以状态只带
-    realm 指纹；行没有 realm 字段时 row_realm 会读它。
-
-    状态里的 `minutes_from` 是分钟环的完整线。从零折起或 refold 时它是
-    None，环对整份日志完整；采用一份缺少分钟环的 checkpoint 时，环只对
-    采用点之后折进来的行完整，那条线就是采用时的 max_at，见
-    _usage_cache_adopt_series。
+    调用方必须已持有 _series_state_lock。时间序列折叠不算价，状态只带 realm
+    指纹。`minutes_from` 是分钟环的完整线：从零折起或 refold 时为 None，环对
+    整份日志完整；采用缺少分钟环的 checkpoint 时它等于采用时的 max_at。
     """
     state = _series_state.get(r)
     if state is None:
@@ -4778,21 +4546,11 @@ def _series_closed_cut_ok(state, lo_i, hi, step):
 def _series_slice_minutes(state, realm, lo, hi, day_key):
     """分钟环的切片；不满足边界或覆盖条件时返回 None，退回整段扫描。
 
-    成立条件缺一不可，任何一条不成立就退回整段扫描，优先保证正确：
-      * 窗口起点是分钟格点，见 _series_minute_grid_ok；
-      * hi 不低于折过的最大 at，否则窗口上界会切进桶里，而桶是聚合值，切
-        不出一半来，与日切片、小时切片同一条。hi 切进数据里时属于闭窗口，
-        还要过闭窗口闸门，见 _series_closed_cut_ok：hi 落在分钟格点上，且
-        直到那一刻没有整秒行，才按 at < hi 的桶切；恰好落在 hi 上的行由
-        边沿账挡回整段扫描；
-      * 窗口起点不早于 max_at 减 6h，这是环的保留线，更早的窗口环里没有桶；
-      * 窗口起点晚于 minutes_from，环只从那条线之后才完整；采用过缺少分钟
-        环的 checkpoint 时才有这条线，见 _usage_series_state_ready；
-      * 每个桶的 at 落在键乘 60 上且不晚于 max_at，这是形状校验之外的防御，
-        与 _series_slice 对小时子桶的格点校验同一个用意。
-
-    输出桶与整段扫描逐条相同，即同一批行、同一个网格、同一个累加口径；
-    credits 与日切片、小时切片共用下面同一段选择。
+    条件缺一不可：起点是分钟格点；hi 不低于折过的最大 at，否则上界会切进聚合
+    桶，闭窗口还要过 _series_closed_cut_ok；起点不早于 max_at 减 6h 的环保留
+    线；起点晚于 minutes_from，环只从那之后完整；每个桶 at 落在键乘 60 上且不
+    晚于 max_at。输出桶与整段扫描逐条相同，credits 与日/小时切片共用同一段
+    选择。
     """
     minutes = state.get("minutes")
     if not minutes:
@@ -4860,20 +4618,10 @@ def _series_payload(state, realm, lo, hi, step, series):
 def _series_slice(state, realm, lo, hi, step, day_key):
     """窗口序列等于日桶、小时桶或分钟环的切片；不满足边界条件时返回 None。
 
-    成立条件缺一不可，任何一条不成立就退回整段扫描，优先保证正确：
-      * 窗口起点是本地午夜，day_key 由 _window_day_key 给出；
-      * 桶宽是 3600 或 86400，即与窗口一致的两种；
-      * days_floor 覆盖窗口起点，剪枝或更早的天没折过就只能整段扫；
-      * hi 不低于折过的最大 at，否则窗口上界会切掉桶里的行。hi 切进数据里
-        时属于闭窗口，还要过闭窗口闸门，见 _series_closed_cut_ok：hi 落在
-        同一套桶格点上，且直到那一刻没有整秒行，才按 at < hi 的桶切；恰好
-        落在 hi 上的行由边沿账挡回整段扫描；
-      * 每个桶的 at 落在 lo 加 k 乘 step 的格点上。这一条同时挡住夏令时：
-        日长不是 86400 秒的那天之后，每一天的本地午夜都不再落在 86400 的
-        格点上，于是自动退回整段扫描。时区没有夏令时则恒真，例如 cn。
-
-    桶宽 60 走分钟环，条件见 _series_slice_minutes；它不要求窗口起点是本
-    地午夜，只要求落在分钟格点上。
+    条件缺一不可：起点是本地午夜；桶宽是 3600 或 86400；days_floor 覆盖起点；
+    hi 不低于折过的最大 at，闭窗口还要过 _series_closed_cut_ok；每个桶 at 落在
+    lo 加 k 乘 step 的格点上——这一条同时挡住夏令时，日长不是 86400 秒之后本地
+    午夜不再落格点，没有夏令时的时区则恒真。桶宽 60 走分钟环。
     """
     if step == 60:
         return _series_slice_minutes(state, realm, lo, hi, day_key)
@@ -4949,13 +4697,9 @@ def _top_models(bucket, top_n=KEY_MODEL_TOP_N):
 def _build_key_rows(key_map, realm=None):
     """把观察到的每 key 流量与配置里的 key 清单合并成表格行。
 
-    面板还能看到的每个 key 都有一行，窗口内没有流量也一样：昨天用过、今天
-    没用的 key 是今天支出的一部分事实，删掉这行会被读成 key 消失了。禁用且
-    在窗口内空闲的 key 会被丢掉，因为这一行说明不了所选区间的任何事。
-
-    反方向同样重要：日志里出现而清单不认识的 id 也要有一行，这样每 key 表
-    永远与每账号表对得上。这些 id 合并成单独一行，无法命名的 id 是异常，
-    不值得单独拆成一个维度。
+    面板还能看到的每个 key 都有一行，窗口内没有流量也一样：昨天用过、今天没用
+    的 key 是今天支出的一部分事实。禁用且窗口内空闲的 key 丢掉。日志里出现而
+    清单不认识的 id 也占一行，让每 key 表与每账号表对得上。
     """
     key_map = key_map or {}
     rows = {}

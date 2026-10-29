@@ -9,12 +9,10 @@ import os
 # 几个并发大 body 就可能耗尽小内存设备。16MB 足够正常客户端使用，需要更大时
 # 显式设置 WB_MAX_PAYLOAD_BYTES，内存代价由部署方承担。
 MAX_PAYLOAD_BYTES = int(os.environ.get("WB_MAX_PAYLOAD_BYTES", 16 * 1024 * 1024))
-# 一次 chat 上游调用最长占用处理线程 600 秒，每个请求各占一个线程。
-# 并发 chat 与 responses 请求必须有上限，否则少量慢客户端就能占住大量线程
-# 与内存；面板与管理接口不受限制。超出的调用短暂等待后返回 503。
-#
-# 默认上限固定为 32，与账号池规模无关；WB_MAX_CONCURRENT_CHAT=auto 的按池
-# 计算语义见 resize_chat_slots。
+# 一次 chat 上游调用最长占用处理线程 600 秒，每个请求各占一个线程；并发 chat 与
+# responses 必须有上限，超出的调用短暂等待后返回 503，面板与管理接口不受限制。
+# 默认上限固定为 32，与账号池规模无关；WB_MAX_CONCURRENT_CHAT=auto 的按池计算语义见
+# resize_chat_slots。
 _CHAT_SLOTS_ENV = os.environ.get("WB_MAX_CONCURRENT_CHAT", "32").strip().lower()
 CHAT_SLOTS_AUTO = _CHAT_SLOTS_ENV in ("auto", "pool", "dynamic")
 CHAT_SLOTS_FLOOR = 32
@@ -83,7 +81,7 @@ _SERVER_DEPLOYMENT = None
 
 
 def agents_module():
-    """按需 import wb_agents；用不到它的部署不载入该模块。"""
+    """延迟载入 wb_agents；不含 agents 的部署不付 import 成本。"""
     global _AGENTS_MODULE
     if _AGENTS_MODULE is None:
         import wb_agents
@@ -92,11 +90,8 @@ def agents_module():
 
 
 def server_deployment_form():
-    """进程是否以服务端形态运行，只认容器与 OpenWrt 标记。
-
-    看板是否本机打开由 agents_client_allowed 按请求来源地址判断。
-    结果缓存，进程存活期间不变。
-    """
+    """进程是否以服务端形态运行，只认容器与 OpenWrt 标记；结果缓存，进程存活期间不变。
+    看板是否本机打开由 agents_client_allowed 按请求来源地址判断。"""
     global _SERVER_DEPLOYMENT
     if _SERVER_DEPLOYMENT is None:
         blocked = False
@@ -123,11 +118,8 @@ def server_deployment_form():
 
 
 def agents_client_allowed(client_address):
-    """这个来源地址能否使用一键配置，只接受回环地址。
-
-    非回环说明看板是远程打开的，例如手机、另一台电脑或容器端口映射；
-    此时 apply 改的是容器或服务器里的配置目录，按不可用处理。
-    """
+    """这个来源地址能否使用一键配置，只接受回环地址。远程打开的看板 apply 改的是容器或
+    服务器里的配置目录，按不可用处理。"""
     if server_deployment_form():
         return False
     try:
@@ -138,12 +130,10 @@ def agents_client_allowed(client_address):
 
 
 def launcher_hint(port):
-    """在另一个端口启动网关时使用的启动命令。"""
     if IS_WINDOWS:
         return "start-wb-proxy.bat %d" % port
     return "./start-wb-proxy.sh %d" % port
 def port_owner_hint(port):
-    """列出占用本地 TCP 端口的进程的命令。"""
     if IS_WINDOWS:
         return "netstat -ano | findstr :%d" % port
     return "lsof -nP -iTCP:%d -sTCP:LISTEN" % port
@@ -188,13 +178,9 @@ def exclusive_realm(model_id):
         return "cn"
     return ""
 def install_console_close_handler():
-    """控制台窗口被关闭时释放端口。
-
-    Windows 关闭控制台不会杀掉子进程，由 .bat 启动的网关会继续运行并占着
-    端口，下一次启动就会误报已有实例在运行。关闭窗口会向同一控制台的所有
-    进程发送 CTRL_CLOSE_EVENT，注册处理函数即可在事件发生时退出，不必轮询
-    父进程号。没有控制台时注册无副作用。
-    """
+    """控制台窗口被关闭时释放端口。Windows 关闭控制台不杀子进程，.bat 启动的网关会继续
+    运行并占着端口，下一次启动误报已有实例；注册 CTRL_CLOSE_EVENT 处理函数即可在事件发生
+    时退出。没有控制台时注册无副作用。"""
     if os.name != "nt":
         return None
     try:
@@ -220,21 +206,15 @@ def install_console_close_handler():
         return None
 
 # ---------------------------------------------------------------------------
-# 日志终端查看器采用双进程模型。
-#
-# 服务进程由 pythonw 静默后台运行，没有窗口，关闭窗口也不会停止。用户看到的
-# 终端是独立的 console_tail.py 进程，只连本地 /logs 接口实时打印日志，关掉它
-# 不影响服务。启动脚本会打开一个，面板的眼睛按钮可以再开或关一个。
+# 日志终端查看器采用双进程模型：服务进程由 pythonw 静默后台运行，用户看到的终端是独立的
+# console_tail.py 进程，只连本地 /logs 接口实时打印日志，关掉它不影响服务。
 # ---------------------------------------------------------------------------
 CONSOLE_VIEWER_PROC = None
 _LISTEN_PORT = 8788
 
 def _console_python():
-    """找到当前解释器旁边带控制台的 python。
-
-    服务由 pythonw 启动，sys.executable 指向 pythonw.exe；要打开可见窗口，
-    需要同目录下的 python.exe。找不到时返回当前解释器。
-    """
+    """当前解释器旁边带控制台的 python。服务由 pythonw 启动，sys.executable 指向
+    pythonw.exe，开可见窗口需要同目录的 python.exe；找不到时返回当前解释器。"""
     exe = sys.executable or "python"
     d = os.path.dirname(exe)
     cand = os.path.join(d, "python.exe")
@@ -250,11 +230,8 @@ def _console_viewer_running():
     return bool(CONSOLE_VIEWER_PROC and CONSOLE_VIEWER_PROC.poll() is None)
 
 def _launch_console_viewer():
-    """在独立的新控制台窗口启动 console_tail.py。
-
-    启动成功返回 True，已在运行返回 False，脚本不存在返回 None。
-    传入服务端生成的面板令牌，面板密码被修改后查看器仍可用。
-    """
+    """在独立的新控制台窗口启动 console_tail.py。启动成功返回 True，已在运行返回 False，
+    脚本不存在返回 None。传入服务端生成的面板令牌，面板密码被修改后查看器仍可用。"""
     global CONSOLE_VIEWER_PROC
     if _console_viewer_running():
         return False
@@ -294,11 +271,8 @@ CHAT_PATH = "/v2/chat/completions"
 DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant."
 
 # ---------------------------------------------------------------------------
-# 桌面客户端的后台模型改写。
-#
-# 内置 model routing config 把记忆生成、环境建议、临时生成与自动化等后台
-# 任务发往硬编码模型，不跟随用户在主对话线程选的模型，同样消耗付费积分。
-# 这里改写为免费目标，功能照常且不消耗付费积分。WB_BACKGROUND_MODEL_NAMES 与
+# 桌面客户端的后台模型改写：内置 model routing config 把记忆生成、环境建议等后台任务发往
+# 硬编码模型，同样消耗付费积分；这里改写为免费目标。WB_BACKGROUND_MODEL_NAMES 与
 # WB_BACKGROUND_MODEL_TARGET 覆盖默认值。
 # ---------------------------------------------------------------------------
 BACKGROUND_MODEL_TARGET = os.environ.get("WB_BACKGROUND_MODEL_TARGET", "deepseek-v4.1-flash")
@@ -313,7 +287,6 @@ BACKGROUND_MODEL_NAMES = tuple(
 
 
 def _apply_background_model_alias(payload):
-    """把客户端已知的后台任务模型改写为免费目标模型。"""
     if not isinstance(payload, dict):
         return
     name = payload.get("model")
@@ -334,11 +307,8 @@ _CHUNK_SIZE_RE = re.compile(rb"[0-9A-Fa-f]{1,16}")
 
 
 def _chunk_size(line):
-    """从 chunked 编码长度行取出块大小，格式不合法返回 None。
-
-    直接用 int(x, 16) 还会接受 "-30d40" 与 "+1f"；负数会让累计长度落到
-    请求体上限之下。
-    """
+    """从 chunked 编码长度行取出块大小，格式不合法返回 None。直接 int(x, 16) 会接受
+    "-30d40" 与 "+1f"，负数会让累计长度落到请求体上限之下。"""
     field = line.split(b";", 1)[0].strip()
     if not _CHUNK_SIZE_RE.fullmatch(field):
         return None
@@ -346,7 +316,6 @@ def _chunk_size(line):
 
 
 class BodyTooLarge(Exception):
-    """请求体超过配置上限时抛出。"""
     def __init__(self, length):
         super(BodyTooLarge, self).__init__(length)
         self.length = length
@@ -375,7 +344,6 @@ STAND_DOWN_POST_PATHS = frozenset((
     "/scheduler/trigger", "/catalog/refresh",
 ))
 def cors_origin_allowed(path):
-    """OpenAI 风格 API 路径是否需要返回 CORS 头。"""
     path = (path or "").split("?")[0]
     if path.startswith(MANAGEMENT_PATH_PREFIXES):
         return False
@@ -386,13 +354,9 @@ _chat_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CHAT)
 
 
 def resize_chat_slots(ready_accounts):
-    """按账号池规模调整 chat 并发上限，仅在配置为 auto 时生效。
-
-    WB_MAX_CONCURRENT_CHAT=auto 时，上限等于就绪账号数，最低 CHAT_SLOTS_FLOOR；
-    固定数字配置下本函数不做任何事。上限只增不减：已在执行的请求持有旧信号量
-    的许可，缩小上限会让在途数量超过新上限，多余的释放会让 BoundedSemaphore
-    抛出 ValueError。账号池在启动时加载一次，实际调用发生在监听开始之前。
-    """
+    """按账号池规模调整 chat 并发上限，仅在 WB_MAX_CONCURRENT_CHAT=auto 时生效。上限只增
+    不减：在途请求持有旧信号量许可，缩小上限会让 BoundedSemaphore 抛 ValueError。
+    账号池在启动时加载一次，实际调用发生在监听开始之前。"""
     global _chat_slots, MAX_CONCURRENT_CHAT
     if not CHAT_SLOTS_AUTO:
         return MAX_CONCURRENT_CHAT
@@ -441,38 +405,28 @@ def configured_keys():
         log("could not read api keys: %s" % exc)
         return []
 def auth_required():
-    """调用 /v1 接口是否必须提供 key。"""
     if wb_settings.auth_disabled(ACCOUNTS_DIR):
         return False
     if any(entry.get("enabled") for entry in configured_keys()):
         return True
     return bool(API_KEY)
 def identify_key(supplied):
-    """返回调用方使用的 key 条目，没有匹配时返回 None。
-
-    面板配置了至少一个 key 后，这些 key 是唯一接受的凭据，启动参数里的
-    本地 key 不能继续生效。
-    """
+    """返回调用方使用的 key 条目，没有匹配时返回 None。面板配置了至少一个 key 后，这些
+    key 是唯一接受的凭据，启动参数里的本地 key 不能继续生效。"""
     extra = () if configured_keys() else (API_KEY,)
     return wb_settings.match_api_key(ACCOUNTS_DIR, supplied, extra_keys=extra)
 # ---------------------------------------------------------------------------
-# API Key 在日志里的显示名。
+# API Key 在日志里的显示名：多人共用网关时把 key 的 name 拼进日志行，未填 name 时用 id。
+# 只做只读查表；名单带短 TTL 缓存，避免每条请求都读 settings.json。
 # ---------------------------------------------------------------------------
-# 请求日志按账号记录时，多人共用网关无法分辨发起人。这里把 key 的 name 拼进
-# 日志行，未填 name 时使用 id。只做 id 到显示名的只读查表，key 本身仍由调用方
-# 显式传入，见 record_usage 的说明；名单带短 TTL 缓存，避免每条请求都读
-# settings.json。
 _KEY_LABEL_TTL = 5.0
 _key_label_cache = {"at": 0.0, "map": {}}
 _key_label_lock = threading.Lock()
 
 
 def key_label(key_id):
-    """key 的 settings id 到日志显示名；name 为空时回退 id。
-
-    空 id 包括未带 key、面板会话与未配置 key 的部署，返回空串，调用方据此
-    决定是否拼接这一段；未知 id 返回「已删除的 Key」，日志里仍能对应到具体 key。
-    """
+    """key 的 settings id 到日志显示名；name 为空时回退 id。空 id 返回空串，调用方据此决定
+    是否拼接这一段；未知 id 返回「已删除的 Key」。"""
     if not key_id:
         return ""
     key_id = str(key_id)
@@ -497,9 +451,6 @@ def key_label(key_id):
                 _key_label_cache["map"] = {}
             _key_label_cache["at"] = now
         return _key_label_cache["map"].get(str(key_id)) or "已删除的 Key"
-
-
-
 
 LIMIT_EVENTS_FILE = os.path.join(USAGE_DIR, "limit-events.jsonl")
 # 按天持久化的估算数据：每天的预算与每个组合的截断前后分段。必须跟随
@@ -670,68 +621,46 @@ def runtime_settings_view():
         "version": VERSION,
     }
 def current_account():
-    """用于展示的账号（健康度与用量摘要）。"""
     return POOL.representative() if POOL else None
 # ---------------------------------------------------------------------------
 # 基于前缀的会话亲和（PATCHED-BY-OPS）
 # ---------------------------------------------------------------------------
-# 上游 prompt cache 是【账号级】的：只有同一个账号再次看到相同前缀才会命中。
-# 实测证据（wk 实例 11 个号）：8 次完全相同的前缀请求被轮询分散到 8 个账号，
-# 缓存率全部为 0%；而带上会话标识固定落到同一账号时，第 2 次起缓存率即 95.2%。
-#
-# sub2api / DSH 等客户端并不发送 X-Conversation-Id 之类的会话标识，
-# 于是 hub 走纯轮询，同一对话每一轮都换账号，缓存必然归零。
-#
-# 这里在缺少显式会话键时，用【对话稳定前缀】派生亲和键：
-# 取消息列表的前两条（system + 首条 user），它们在整段对话生命周期内不变，
-# 因此同一对话的每一轮都会落到同一账号；而不同对话的首条 user 不同，
-# 依旧会分散到各账号，负载均衡不受影响。
+# 上游 prompt cache 是【账号级】的：实测（wk 实例 11 个号）8 次完全相同的前缀请求被轮询
+# 分散到 8 个账号，缓存率全部为 0%；固定落到同一账号时第 2 次起缓存率即 95.2%。sub2api /
+# DSH 等客户端不发送会话标识，于是同一对话每轮都换账号，缓存必然归零。缺少显式会话键时
+# 用【对话稳定前缀】派生亲和键：取消息列表的前两条（system + 首条 user），它们在整段对话
+# 生命周期内不变，同一对话每轮落到同一账号；不同对话的首条 user 不同，负载均衡不受影响。
 def affinity_debug_enabled():
     return wb_settings.affinity_debug(ACCOUNTS_DIR)
 
 
-# 亲和的上限：对话超过这么多条消息后停止绑定账号。
-#
-# 为什么需要上限：亲和把整段对话固定在同一个账号上，而对话的上下文是单调
-# 增长的，于是那一个账号要反复接收越来越大的请求体。实测（wk4 实例，
-# 2026-10-08，333 个请求）请求体与上游断连率的关系：
+# 亲和的上限：对话超过这么多条消息后停止绑定账号。亲和把整段对话固定在一个账号上，
+# 上下文单调增长，该账号反复接收越来越大的请求体。实测（wk4 实例，2026-10-08，333 个
+# 请求）请求体与上游断连率的关系：
 #
 #     msgs <150    82 个请求   断连率  0.0%
 #     msgs 150-300 59 个请求   断连率  3.4%
 #     msgs 300-400 64 个请求   断连率  7.8%
 #     msgs 400-500 50 个请求   断连率 10.0%
 #
-# 断连（TimeoutError / RemoteDisconnected）会触发重试，把一个 8.8s 的请求
-# 拖到 11.6s，首字延迟随之翻倍。超过阈值后放弃亲和，让这个对话重新参与
-# 轮询：代价是它丢掉前缀缓存，收益是断连和重试消失。
-#
-# 阈值不能设得太低，否则会波及正常长度的对话（本实例 94% 的请求缓存命中率
-# 来自亲和）。设 0 表示不限制，保持 1.6.x 的原有行为。
+# 断连（TimeoutError / RemoteDisconnected）触发重试，把 8.8s 的请求拖到 11.6s。超过阈值后
+# 放弃亲和重新参与轮询：丢掉前缀缓存，换断连和重试消失。阈值不能太低（本实例 94% 的
+# 请求缓存命中率来自亲和）。设 0 表示不限制，保持 1.6.x 的原有行为。
 AFFINITY_MAX_MSGS = int(os.environ.get("WB_AFFINITY_MAX_MSGS", "400") or 0)
-# 超限对话改成【页内轮转】而不是撒到整个池子。
-#
-# 为什么：整池轮转下每个账号要等「池子大小」轮才再见到这段对话，间隔一旦
-# 超过上游缓存的存活期就整段漏。线上实测（2026-10-10，37706 条请求）：超限
-# 对话占 59% 的 prompt token，却贡献了 64% 的漏掉量，签名是只命中约 24k 的
-# 系统提示（账号见过同一客户端的系统提示、没见过这段历史）——典型的「落在
-# 没预热过的账号上」。页内轮转把「再见到」的周期从「池子大小」轮缩到 size
-# 轮，页里每个账号都留着前缀；同时超大请求体仍摊在 size 个账号上，不是压回
-# 一个（那正是 400 条上限要解决的断连问题）。
+# 超限对话改成【页内轮转】而不是撒到整个池子。整池轮转下每个账号要等「池子大小」轮才
+# 再见到这段对话，间隔超过上游缓存存活期就整段漏。线上实测（2026-10-10，37706 条请求）：
+# 超限对话占 59% 的 prompt token，却贡献了 64% 的漏掉量，签名是只命中约 24k 的系统提示
+# ——典型的「落在没预热过的账号上」。页内轮转把「再见到」的周期从「池子大小」轮缩到
+# size 轮，超大请求体仍摊在 size 个账号上。
 #
 # 取值：≥2 = 页大小（账号数）；1 = 和普通对话一样固定账号（等于取消上限）；
 # 0 = 保持 1.6.x 的整池轮转。页的划分见 wb_accounts.AccountPool._page_slice。
 AFFINITY_PAGE_SIZE = int(os.environ.get("WB_AFFINITY_PAGE_SIZE", "3") or 0)
 def affinity_route(messages):
-    """这段对话的 (session_key, page)。
-
-    session_key 是稳定的对话键；page 是池页 (index, size)，仅消息数超过
-    AFFINITY_MAX_MSGS 的对话用它做页内轮转，其余情况为 None（短对话、页开关
-    关闭、客户端自带会话键的对话）。两者都来自同一个头部哈希，同一段对话每轮
-    对键与页的取值一致，不需要服务端状态。
-
-    客户端自带会话标识时用它的；没有标识就按对话前缀派生。两者共用一个开关：
-    会话粘性，关掉就完全不绑定。
-    """
+    """这段对话的 (session_key, page)。session_key 是稳定的对话键；page 是池页 (index, size)，
+    仅消息数超过 AFFINITY_MAX_MSGS 的对话用它做页内轮转，其余为 None。两者都来自同一个
+    头部哈希，同一段对话每轮取值一致，不需要服务端状态。客户端自带会话标识时优先用它，
+    否则按对话前缀派生，两者共用「会话粘性」开关，关掉就完全不绑定。"""
     if not wb_settings.session_affinity(ACCOUNTS_DIR):
         return None, None
     try:
@@ -760,14 +689,10 @@ def affinity_route(messages):
     except Exception:
         return None, None
 def derive_affinity_key(messages):
-    """只取对话键；池页见 affinity_route。"""
     return affinity_route(messages)[0]
 def prompt_fingerprint(messages):
-    """出站 prompt 的隐私安全指纹。
-
-    缓存命中要求前缀逐字节相同，这组哈希回答「前缀是否稳定、对话是否连续」，
-    不存储任何文本。
-    """
+    """出站 prompt 的隐私安全指纹：缓存命中要求前缀逐字节相同，这组哈希回答前缀是否稳定、
+    对话是否连续，不存储任何文本。"""
     try:
         def h(obj):
             blob = json.dumps(obj, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -819,7 +744,7 @@ _LOG_TAG_HINTS = (
 )
 
 # 可选的 SQLite 日志库（默认关闭）。None = 还没初始化（模块 import 期），启动时按
-# settings 建好，之后由面板开关驱动 wb_logstore.LogStore.configure()。关闭时它
+# settings 建好，之后由开关驱动 wb_logstore.LogStore.configure()。关闭时它
 # 要么是 None、要么 enabled=False，整条日志路径与上游一字不差：只写内存环形
 # 缓冲，不建库、不落盘。
 LOG_STORE = None
@@ -888,9 +813,8 @@ def log(msg, level=None, tag=None):
 wb_webtools.set_logger(log)
 
 def get_logs(limit=200, level="", tag="", search="", since_id=0):
-    # 写入数据库开启时以数据库为准：它是完整历史（受保留上限约束），而内存环形缓冲
-    # 只留最新 2000 条，拿它回答会看不到刚过去的窗口。查询失败或超时就退回内存，
-    # 面板宁可少看历史，也不能因为日志库出问题而整页空白。
+    # 写入数据库开启时以数据库为准（完整历史），内存环形缓冲只留最新 2000 条；查询失败或
+    # 超时退回内存，面板宁可少看历史，也不能因为日志库出问题而整页空白。
     if _log_db_active():
         try:
             stored = LOG_STORE.query(limit=limit, level=level, tag=tag,
@@ -927,12 +851,8 @@ def clear_logs():
 
 
 def apply_log_db_settings():
-    """把面板的日志库设置读进运行中的 store。
-
-    启动时调用一次（USAGE_DIR 确定之后），每次保存设置再调一次，改开关或上限
-    立即生效，无需重启。同时把 id 计数器抬到数据库已有的最大值，重启后 id 仍
-    单调递增，面板的 since_id 增量拉取继续可用。
-    """
+    """把面板的日志库设置读进运行中的 store，改开关或上限立即生效，无需重启。同时把 id
+    计数器抬到数据库已有的最大值，重启后 id 仍单调递增，面板的 since_id 增量拉取继续可用。"""
     global _LOG_COUNTER
     if LOG_STORE is None:
         return False
@@ -980,12 +900,8 @@ EXTRA_BANNED = set()
 
 
 def is_model_banned(model):
-    """True 表示这个模型名不该被送去上游。
-
-    规则：ALLOWED_MODELS / ALLOWED_PREFIXES 命中就放行；其余只要命中
-    BANNED_SUBSTRING 或 EXTRA_BANNED 就拒绝，没命中则照常送往上游。
-    三个设置默认都是空的，所以默认不封锁任何模型。
-    """
+    """True 表示这个模型名不该被送去上游。ALLOWED_MODELS / ALLOWED_PREFIXES 命中就放行，
+    其余命中 BANNED_SUBSTRING 或 EXTRA_BANNED 就拒绝；三个设置默认都是空的，默认不封锁。"""
     if not model:
         return False
     m = str(model).strip().lower()
@@ -1049,11 +965,8 @@ BACKGROUND_THREAD_SOURCES = (
 
 
 def turn_metadata_fields(payload):
-    """把我们能拿到的 request_kind / turn_trigger / thread_source 提示拍平。
-
-    Codex 有时把它们作为 client_metadata 的普通键发送，有时塞进它自己的 metadata
-    键下的 JSON 字符串，两种形状都读。都没有时返回 {}。
-    """
+    """把 request_kind / turn_trigger / thread_source 提示拍平。Codex 有时把它们作为
+    client_metadata 的普通键发送，有时塞进它自己的 metadata 键下的 JSON 字符串，两种形状都读。"""
     if not isinstance(payload, dict):
         return {}
     meta = payload.get("client_metadata")
@@ -1077,12 +990,8 @@ def turn_metadata_fields(payload):
 
 
 def is_compaction_request(payload):
-    """操作者主动发的「压缩上下文」请求返回 True。
-
-    request_kind=compaction 与背景请求共用同一个词，但这一条是用户自己要的：客户端
-    在用户的会话线程上发送它，客户端自发的压缩则写明发起该任务的名字。拒掉它等于
-    拿走上下文压缩按钮。
-    """
+    """操作者主动发的「压缩上下文」请求返回 True。request_kind=compaction 与背景请求共用
+    同一个词，但这一条是用户自己要的，拒掉它等于拿走上下文压缩按钮。"""
     fields = turn_metadata_fields(payload)
     kind = str(fields.get("request_kind") or "").strip().lower()
     if "compact" not in kind:
@@ -1092,10 +1001,8 @@ def is_compaction_request(payload):
 
 
 def background_request_reason(payload):
-    """若这是 Codex 自己发的背景请求，返回说明字符串；否则返回 ""。
-
-    只看 client_metadata，不碰消息内容。
-    """
+    """若是 Codex 自己发的背景请求，返回说明字符串；否则返回 ""。只看 client_metadata，
+    不碰消息内容。"""
     fields = turn_metadata_fields(payload)
     if not fields:
         return ""
@@ -1114,30 +1021,19 @@ def background_request_reason(payload):
 
 
 def client_effort_of(body):
-    """请求自己带的思考档位，两种客户端拼写都认。
-
-    build_upstream_body() 同时读 "reasoning_effort" 与 "reasoningEffort"，且只对
-    需要注入的模型补默认值——camelCase 的请求保留 camelCase 键，打到目录固定档位
-    模型的请求则完全不带档位。
-    """
+    """请求自己带的思考档位，两种客户端拼写都认。build_upstream_body() 只对需要注入的模型
+    补默认值：camelCase 的请求保留 camelCase 键，打到目录固定档位模型的请求不带档位。"""
     if not isinstance(body, dict):
         return None
     return body.get("reasoning_effort") or body.get("reasoningEffort")
 
 
 def upstream_effort_of(body, model=None):
-    """请求实际以哪个思考档位运行，未知时为 None。
-
-    按上游的应用顺序解析：
-      - 目录把模型固定在某一档（reasoning.effort，无 supportedEfforts）时永远跑
-        那一档，选择器不给选项，请求里带的值改不了结果；
-      - 请求关掉了思考、或要的是 "none"，就没有思考过程，下面几条也不覆盖；
-      - 否则以客户端自己的值为准，两种拼写都认；
-      - 再否则用模型声明的 defaultEffort。
-
-    后两条只看请求体不够：网关只对需要注入的模型写 effort，普通请求打到固定档模型
-    时会被误报成「没有档位」。
-    """
+    """请求实际以哪个思考档位运行，未知时为 None。按上游的应用顺序解析：目录把模型固定在
+    某一档（reasoning.effort，无 supportedEfforts）时永远跑那一档，请求里带的值改不了结果；
+    请求关掉了思考、或要的是 "none"，就没有思考过程；否则以客户端自己的值为准；再否则用
+    模型声明的 defaultEffort。后两条只看请求体不够：网关只对需要注入的模型写 effort，
+    普通请求打到固定档模型时会被误报成「没有档位」。"""
     given = client_effort_of(body)
     if model:
         fixed = model_fixed_effort(model)
@@ -1175,7 +1071,6 @@ def disabled_model_message(model):
 
 
 def key_model_message(entry, model):
-    """按 key 的模型限制生成说明，口径与全局封锁一致。"""
     name = (entry or {}).get("name") or "未命名"
     allowed = "、".join((entry or {}).get("models") or []) or "-"
     asked = str(model or "").strip() or "(未指定模型)"
@@ -1202,12 +1097,9 @@ def prompt_mode_config():
 
 
 def apply_prompt_mode(messages):
-    """把配置的 prompt 模式应用到一次请求的 messages 上。
-
-    passthrough 是默认行为（客户端 system 提示原样透传），custom/append 需要显式
-    开启。降级窗口生效期间，passthrough 与 append 改用最小化的中性提示，custom
-    不降级。prompt 文件读不出来时按 passthrough 放行，不阻塞请求。
-    """
+    """把配置的 prompt 模式应用到一次请求的 messages 上。passthrough 是默认行为，
+    custom/append 需要显式开启。降级窗口生效期间 passthrough 与 append 改用最小化的中性
+    提示，custom 不降级。prompt 文件读不出来时按 passthrough 放行，不阻塞请求。"""
     cfg = prompt_mode_config()
     mode = cfg.get("mode") or "passthrough"
     degraded = PROMPT_DEGRADE.active()
@@ -1230,9 +1122,8 @@ def build_upstream_body(payload, dsh_request=None):
         dsh_request = payload.get("_dsh_request")
     if dsh_request is None:
         dsh_request = bool(payload.get("tools")) and is_dsh_payload(payload)
-    # 先解析出实际生效的 thinking 状态再做下面的 backfill：thinking 开着时，
-    # 上游要求每条 assistant 消息都带 reasoning_content，无论客户端有没有
-    # 保留 reasoning 轨迹。
+    # 先解析出实际生效的 thinking 状态再做下面的 backfill：thinking 开着时，上游要求每条
+    # assistant 消息都带 reasoning_content，无论客户端有没有保留 reasoning 轨迹。
     thinking = payload.get("thinking")
     thinking_type = ""
     if isinstance(thinking, dict):
@@ -1255,25 +1146,22 @@ def build_upstream_body(payload, dsh_request=None):
     if not messages or (messages[0].get("role") != "system"):
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
     body = dict(payload)
-    # Responses 路径在 chat body 上捎带私有请求标记（命名空间映射、
-    # local-web-tools 标志）。它们不属于上游协议，在这里删掉，不指望上游
-    # 忽略未知字段。
+    # Responses 路径在 chat body 上捎带私有请求标记（命名空间映射、local-web-tools 标志）；
+    # 它们不属于上游协议，在这里删掉，不指望上游忽略未知字段。
     for _marker in [k for k in body if str(k).startswith("_")]:
         body.pop(_marker, None)
     # dict(payload) 会把原始模型名一起带过去，所以别名要在这里覆盖回去
     body["model"] = model
     body["messages"] = messages
-    # 请求发出前修复 tool-call 配对：结果没回来的调用、被插入消息拆散的
-    # 结果批次、被拆成相邻 assistant 消息的并行批次，都会让上游拒绝该会话
-    # 后续所有轮次。顺序不能变：先合并被拆开的声明，repack 才能看到一个完整
-    # 批次。
+    # 请求发出前修复 tool-call 配对，否则上游拒绝该会话后续所有轮次。顺序不能变：
+    # 先合并被拆开的声明，repack 才能看到一个完整批次。
     repaired, _merged = merge_adjacent_tool_calls(body["messages"])
     repaired, _repacked = repack_tool_result_blocks(repaired)
     repaired, _cleaned = cleanup_orphan_tool_calls(repaired)
     body["messages"] = repaired
     translate_max_completion_tokens(body)
-    # 上游 GPT 系模型要求 max_output_tokens >= 16；更小的值（探测用的
-    # max_tokens=1）报 400 integer_below_min_value（#364、#252）。
+    # 上游 GPT 系模型要求 max_output_tokens >= 16；更小的值报 400 integer_below_min_value
+    # （#364、#252）。
     if "max_tokens" in body and str(model).lower().startswith("gpt-"):
         try:
             mt = int(body["max_tokens"])
@@ -1291,14 +1179,8 @@ def build_upstream_body(payload, dsh_request=None):
         default_max = model_default_max_output_tokens(model)
         if default_max:
             body["max_tokens"] = default_max
-    # DeepSeek 模型的 thinking 注入。
-    #
-    # 只开 thinking.type=enabled 并不会打开 reasoning trace：不带 effort 时
-    # 上游照样不给 reasoning。线上实测（deepseek-v4.1-flash，同一 prompt）：
-    #   enabled + 无 effort      -> reasoning_tokens 0,  reasoning_content len 0
-    #   reasoning_effort=high    -> reasoning_tokens 37, reasoning_content len 117
-    # 客户端自己的选择永远优先；只有请求没填 effort 时才补默认档，显式关掉
-    # thinking 的请求永不注入。
+    # DeepSeek thinking 注入：只开 thinking.type=enabled 不给 trace（实测无 effort -> tokens 0，
+    # effort=high -> 37）。客户端选择优先，没填 effort 才补默认档，显式关掉的永不注入。
     if str(model).lower().startswith("deepseek"):
         thinking = body.get("thinking")
         opted_out = isinstance(thinking, dict) and \
@@ -1316,12 +1198,8 @@ def build_upstream_body(payload, dsh_request=None):
 
 
 def model_catalog_meta(model):
-    """模型的目录元数据字典，取不到时返回 {}。
-
-    读取与 /v1/models 相同的合并目录。刻意无副作用：只读已填充的模型缓存与
-    随包静态表。这里调用 fetch_models() 会让冷缓存在请求处理中触发一次上游
-    发现请求，把一次 chat 调用变成一次网络抓取。
-    """
+    """模型的目录元数据字典，取不到时返回 {}。刻意无副作用：只读已填充的模型缓存与随包
+    静态表，调用 fetch_models() 会让冷缓存在请求处理中触发一次上游发现请求。"""
     if not model:
         return {}
     try:
@@ -1341,12 +1219,10 @@ def model_catalog_meta(model):
 
 
 def model_reasoning_meta(model):
-    """目录里模型的 reasoning 块，取不到时返回 {}。"""
     return model_catalog_meta(model).get("reasoning") or {}
 
 
 def model_default_max_output_tokens(model):
-    """目录声明的模型最大输出 token 数，未声明时返回 None。"""
     val = model_catalog_meta(model).get("maxOutputTokens")
     if val is not None:
         try:
@@ -1359,19 +1235,14 @@ def model_default_max_output_tokens(model):
 
 
 def model_default_effort(model):
-    """客户端没指定档位时目录给的默认档位，没有时返回 None。"""
     effort = model_reasoning_meta(model).get("defaultEffort")
     return effort.strip() if isinstance(effort, str) and effort.strip() else None
 
 
 def model_fixed_effort(model):
-    """目录把模型固定死的档位；档位可选时返回 None。
-
-    reasoning.effort 有值而没有 supportedEfforts 表示模型永远跑这一档：
-    /v1/models 把它标成 reasoning_fixed_effort，选择器不给选项，请求自带的
-    档位也改不了结果。声明了 supportedEfforts 的模型档位可选，块里同级的
-    effort 只是默认值，不固定档位。
-    """
+    """目录把模型固定死的档位；档位可选时返回 None。reasoning.effort 有值而没有
+    supportedEfforts 表示模型永远跑这一档，选择器不给选项，请求自带的档位也改不了结果；
+    声明了 supportedEfforts 的模型档位可选，同级的 effort 只是默认值。"""
     reasoning = model_reasoning_meta(model)
     if reasoning.get("supportedEfforts"):
         return None
@@ -1380,26 +1251,18 @@ def model_fixed_effort(model):
 
 
 def prompt_cache_key_enabled():
-    """是否往出站请求注入 prompt_cache_key。
-
-    默认关闭。实测上游本身就缓存重复前缀：约 8k token 的相同前缀发两次，第二次
-    已报 prompt_cache_hit_tokens=9600，扣费与不带该字段相同；两个出口
-    （www.workbuddy.ai 与 www.workbuddy.cn）、免费与计费模型上都如此。注入它
-    既不改变命中率也不改变扣费，因此只留作实验开关，不加进每个请求。
-    """
+    """是否往出站请求注入 prompt_cache_key，默认关闭。实测上游本身就缓存重复前缀：约 8k
+    token 的相同前缀发两次，第二次已报 prompt_cache_hit_tokens=9600，扣费与不带该字段
+    相同；www.workbuddy.ai 与 www.workbuddy.cn 两个出口、免费与计费模型上都如此。
+    注入它既不改变命中率也不改变扣费，只留作实验开关。"""
     return wb_settings.prompt_cache_key(ACCOUNTS_DIR)
 
 
 def inject_prompt_cache_key(body, uid, conversation):
-    """加上游 prompt_cache_key，复用它的前缀缓存。
-
-    只留作实验：实测上游没有这个字段也能缓存前缀（见 prompt_cache_key_enabled）。
-    键里必须带账号 uid：上游缓存按账号隔离，账号间共用一个键会让一个账号的请求
-    读到另一个账号的缓存前缀，绝不能改成固定字符串。
-
-    优先级跟随客户端意图：请求显式带的 prompt_cache_key 永不覆盖；其次用 body
-    自己的 conversation id；再其次用网关解析出的会话键（请求头或对话前缀派生）。
-    """
+    """加上游 prompt_cache_key，复用它的前缀缓存；只留作实验（实测上游没有这个字段也能
+    缓存前缀）。键里必须带账号 uid：上游缓存按账号隔离，共用一个键会让一个账号的请求读到
+    另一个账号的缓存前缀，绝不能改成固定字符串。优先级跟随客户端意图：请求显式带的
+    prompt_cache_key 永不覆盖，其次用 body 自己的 conversation id，再其次用网关解析出的会话键。"""
     if not isinstance(body, dict):
         return body
     existing = body.get("prompt_cache_key")
@@ -1418,11 +1281,8 @@ def inject_prompt_cache_key(body, uid, conversation):
     out["prompt_cache_key"] = "wb2a-%s-%s" % (uid8, digest)
     return out
 class ContentRejected(Exception):
-    """上游内容审核拒绝了本次请求（403 / code 11140）。
-
-    与账号无关：同一内容换别的凭据还是同样的 403，因此原样透传给客户端，
-    不冷却账号池。
-    """
+    """上游内容审核拒绝了本次请求（403 / code 11140）。与账号无关：同一内容换别的凭据还是
+    同样的 403，因此原样透传给客户端，不冷却账号池。"""
 
     def __init__(self, http_error=None, detail=""):
         self.http_error = http_error
@@ -1435,11 +1295,8 @@ class ContentRejected(Exception):
 
 
 class GatewayStandDown(Exception):
-    """账号被上游限制（403），网关停止对外服务。
-
-    全部账号一起停用：限制发生后继续轮询下一个账号正是把整个账号池关联起来的
-    原因。操作者在看板重新启用账号之前，任何请求都不发往上游。
-    """
+    """账号被上游限制（403），网关停止对外服务。全部账号一起停用：限制发生后继续轮询
+    下一个账号正是把整个账号池关联起来的原因。操作者在看板重新启用账号前不发任何请求。"""
 
     def __init__(self, detail="", account_uid=None):
         self.detail = detail or ""
@@ -1448,9 +1305,8 @@ class GatewayStandDown(Exception):
 
 
 class RateLimited(Exception):
-    """上游限流了该模型（429 / code 6004）。
-
-    与账号池全挂不同：凭据本身正常，只是这个模型在冷却。"""
+    """上游限流了该模型（429 / code 6004）。凭据本身正常，只是这个模型在冷却，
+    与账号池全挂不同。"""
 
     def __init__(self, http_error=None, detail="", wait=60, message=""):
         self.http_error = http_error
@@ -1463,16 +1319,10 @@ class RateLimited(Exception):
 
 
 def gateway_hint(status, message):
-    """附在上游原文旁边的网关提示。
-
-    提示永不替换上游措辞（客户端仍按原封包解析），只补充网关能识别的分类，让
-    看到 "400 Bad Request" 的用户知道该缩小上下文、换模型、重新登录还是等待。
-    返回空串表示无可补充：不对未知故障编造提示。
-
-    覆盖网关能从上游正文/状态识别的形状：11133 model_param_invalid、
+    """附在上游原文旁边的网关提示。提示永不替换上游措辞，只补充网关能识别的分类；返回空串
+    表示无可补充，不对未知故障编造提示。覆盖的形状：11133 model_param_invalid、
     11135 invalid_image_data、限流、内容审核、积分耗尽、会话失效、模型不存在、
-    prompt 超长拒绝、WAF 拦截与本地没有可用账号。
-    """
+    prompt 超长拒绝、WAF 拦截与本地没有可用账号。"""
     text = str(message or "")
     lower = text.lower()
     if status == 413 and "payload too large" in lower:
@@ -1560,12 +1410,9 @@ def _switch_count(account, model):
 
 
 def _try_switch_product(account, model):
-    """429 时换身份重试。返回 True 表示已切换、可以重试。
-
-    同一请求内最多切 MAX_PRODUCT_SWITCHES 次：
-      cli -> workbuddy -> cli -> workbuddy
-    四次都不行就放弃，让调用方返回真正的 429。
-    """
+    """429 时换身份重试，返回 True 表示已切换、可以重试。同一请求内最多切
+    MAX_PRODUCT_SWITCHES 次（cli -> workbuddy -> cli -> workbuddy），四次都不行就放弃，
+    让调用方返回真正的 429。"""
     count = _switch_count(account, model)
     if count >= MAX_PRODUCT_SWITCHES:
         return False
@@ -1593,12 +1440,10 @@ def _try_switch_product(account, model):
 
 
 def reset_switch_counter(account, model):
-    """成功之后归零，下一次请求重新享有 4 次切换额度。"""
     _SWITCH_LOG.pop((account.uid, model), None)
 
 
 def retry_after_seconds(model, realm):
-    """该区域任何账号能再次服务 model 的最短等待秒数。"""
     if not POOL:
         return 60
     waits = [a.throttle_wait(model=model) for a in POOL.accounts
@@ -1608,11 +1453,8 @@ def retry_after_seconds(model, realm):
 
 
 def realm_model_throttled(realm, model):
-    """账号存在且健康、但都在冷却该模型时返回 True。
-
-    只认模型级冷却。普通账号冷却多半来自瞬时网络错误，把它报成限流会让客户端
-    对一个从未被限流的模型退避。
-    """
+    """账号存在且健康、但都在冷却该模型时返回 True。只认模型级冷却：普通账号冷却多半来自
+    瞬时网络错误，把它报成限流会让客户端对一个从未被限流的模型退避。"""
     if not POOL:
         return (False, 0)
     existing = [a for a in POOL.accounts
@@ -1629,12 +1471,9 @@ def realm_model_throttled(realm, model):
 
 
 def is_transient(exc):
-    """网络层面的抖动：应当重试，不该冷却账号。
-
-    上游偶发在流中途掐断 TLS 握手（SSL: UNEXPECTED_EOF_WHILE_READING /
-    Remote end closed connection）。把它当成账号故障会把唯一的 intl 账号停用
-    60 秒，一次抖动变成 502 风暴。
-    """
+    """网络层面的抖动：应当重试，不该冷却账号。上游偶发在流中途掐断 TLS 握手
+    （SSL: UNEXPECTED_EOF_WHILE_READING / Remote end closed connection），当成账号故障
+    会把唯一的 intl 账号停用 60 秒，一次抖动变成 502 风暴。"""
     t = ("%s %s" % (type(exc).__name__, exc)).lower()
     markers = (
         "ssl", "unexpected_eof", "eof occurred", "remote end closed",
@@ -1652,7 +1491,6 @@ MODEL_SCOPED_ERROR_CODES = frozenset((11102, 11129, 11134, 11150, 11158))
 
 
 def upstream_error_code(detail):
-    """上游错误正文里的数字 code，取不到时返回 None。"""
     try:
         payload = json.loads(detail or "")
     except Exception:
@@ -1702,11 +1540,8 @@ _AUTH_FAILURE_MARKERS = ("401", "unauthorized", "authorization failed",
 
 
 def auth_failure_text(text):
-    """401 是否指向凭据本身，而不是中间代理返回的 HTML 错误页。
-
-    HTML 401 说明链路中间有别的服务在拒绝，令牌可能完全正常；据此冷却账号
-    会把健康凭证锁到手动重新登录。
-    """
+    """401 是否指向凭据本身，而不是中间代理返回的 HTML 错误页。HTML 401 说明链路中间有
+    别的服务在拒绝，令牌可能完全正常；据此冷却账号会把健康凭证锁到手动重新登录。"""
     low = str(text or "").lower()
     if "<html" in low or "<!doctype" in low:
         return False
@@ -1725,12 +1560,9 @@ LOCAL_NETWORK_MARKERS = (
 )
 
 def looks_like_local_network(exc):
-    """这次失败是「本机没网」，还是「上游出问题」。
-
-    两者在账号治理上必须分开：本机断网时每一次尝试都会失败，若照旧逐账号记一笔
-    并把账号冷却 60 秒，等网络恢复时池子里已经全是冷却中的账号——生产上就是这么
-    把 9 个能用的账号全关掉的，用户看到的是「明明测了能用，它还熔断」。
-    """
+    """这次失败是「本机没网」还是「上游出问题」，两者在账号治理上必须分开：本机断网时
+    每一次尝试都会失败，逐账号记一笔并冷却 60 秒，等网络恢复时池子里已经全是冷却中的
+    账号——生产上就是这么把 9 个能用的账号全关掉的。"""
     if isinstance(exc, socket.gaierror):
         return True
     reason = getattr(exc, "reason", None)
@@ -1739,11 +1571,8 @@ def looks_like_local_network(exc):
     return any(marker in lower for marker in LOCAL_NETWORK_MARKERS)
 
 class LocalNetworkError(Exception):
-    """本机网络不通：不是账号的问题，也不是上游的问题。
-
-    单独成一个类型，是因为调用方需要给出不同的建议（去查网线/Wi-Fi/代理，而不是
-    去查账号或等上游），也因为它绝不该给账号记失败。
-    """
+    """本机网络不通：不是账号的问题，也不是上游的问题。单独成一个类型是因为调用方要给出
+    不同的建议（去查网线/Wi-Fi/代理），也因为它绝不该给账号记失败。"""
 
     def __init__(self, detail=""):
         self.detail = detail or ""
@@ -1753,14 +1582,10 @@ class LocalNetworkError(Exception):
                          % (self.detail[:200] or "DNS/路由失败"))
 
 def exc_detail(exc, limit=180):
-    """异常的可读原因：类型 + 底层文本，不能只有类型名。
-
-    只有类型名时现场分不清 SSL 握手中断、连接被重置还是读超时，而这三者指向
-    完全不同的根因（上游边缘在丢连接 / 连接被重置 / 连接池复用了已死的连接）。
-    URLError 的真实原因挂在 `.reason` 上（`str(exc)` 会包一层 `<urlopen error
-    ...>`，`.reason` 才是干净的内层文本），优先取 `.reason`，空则退回
-    `str(exc)`，再空则退回类型名，保证这一格永远有内容。
-    """
+    """异常的可读原因：类型 + 底层文本，不能只有类型名，否则分不清 SSL 握手中断、连接被
+    重置还是读超时。URLError 的真实原因挂在 `.reason` 上（`str(exc)` 会包一层
+    `<urlopen error ...>`），优先取 `.reason`，空则退回 `str(exc)`，再空则退回类型名，
+    保证这一格永远有内容。"""
     reason = getattr(exc, "reason", None)
     text = str(reason) if reason is not None else str(exc)
     text = (text or "").strip()
@@ -1794,11 +1619,8 @@ ACCOUNT_SCOPE_PHRASES = (
 
 
 def credential_scope_phrase(detail):
-    """正文里的作用域措辞；没有指出作用域时返回 None。
-
-    ASCII 短语按词边界锚定，accountId 这类标识符不会误命中。中文短语直接子串
-    匹配：中文没有词边界可锚，也不可能出现在标识符内部。
-    """
+    """正文里的作用域措辞；没有指出作用域时返回 None。ASCII 短语按词边界锚定，accountId
+    这类标识符不会误命中；中文短语直接子串匹配，中文没有词边界可锚。"""
     lowered = (detail or "").lower()
     for phrase in ACCOUNT_SCOPE_PHRASES:
         if phrase.isascii():
@@ -1810,7 +1632,6 @@ def credential_scope_phrase(detail):
 
 
 def rate_limit_code(detail):
-    """JSON 格式 429 正文的 code 字段；非 JSON 时返回 None。"""
     try:
         obj = json.loads(detail)
     except Exception:
@@ -1819,12 +1640,10 @@ def rate_limit_code(detail):
 
 
 def rate_limit_is_soft_shape(detail):
-    """429 正文点名是限流时返回 True，不限作用域。
-
-    覆盖故障环境出现过的两种形状：裸的 "usage exceeds frequency limit" 正文
-    （263 条记录在案的 429 里占 229 条）与 intl 的 code 14003 正文（"too many
-    requests"）。认出它们，调用方才能把窗口压在单模型上，避免锁整个凭据。
-    """
+    """429 正文点名是限流时返回 True，不限作用域。覆盖故障环境出现过的两种形状：裸的
+    "usage exceeds frequency limit" 正文（263 条记录在案的 429 里占 229 条）与 intl 的
+    code 14003 正文（"too many requests"）。认出它们，调用方才能把窗口压在单模型上，
+    避免锁整个凭据。"""
     text = (detail or "").lower()
     if any(marker in text for marker in SOFT_LIMIT_MARKERS):
         return True
@@ -1838,11 +1657,8 @@ CAP_LIMIT_CODE = 6004
 
 
 def rate_limit_is_cap(detail):
-    """只对上游的额度用满应答（code 6004）返回 True。
-
-    刻意容错：字段实测只出现过整数，但字符串形式不能悄悄丢掉真实的额度判定。
-    解析不出来就不算额度用满，调用方的持久停用路径按拒绝处理。
-    """
+    """只对上游的额度用满应答（code 6004）返回 True。字段实测只出现过整数，但字符串形式
+    不能悄悄丢掉真实的额度判定；解析不出来就不算额度用满，调用方的持久停用路径按拒绝处理。"""
     try:
         return int(rate_limit_code(detail)) == CAP_LIMIT_CODE
     except (TypeError, ValueError):
@@ -1850,17 +1666,11 @@ def rate_limit_is_cap(detail):
 
 
 def rate_limit_is_account_level(detail, reset_at):
-    """只在有正面证据表明 429 作用于凭据时返回 True。
-
-    模型级的形状会点名重置墙钟（code 6004）。把没有时钟当成凭据级，会让每个
-    不带时间戳的 429（包括上游最常见的正文）给整个凭据买 600 秒冷却并翻倍到
-    7200 秒：几次下来整个区域的账号同时冷却，面板测试却一直显示凭据健康。
-    没有时钟什么也不证明：只有正文自己说限制作用在凭据上才停用凭据，其余都
-    由调用方压成单模型窗口。
-
-    暂定：抓到的正文里还没有出现过真正的账号级 429，措辞表保持简短，等抓到
-    实样再补，不作猜测性扩充。
-    """
+    """只在有正面证据表明 429 作用于凭据时返回 True。模型级的形状会点名重置墙钟
+    （code 6004）；把没有时钟当成凭据级，会让每个不带时间戳的 429 给整个凭据买 600 秒
+    冷却并翻倍到 7200 秒，整个区域的账号同时冷却，面板测试却一直显示凭据健康。没有时钟
+    什么也不证明，只有正文自己说限制作用在凭据上才停用凭据。暂定：抓到的正文里还没有
+    出现过真正的账号级 429，措辞表保持简短，等抓到实样再补。"""
     if reset_at is not None:
         return False
     return credential_scope_phrase(detail) is not None
@@ -1879,13 +1689,10 @@ _RESTRICTION_403_MARKERS = ("unusual activity", "账号存在异常行为", "已
 
 
 def restriction_is_account_level(detail):
-    """403 正文指向账号被限制、而非内容被拒时返回 True。
-
-    实测正文：{"code":11140,"msg":"request illegal",...,"displayMsg":{"en":
-    "Your account has been restricted due to unusual activity","zh":"账号存在
-    异常行为，已被限制使用"}}。en 在前 zh 在后，短截断也保得住 code 与 en；
-    拿不全的正文宁可漏判回内容审核路径，也不误判。
-    """
+    """403 正文指向账号被限制、而非内容被拒时返回 True。实测正文 {"code":11140,"msg":
+    "request illegal",...,"displayMsg":{"en":"Your account has been restricted due to
+    unusual activity","zh":"账号存在异常行为，已被限制使用"}}；拿不全的正文宁可漏判回内容
+    审核路径，也不误判。"""
     if not detail:
         return False
     if _RESTRICTED_403_CODE_RE.search(detail):
@@ -1914,12 +1721,10 @@ def stand_down_active():
 
 
 def stand_down_state():
-    """面板要的停止状态；没有停止时 active 为 False。"""
     return dict(STAND_DOWN)
 
 
 def clear_stand_down():
-    """操作者手动启用账号后解除停止状态。"""
     if STAND_DOWN.get("active"):
         log("gateway resumed: an account was enabled on the panel")
     STAND_DOWN.update({"active": False, "at": 0.0, "uid": "", "detail": ""})
@@ -1934,7 +1739,6 @@ def stand_down_message(exc=None):
 
 
 def _retry_after_epoch(value):
-    """把 HTTP Retry-After 值（秒数或 HTTP 日期）换算成 epoch。"""
     value = str(value or "").strip()
     if value.isdigit():
         return time.time() + int(value)
@@ -1947,15 +1751,11 @@ def _retry_after_epoch(value):
 
 
 def parse_rate_limit_reset(detail, retry_after=None):
-    """从上游 429 正文里取出重置时间；正文没给就返回 None。
-
-    上游 code 6004 的应答带重置墙钟，但措辞按区域不同：intl 形如 "... your
-    usage will reset at 2026-09-19 18:29:03 UTC+8 ..."，cn 形如 "... 将在
-    2026-10-09 14:44:59 UTC+8 重置 ..."。只匹配英文形状时每个 cn 429 都取不到
-    重置时间，被当成账号级软限冷却整个凭据，而非只停被限流的模型。返回 epoch 或
-    None。刻意容错：解析不出的正文不能打断请求路径。retry_after 是 HTTP
-    Retry-After 头（秒数或 HTTP 日期），只在正文没给时间时使用。
-    """
+    """从上游 429 正文里取出重置时间的 epoch；正文没给就返回 None。上游 code 6004 的应答
+    带重置墙钟，但措辞按区域不同：intl 形如 "... your usage will reset at 2026-09-19 18:29:03
+    UTC+8 ..."，cn 形如 "... 将在 2026-10-09 14:44:59 UTC+8 重置 ..."。只匹配英文形状时
+    每个 cn 429 都取不到重置时间，被当成账号级软限冷却整个凭据。解析不出的正文不能打断
+    请求路径。retry_after 是 HTTP Retry-After 头（秒数或 HTTP 日期），只在正文没给时间时使用。"""
     if not detail:
         return _retry_after_epoch(retry_after)
     m = re.search(r"(?:reset at|将在)\s*"
@@ -1977,11 +1777,8 @@ def parse_rate_limit_reset(detail, retry_after=None):
 
 
 def upstream_timeouts():
-    """chat 上游套接字的 (header, idle) 超时秒数。
-
-    header 覆盖连接、TLS 与首字节；idle 限定流中每次读取，有数据就保活，静默流
-    超时退出并归还在途的名额。没有总时长上限，与面板项目的语义一致。
-    """
+    """chat 上游套接字的 (header, idle) 超时秒数。header 覆盖连接、TLS 与首字节；idle 限定
+    流中每次读取，有数据就保活，静默流超时退出并归还在途的名额。没有总时长上限。"""
     try:
         cfg = wb_settings.upstream_config(ACCOUNTS_DIR)
     except Exception:
@@ -2001,12 +1798,9 @@ def upstream_timeouts():
 
 
 def _apply_stream_idle_timeout(response, seconds):
-    """把上游套接字切到流中的 idle 超时。
-
-    urllib 的 timeout 只覆盖初始请求，同一条套接字随后要读完整个 SSE 流。把套接字
-    超时设成 idle 值，限定的是每次读取而非整条流。尽力而为：认不出的套接字结构
-    保留 header 超时。
-    """
+    """把上游套接字切到流中的 idle 超时。urllib 的 timeout 只覆盖初始请求，同一条套接字
+    随后要读完整个 SSE 流，所以把套接字超时设成 idle 值，限定的是每次读取而非整条流。
+    尽力而为：认不出的套接字结构保留 header 超时。"""
     try:
         seconds = float(seconds)
     except (TypeError, ValueError):
@@ -2037,12 +1831,9 @@ MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 4
 
 
 def _retry_same_account(account, counters):
-    """在同一个账号上记一次原地重试；预算耗尽时返回 False。
-
-    两个上限：单个账号最多 TRANSIENT_SAME_ACCOUNT_RETRIES 次，整次请求最多
-    MAX_TRANSIENT_SAME_ACCOUNT_RETRIES 次。瞬时故障先原地重试，重试不动了
-    才换号，避免把整段对话的前缀缓存留在原账号上。
-    """
+    """在同一个账号上记一次原地重试，预算耗尽时返回 False。单账号最多
+    TRANSIENT_SAME_ACCOUNT_RETRIES 次，整次请求最多 MAX_TRANSIENT_SAME_ACCOUNT_RETRIES 次。
+    瞬时故障先原地重试，重试不动了才换号，避免把整段对话的前缀缓存留在原账号上的收益丢失。"""
     if account is None:
         return False
     if sum(counters.values()) >= MAX_TRANSIENT_SAME_ACCOUNT_RETRIES:
@@ -2055,11 +1846,8 @@ def _retry_same_account(account, counters):
 
 
 class SlotLease(object):
-    """一个请求占着的「账号 + 模型」并发名额，响应体读完才归还。
-
-    open_upstream() 选号时占下、成功后交给它保管；续写轮传入同一个对象，
-    选回原账号就沿用，换号就先占新名额再归还旧的。
-    """
+    """一个请求占着的「账号 + 模型」并发名额，响应体读完才归还。open_upstream() 选号时占下、
+    成功后交给它保管；续写轮传入同一个对象，选回原账号就沿用，换号就先占新名额再归还旧的。"""
 
     def __init__(self):
         self.account = None
@@ -2069,18 +1857,15 @@ class SlotLease(object):
         return account is self.account and model == self.model
 
     def claim(self, account, model):
-        """为这一次尝试占名额；已经持有同一个名额时直接沿用。"""
         if self._holds(account, model):
             return True
         return account.acquire_request(model)
 
     def drop(self, account, model):
-        """这一次尝试没有用上：退掉刚占的名额，已经持有的那个不动。"""
         if not self._holds(account, model):
             account.release_request(model)
 
     def keep(self, account, model):
-        """这一次尝试成功：持有它的名额，换号时归还旧的那个。"""
         if self._holds(account, model):
             return
         self.release()
@@ -2110,35 +1895,29 @@ def _free_model_credit_fallback_enabled():
 def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=None,
                   allow_credit_fallback=True, allow_product_switch=True,
                   only_uid=None, lease=None):
-    # 选号前刷新日限额守卫。底层扫描是增量的且带 TTL 缓存，热路径上只花一次
-    # stat() 加一份缓存字典；被任一守卫停住的账号和其他不可用账号一样跳过。
-    # 三个守卫共用同一份折叠，一次调用全部覆盖，避免每请求重复计算。
+    # 选号前刷新日限额守卫；底层折叠带 TTL 缓存，一次调用覆盖三个守卫，被守卫停住的
+    # 账号和其他不可用账号一样跳过。
     wb_usage.apply_daily_guards()
-    # 评分分配用今日消耗速度算欠账：这一项必须跟着当天用量推进。底层的日折叠
-    # 有 15 秒 TTL 且增量读取，热请求只付一次字典拷贝；智能分配关着时直接返回。
+    # 评分分配用今日消耗速度算欠账，必须跟着当天用量推进；底层日折叠有 15 秒 TTL 且
+    # 增量读取，智能分配关着时直接返回。
     wb_usage.apply_routing_inputs()
     # 账号被上游限制过就停止发送任何请求：继续轮询下一个账号会把账号池关联起来。
     if stand_down_active():
         raise GatewayStandDown(STAND_DOWN.get("detail") or "",
                                account_uid=STAND_DOWN.get("uid") or None)
-    # 剩余用量估计并入智能分配：把「估计剩余接近耗尽」的 (账号, 模型) 权重
-    # 推给池，作为评分的一点倾斜。智能分配关着时不需要它，直接清空，省掉
-    # 剩余估算的读取成本。
+    # 剩余用量估计并入智能分配：把「估计剩余接近耗尽」的 (账号, 模型) 权重推给池；
+    # 智能分配关着时清空，省掉剩余估算的读取成本。
     if POOL is not None:
         smart = bool(getattr(POOL, "smart_routing", False))
         POOL.apply_remaining_weights(wb_usage.remaining_schedule_weights() if smart else None)
     realm = target_realm or detect_model_realm(payload.get("model")) or CURRENT_REALM
     model = str(payload.get("model") or "")
-    # 复用调用方已建好的 body：/v1/chat/completions 在进这里之前已经 build 过
-    # 一次（那次的产物只用于一行日志和 prompt_fingerprint），这里再建一遍等于
-    # 白付一次序列化。403 降级重试时仍按 payload 重建（degrade 会切换 prompt
-    # 模式，必须拿到新 body）。
+    # 复用调用方已建好的 body，避免白付一次序列化；403 降级重试时仍按 payload 重建
+    # （degrade 会切换 prompt 模式，必须拿到新 body）。
     upstream_body = (prebuilt_body if prebuilt_body is not None
                      else build_upstream_body(payload))
-    # PATCHED-BY-OPS: 客户端未提供会话标识时，用对话稳定前缀兜底。
-    # 位置放在 build_upstream_body 之后，保证键与真正发往上游的消息一致
-    # （该函数可能在最前面插入 SYSTEM_PROMPT）。affinity_page 只在超限对话上
-    # 有值（页内轮转），客户端自带会话键的请求不参与。
+    # PATCHED-BY-OPS: 客户端未提供会话标识时，用对话稳定前缀兜底。位置放在 build_upstream_body
+    # 之后，保证键与真正发往上游的消息一致；affinity_page 只在超限对话上有值。
     affinity_page = None
     if not session_key:
         session_key, affinity_page = affinity_route(upstream_body.get("messages"))
@@ -2154,10 +1933,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 同一次请求内每个账号最多刷新一次 token：401 可能只是访问令牌过期，
     # 先刷新再重试同号，减少把还能恢复的凭证当成坏号冷却。
     refreshed_401 = set()
-    # 这一轮请求已经记过账的账号：重试轮（transient_hits 后 tried.clear() 整池
-    # 重轮）会把同一个账号再挑一遍，若每次都记，一次请求就能给同一个账号记上
-    # 好几笔 fails/degrade——池子越空、重轮越频繁，越容易把一个刚抖了一下的
-    # 账号直接推过熔断阈值。一次请求对一个账号最多记一次。
+    # 这一轮请求已经记过账的账号：重试轮会把同一账号再挑一遍，若每次都记，一次请求就
+    # 能把一个刚抖了一下的账号推过熔断阈值。一次请求对一个账号最多记一次。
     charged = set()
 
     def charge_account(account, message, unknown):
@@ -2191,9 +1968,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 出口级退避开关同样每次请求只读一次；关掉时下面的重试循环不经过任何出口
     # 退避。
     egress_backoff = wb_settings.egress_backoff_enabled(ACCOUNTS_DIR)
-    # 同一段出口在一次请求里只记一次：重试轮（tried.clear() 之后整池重轮）会把
-    # 同一个账号 / 同一段出口再挑一遍，若每次都记，一次请求就能把共享计数器推高
-    # 好几步。记过的那一段沿用同一段退避，不重复记。
+    # 同一段出口在一次请求里只记一次：重试轮会把同一账号/出口再挑一遍，若每次都记，
+    # 一次请求就能把共享计数器推高好几步。
     egress_wait = {}
 
     def charge_egress(url, proxy):
@@ -2207,12 +1983,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
     # 就把循环用完。
     max_attempts += MAX_TRANSIENT_SAME_ACCOUNT_RETRIES
     pending_lease = None
-    # 缓存键关闭时每个候选账号发送的字节完全相同；每次重试都重新 dumps
-    # 一个可能上百 KB 的 body 是纯浪费。body 只在 403 降级重建时失效。
+    # 缓存键关闭时每个候选账号发送的字节完全相同，每次重试都重新 dumps 上百 KB 的 body
+    # 是纯浪费；body 只在 403 降级重建时失效。
     base_data = None
-    # 每次失败都把【出错的那个账号】从这段对话的历史里降级（demote），而不是
-    # 忘掉整段对话：重选时优先回到还留着这段前缀的暖号（见 SessionAffinity），
-    # 一次大 prompt 的冷启动比重选一次账号贵得多。
+    # 每次失败都把出错的那个账号从这段对话的历史里降级（demote），而不是忘掉整段对话：
+    # 重选时优先回到还留着这段前缀的暖号，一次大 prompt 的冷启动比重选一次账号贵得多。
     for _attempt in range(max_attempts):
         if pending_lease is not None:
             lease.drop(*pending_lease)
@@ -2254,9 +2029,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             if base_data is None:
                 base_data = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
             attempt_data = base_data
-        # 会话头族（X-Conversation-ID 等）由身份构造里每次请求现生成：上游不拿
-        # 这个 id 存历史，不需要按会话复用；缺了它上游的渠道校验会回 400 /
-        # code 11-128（`conversation id missing`），补的是「有」而不是「稳定」。
+        # 会话头族（X-Conversation-ID 等）每次请求现生成：上游不拿这个 id 存历史，不需要
+        # 按会话复用；缺了它渠道校验回 400 / code 11-128（conversation id missing）。
         try:
             req = wb_upstream_pool.Request(chat_url, data=attempt_data, method="POST",
                                            headers=account.headers(
@@ -2305,10 +2079,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     last_429 = exc
                     last_429_detail = detail
                     continue
-                # 没有重置时钟，正文分不清限流作用在凭据还是单模型。可识别的
-                # 软限形状以重复出现为证据：窗口落在该模型，按短阶梯增长（60 秒
-                # 到 10 分钟），不走凭据的 600 秒到 2 小时阶梯。无法识别的正文
-                # 同样在单模型上停 60 秒，不计连击。
+                # 没有重置时钟，正文分不清限流作用在凭据还是单模型；可识别的软限形状以重复
+                # 出现为证据压在该模型上（60 秒到 10 分钟短阶梯），无法识别的正文停 60 秒。
                 wait = max(1.0, reset_at - time.time()) if reset_at else 60.0
                 if reset_at is None and rate_limit_is_soft_shape(detail):
                     wait = account.note_unscoped_rate(model)
@@ -2317,12 +2089,11 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                         % (account.uid[:8], model, wait, account.unscoped_streak))
                 # 模型级：只有该模型被限流，同一凭据下其他模型照常可用。
                 if reset_at and reset_at > time.time():
-                    # 上游给了未来的恢复时刻：这是限流窗口，不是账号故障，
-                    # 不写 last_error；窗口本身持久化，重启后仍然生效。
+                    # 上游给了未来的恢复时刻：这是限流窗口不是账号故障，不写 last_error；
+                    # 窗口本身持久化，重启后仍然生效。
                     if rate_limit_is_cap(detail):
-                        # 带重置时钟的额度用满是唯一可观测的窗口预算起点；只靠
-                        # 用量行会丢掉它（重试批次里只有最后一个账号保留归属）。
-                        # 见 wb_usage.note_limit_event()。
+                        # 带重置时钟的额度用满是唯一可观测的窗口预算起点，只靠用量行会丢掉
+                        # 它（重试批次里只有最后一个账号保留归属）。见 wb_usage.note_limit_event()。
                         wb_usage.note_limit_event(account, model, reset_at)
                         try:
                             if account.note_model_cap(model, reset_at):
@@ -2342,10 +2113,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     account.note_error("HTTP 429 (model throttled)", model=model,
                                        cooldown=wait, detail=detail)
                 if auto_switch and _try_switch_product(account, model):
-                    # 换了身份就等于换了一条配额线：要把它从「已试过」拿掉，
-                    # 并清掉刚刚记下的模型冷却，否则下一轮循环会找不到账号。
-                    # keep_caps：6004 的禁用（仍在恢复期内）跨身份成立，不能被
-                    # 这次清理带走，否则账号在 6004 之后立刻又可用。
+                    # 换了身份就等于换了一条配额线：从「已试过」拿掉并清掉刚记的模型冷却，
+                    # 否则下一轮找不到账号；keep_caps 保证 6004 的禁用跨身份成立。
                     tried.discard(account.uid)
                     try:
                         account.clear_error(model=model, keep_caps=True)
@@ -2367,10 +2136,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     detail = read_http_error(exc, 600).decode("utf-8", "replace")
                 except Exception:
                     detail = ""
-                # 先分流：上游风控限制（code 11140「账号存在异常行为，已被限制
-                # 使用」）是账号级的坏，降级提示词救不了，透传给客户端只会让
-                # 一个被限制的账号把对话一次次打死。冷却这个账号、换下一个继
-                # 续；全都试完还是不行才把原因交给客户端。
+                # 先分流：上游风控限制（code 11140）是账号级的坏，降级提示词救不了；冷却这个
+                # 账号换下一个继续，全都试完还是不行才把原因交给客户端。
                 if restriction_is_account_level(detail):
                     account.note_error("HTTP 403 (account restricted)",
                                        cooldown=RESTRICTED_403_COOLDOWN,
@@ -2379,9 +2146,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                         POOL.affinity.demote(session_key, account.uid)
                     stand_down_accounts(account.uid, detail)
                     raise GatewayStandDown(detail, account_uid=account.uid)
-                # 面板 degrade.go：passthrough/append 模式的内容拒绝通常是
-                # system 提示指纹误伤，触发降级窗口（见 PROMPT_DEGRADE）后按新
-                # prompt 重建 body，本轮重试一次；custom 模式不参与。
+                # 面板 degrade.go：passthrough/append 模式的内容拒绝通常是 system 提示指纹
+                # 误伤，触发降级窗口后按新 prompt 重建 body 本轮重试一次；custom 不参与。
                 if (not degraded_retried
                         and prompt_mode_config().get("mode") in ("passthrough", "append")):
                     PROMPT_DEGRADE.trigger()
@@ -2449,14 +2215,12 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                         "not charging the account" % (exc.code, model, code))
                     last_error = exc
                     break
-                # 一切服务端 5xx（含上游自定义的 550 这类）都按瞬时故障轮转，
-                # 不在已知清单里的也不能把错误原样甩回客户端——换号是默认，
-                # 全试完才交出去。
+                # 一切服务端 5xx（含上游自定义的 550 这类）都按瞬时故障轮转，不在已知清单里
+                # 的也不能把错误原样甩回客户端——换号是默认，全试完才交出去。
                 transient_hits += 1
                 if egress_backoff and exc.code in (502, 503, 504):
-                    # 网关侧的抖动（502/503/504）说明出口有问题，不是凭据的问题：
-                    # 记在出口上并退避几秒。500 仍记在账号上——它可能是这条凭据
-                    # 自己的故障，要先查清再从熔断里放出来。
+                    # 网关侧的抖动（502/503/504）说明出口有问题，不是凭据的问题：记在出口上
+                    # 并退避几秒。500 仍记在账号上——它可能是这条凭据自己的故障。
                     wait = charge_egress(chat_url, account.proxy)
                     log("upstream %s for '%s', backing off the egress %.1fs"
                         % (exc.code, model, wait))
@@ -2481,9 +2245,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
             raise
         except Exception as exc:
             if looks_like_local_network(exc):
-                # 本机没网：不记账。账号没发出去一个字节，这笔不该算它的；
-                # 断网期间每次都记的话，网络一恢复池子里全是冷却中的账号。
-                # 也不能只 break——网络抖动几秒很常见，先原地重试几轮。
+                # 本机没网：不记账（账号没发出去一个字节），也不能只 break——网络抖动几秒很
+                # 常见，先原地重试几轮。
                 local_net_hits += 1
                 if local_net_hits == 1:
                     log("local network looks down (%s); not charging any account"
@@ -2501,9 +2264,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     time.sleep(min(0.6 * transient_hits, 2.0))
                     continue
                 if egress_backoff:
-                    # 传输抖动是出口的问题，不是账号的问题：记在出口上并退避几秒，
-                    # 账号的 fails/degrade 计数保持不动，几秒的抖动不会把健康账号
-                    # 关掉。
+                    # 传输抖动是出口的问题，不是账号的问题：记在出口上并退避几秒，账号的
+                    # fails/degrade 计数保持不动。
                     wait = charge_egress(chat_url, account.proxy)
                     log("account %s: upstream connection hiccup for '%s' (%s), "
                         "backing off the egress %.1fs"
@@ -2515,9 +2277,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                     POOL.affinity.demote(session_key, account.uid)
                 charge_account(account, "connection: %s" % exc_detail(exc, 120),
                                unknown=True)
-                # 带上 UID：这一行同时是一次扣分（连续 3 次就把账号熔断 30
-                # 分钟），不写清楚是谁挨的这一下，事后只能看着一串 hiccup 猜
-                # 是哪几个账号被关掉、池子为什么突然空了。
+                # 带上 UID：这一行同时是一次扣分（连续 3 次就把账号熔断 30 分钟），不写清楚
+                # 是谁挨的这一下，事后只能看着一串 hiccup 猜是哪几个账号被关掉。
                 log("account %s: upstream connection hiccup for '%s' (%s), "
                     "retrying (degrade=%d)"
                     % (account.uid[:8], model, exc_detail(exc), account.degrade_count))
@@ -2528,9 +2289,8 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                 POOL.affinity.demote(session_key, account.uid)
             charge_account(account, str(exc)[:120], unknown=True)
             account.note_error(str(exc)[:120], cooldown=60, single_account=(total <= 1))
-            # 这一类失败要留下 uid、异常原文与刚设的冷却时长：池子空了的报错只
-            # 说得清「谁在冷却」，说不清「是谁把它记成冷却的」，事后只能对着一串
-            # hiccup 猜是哪几个账号被关掉。
+            # 这一类失败要留下 uid、异常原文与刚设的冷却时长：池子空了的报错只说清「谁在
+            # 冷却」，说不清「是谁把它记成冷却的」。
             log("account %s: %s, cooling %.0fs (fails=%d, ready=%d)"
                 % (account.uid[:8], exc_detail(exc, 160),
                    3.0 if total <= 1 else 60.0, account.fails, total))
@@ -2617,12 +2377,9 @@ def open_upstream(payload, session_key=None, target_realm=None, prebuilt_body=No
                        % (realm, pool_unavailable_detail(realm, model)))
 
 def pool_unavailable_detail(realm, model=None):
-    """把该区域每个账号不可用的原因拼成一句，附在「没有可用账号」后面。
-
-    账号可能因停用、冷却、过期、日限额、熔断或降权窗口而不可用，只说「没有可用
-    账号」看不出卡在哪一条。这里不改变判定，只把结果说出来：每个不可用账号
-    「八位 UID + 原因」，看板上仍显示可用的账号也能对上号。
-    """
+    """把该区域每个账号不可用的原因拼成一句，附在「没有可用账号」后面。账号可能因停用、
+    冷却、过期、日限额、熔断或降权窗口而不可用，只说「没有可用账号」看不出卡在哪一条。
+    不改变判定，只把结果说出来：每个不可用账号「八位 UID + 原因」。"""
     if POOL is None:
         return ""
     accounts = [a for a in POOL.accounts if a.realm == realm]
@@ -2663,20 +2420,14 @@ Handler.server_version = "wb-proxy-center/" + VERSION
 
 
 def running_version():
-    """进程对外报告的版本号，例如 "0.6.0"。
-
-    Handler 与更新检查器都从这里取，避免出现与 VERSION、server_version 并列的
-    第三份副本。
-    """
+    """进程对外报告的版本号，例如 "0.6.0"。Handler 与更新检查器都从这里取，避免出现与
+    VERSION、server_version 并列的第三份副本。"""
     return Handler.server_version.split("/", 1)[-1]
 
 
 def _if_none_match_hit(header_value, etag):
-    """If-None-Match 头是否命中给定的 ETag。
-
-    RFC 7232 §3.2：字段值是一个逗号分隔的 entity-tag 列表，且 If-None-Match
-    用弱比较——W/ 前缀忽略，所以 W/"x" 与 "x" 等同；"*" 匹配任何已存在的表示。
-    """
+    """If-None-Match 头是否命中给定的 ETag。RFC 7232 §3.2：字段值是逗号分隔的 entity-tag
+    列表，弱比较（W/ 前缀忽略，W/"x" 与 "x" 等同），"*" 匹配任何已存在的表示。"""
     for token in header_value.split(","):
         token = token.strip()
         if token == "*":
@@ -2689,20 +2440,12 @@ def _if_none_match_hit(header_value, etag):
 
 
 def _cache_etag(kind, key, built_at):
-    """给带 TTL 缓存的只读接口派生一个强校验符（ETag）。
-
-    校验符由（接口名、缓存键、缓存条目的构建时刻）三者派生，不对响应字节做哈希。
-    构建时刻在两次重建之间恒定，数字没变的轮询因此回 304，缓存一重建就必然变化。
-    payload 里有 time.time() 派生的字段（/usage 的 started/since、
-    /usage/timeseries 的桶边界与 until），同一份缓存序列化两次都不逐字节相同，
-    哈希字节得到的 tag 永远不命中，还白付一次全量序列化与哈希；而键与时刻都是
-    现成的，一次 sha1 只哈希几十字节。
-
-    键文本进摘要而不直接拼进 tag：缓存键含调用方给的 realm，它可能带引号或反斜杠
-    （`?realm=a"b` 一路原样进键），拼出来会发出畸形的 ETag 头，摘要则永远是合法的
-    etagc 字符。摘要只取 16 个十六进制位：只需在同一实例的少量缓存条目之间区分，
-    不是安全边界。
-    """
+    """给带 TTL 缓存的只读接口派生一个强校验符（ETag），由（接口名、缓存键、缓存条目的
+    构建时刻）派生，不对响应字节做哈希。构建时刻在两次重建之间恒定，数字没变的轮询因此
+    回 304，缓存一重建就必然变化；payload 里有 time.time() 派生的字段，同一份缓存序列化
+    两次都不逐字节相同，哈希字节得到的 tag 永远不命中。键文本进摘要而不直接拼进 tag：
+    缓存键含调用方给的 realm，可能带引号或反斜杠，拼出来会发出畸形的 ETag 头。摘要只取
+    16 个十六进制位：只需在同一实例的少量缓存条目之间区分，不是安全边界。"""
     stamp = "%x" % int(built_at * 1_000_000)
     digest = hashlib.sha1(("%s\x1f%s" % (kind, key)).encode("utf-8")).hexdigest()[:16]
     return '"%s-%s"' % (stamp, digest)
@@ -2735,11 +2478,8 @@ def _acquire_key_slot(key_entry):
         return True, current + 1, limit
 
 def _release_key_slot(key_entry, held=False):
-    """归还 _acquire_key_slot 占的并发槽位。
-
-    释放只看本次请求是否真的拿到了槽位，不重读当前限额：限额在请求进行中
-    被改成 0 时，按新限额判断会漏减，把计数永久留在表里。
-    """
+    """归还 _acquire_key_slot 占的并发槽位。释放只看本次请求是否真的拿到了槽位，不重读
+    当前限额：限额在请求进行中被改成 0 时，按新限额判断会漏减，把计数永久留在表里。"""
     if not held or not isinstance(key_entry, dict):
         return
     k_id = key_entry.get("id")
@@ -2751,23 +2491,6 @@ def _release_key_slot(key_entry, held=False):
             _key_active_concurrency[k_id] = current - 1
         else:
             _key_active_concurrency.pop(k_id, None)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # Messages 管线反向调用网关的函数，注册放在全部定义之后：bind 会核对接口，
 # 定义还没执行完时注册只会报出一堆假缺失。

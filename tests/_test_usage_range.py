@@ -16,8 +16,6 @@ os.environ["ACCOUNTS_DIR"] = os.path.join(_TMP, "accounts")
 os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
-
-
 import wb_usage_perf as PF
 
 import wb_usage as U

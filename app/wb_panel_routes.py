@@ -1,8 +1,4 @@
-"""面板与管理接口：看板、账号、任务、设置等管理路由的处理方法。
-
-方法以 PanelRoutes 混入 Handler，运行态与各域能力经 _g() 取用。
-"""
-
+"""面板与管理接口的路由处理方法，以 PanelRoutes 混入 Handler；运行态与各域能力经 _g() 取用。"""
 import ipaddress
 import json
 import os
@@ -102,9 +98,8 @@ def peer_is_trusted(peer_ip):
         addr = ipaddress.ip_address(str(peer_ip))
     except ValueError:
         return False
-    # Windows 双栈下连 127.0.0.1 的对端会显示为 ::ffff:127.0.0.1。Python 3.13
-    # 之前的 ipaddress 不把 IPv4 映射地址视为回环，本机反向代理会被当成不可信来源，
-    # 限流桶退化成所有客户端共用一个。
+    # Windows 双栈下连 127.0.0.1 的对端显示为 ::ffff:127.0.0.1，Python 3.13 之前的 ipaddress
+    # 不把 IPv4 映射地址视为回环；不特判的话本机反向代理被当成不可信来源，所有客户端共用一个限流桶。
     mapped = addr.ipv4_mapped if addr.version == 6 else None
     if addr.is_loopback or (mapped is not None and mapped.is_loopback):
         return True
@@ -118,11 +113,8 @@ _PROXY_HEADER_IP_MAX = 64  # 最长的 IPv6 文本也不到 46 字符，再长�
 
 
 def _proxy_header_ip(value):
-    """从代理头取出合法 IP 的规范文本，取不到返回 None，不抛异常。
-
-    接受裸 IPv4 或 IPv6，也接受 nginx 可能写出的 host:port 与 [v6]:port；
-    含逗号的多值、超长及其他畸形串一律判为不可用，由调用方决定回退。
-    """
+    """从代理头取出合法 IP 的规范文本，取不到返回 None，不抛异常。接受裸 IPv4/IPv6 与
+    nginx 可能写出的 host:port、[v6]:port；含逗号的多值、超长及其他畸形串一律判为不可用。"""
     text = str(value or "").strip()
     if not text or len(text) > _PROXY_HEADER_IP_MAX or "," in text:
         return None
@@ -143,12 +135,9 @@ def _proxy_header_ip(value):
 
 
 def login_rate_limit_key(peer_ip, headers):
-    """限流键：对端可信时取代理头里的真实客户端 IP，否则取对端地址。
-
-    X-Real-IP 优先，nginx 里放的就是真实来源；其次取 X-Forwarded-For 的
-    第一个地址，链上最左是最初的客户端。头不可用时回退到对端地址，不能拿
-    解析不出来的串当键。
-    """
+    """限流键：对端可信时取代理头里的真实客户端 IP，否则取对端地址。X-Real-IP 优先
+    （nginx 里放的就是真实来源），其次取 X-Forwarded-For 链上最左的第一个地址；头不可用
+    时回退到对端地址，不能拿解析不出来的串当键。"""
     if not peer_is_trusted(peer_ip):
         return peer_ip
     real = _proxy_header_ip(headers.get("X-Real-IP") if headers else None)
@@ -170,7 +159,6 @@ PROBE_CONCURRENCY = 4
 
 
 def _is_public_addr(text):
-    """是不是一个可以直连的公网地址（拒绝环回/私有/链路本地/保留段）。"""
     try:
         addr = ipaddress.ip_address(str(text).split("%")[0])
     except ValueError:
@@ -180,14 +168,9 @@ def _is_public_addr(text):
 
 
 def probe_local_network(realm):
-    """本机到该区域上游这条路通不通：DNS 解析 + TCP 握手。
-
-    一键测试里最容易被误判的就是这一项：本机一断网，每个账号都会失败，用户看到的
-    却是「账号全挂了」，然后越测越乱。先把这条路单独确认掉，再谈账号。
-
-    目标是各区域写死的上游主机（不是用户给的 URL），并且只接受 https、拒绝解析到
-    环回/私有段的结果——配置被改坏时宁可报错，也不去连一个不该连的地址。
-    """
+    """本机到该区域上游这条路通不通：DNS 解析 + TCP 握手。一键测试里最容易被误判的就是
+    这一项：本机一断网每个账号都会失败，用户看到的却是「账号全挂了」。目标是各区域写死的
+    上游主机，只接受 https、拒绝解析到环回/私有段的结果——配置被改坏时宁可报错。"""
     url = str(wb_accounts.get_realm_config(realm).get("chat_upstream") or "")
     info = {"realm": realm, "url": url, "host": "", "ip": "", "ok": False,
             "dns_ms": None, "tcp_ms": None, "error": ""}
@@ -226,10 +209,8 @@ def probe_local_network(realm):
 
 
 def probe_account(account, model=None, timeout=30):
-    """给一个账号发一条最小请求，返回一行结果；成功即清掉它的本地惩罚。
-
-    单个「测试」与「一键测试」共用这一份，清计数与识别本机断网的行为保持一致。
-    """
+    """给一个账号发一条最小请求，返回一行结果；成功即清掉它的本地惩罚。单个「测试」与
+    「一键测试」共用这一份，清计数与识别本机断网的行为保持一致。"""
     model = model or wb_settings.DEFAULT_TEST_MODEL
     row = {"uid": account.uid, "nickname": account.nickname or account.uid[:8],
            "realm": account.realm, "model": model, "ok": False, "elapsed_ms": 0,
@@ -252,9 +233,8 @@ def probe_account(account, model=None, timeout=30):
             msg = (choices[0].get("message") or {}) if choices else {}
             reply = (msg.get("content") or msg.get("reasoning_content") or "OK").strip()
             row["reply"] = reply[:77] + "..." if len(reply) > 80 else reply
-            # 请求真的被服务了，走语义成功路径：清掉账号级连续失败、熔断与降权计数。
-            # 这里只解除被测模型的冷却，同账号其他模型保留；402 余额停用另有
-            # 解除路径，由积分刷新触发 revive_balance_cooldown。
+            # 请求真的被服务了，走语义成功路径：清掉账号级连续失败、熔断与降权计数。只解除
+            # 被测模型的冷却，402 余额停用另有解除路径（积分刷新触发 revive_balance_cooldown）。
             account.note_success(model=model)
             row["ok"] = True
             return row
@@ -319,9 +299,8 @@ class PanelRoutes(object):
         })
 
     def _route_console_toggle(self):
-        # 按钮请求带 `{}` body 但不解析，必须排空残留字节，否则同一条 keep-alive
-        # 连接上的下一个请求会以 "{}POST /console/toggle" 进场 → 501。顺序与
-        # _error 相同：先应对 Expect: 100-continue，否则排空会等一个永远不会发出的 body。
+        # 按钮请求带 `{}` body 但不解析，必须排空残留字节，否则同一条 keep-alive 连接上的
+        # 下一个请求会以 "{}POST /console/toggle" 进场 → 501。先应对 Expect: 100-continue。
         self._handle_expect_continue()
         self._discard_body()
         if _g()._console_viewer_running():
@@ -337,9 +316,8 @@ class PanelRoutes(object):
         # 连接上的下一个请求（连点触发 501）。
         self._handle_expect_continue()
         self._discard_body()
-        # 先关掉日志终端窗口，避免服务退出后查看器轮询 /logs 报「上游拒绝连接」；
-        # 回响应后延迟 0.4s 退出，让 _json 的 body 先 flush 到 socket，
-        # 端口随进程释放，下次启动走原来的启动脚本。
+        # 先关掉日志终端窗口，避免服务退出后查看器轮询 /logs 报「上游拒绝连接」；回响应后
+        # 延迟 0.4s 退出，让 _json 的 body 先 flush 到 socket，端口随进程释放。
         try:
             _g()._kill_console_viewer()
         except Exception:
@@ -355,12 +333,9 @@ class PanelRoutes(object):
         return self._json(200, {"ok": True, "shutting_down": True})
 
     def _get_panel_models(self, query):
-        """面板的模型表：可用模型 + 上游列出但被筛选规则排除的模型。
-
-        条目带 enabled（是否处理该模型的请求）与 excluded（是否被筛选规则排除）。
-        被排除的模型只在此列出，不自动写进 disabled_models；操作员明确取消勾选后
-        网关才拒绝它的请求。读取本页不改变路由状态。
-        """
+        """面板的模型表：可用模型 + 上游列出但被筛选规则排除的模型。条目带 enabled 与
+        excluded；被排除的模型只在此列出，不自动写进 disabled_models，操作员明确取消勾选后
+        网关才拒绝它的请求。读取本页不改变路由状态。"""
         realm = str((query.get("realm") or [""])[0]).strip() or _g().CURRENT_REALM
         refresh = str((query.get("refresh") or [""])[0]).strip().lower() in (
             "1", "true", "yes", "on")
@@ -473,11 +448,8 @@ class PanelRoutes(object):
                                                   offset=offset))
 
     def _get_activity_history(self, query):
-        """账号每日活动的结构化历史，只读，供面板的签到记录用。
-
-        筛选条件写错返回 400，不静默忽略：被忽略的 result=failed 会让调用方
-        以为「这几天没有失败」，实际拿回的是全部结果。
-        """
+        """账号每日活动的结构化历史，只读。筛选条件写错返回 400，不静默忽略：被忽略的
+        result=failed 会让调用方以为「这几天没有失败」，实际拿回的是全部结果。"""
         if not self._authorized():
             return
 
@@ -516,11 +488,9 @@ class PanelRoutes(object):
         return self._json(200, {"accounts": wb_accounts.account_views()})
 
     def _get_account_credits_grants(self):
-        """积分获取历史：只读账号积分快照，不发上游请求。
-
-        更新数字先走「一键刷新积分」（POST /accounts/credits）；这里只把最近
-        一次快照里的积分包摊平成表，载荷带快照时刻，面板据此提醒数据有多旧。
-        """
+        """积分获取历史：只读账号积分快照，不发上游请求。更新数字先走「一键刷新积分」
+        （POST /accounts/credits）；这里只把最近一次快照里的积分包摊平成表，载荷带快照
+        时刻，面板据此提醒数据有多旧。"""
         if not self._authorized():
             return
         return self._json(200, wb_usage.credit_grants())
@@ -542,7 +512,7 @@ class PanelRoutes(object):
         if not self._authorized():
             return
         # ?download=1 让浏览器存成文件；不带则内联返回文档，看板可展示摘要。
-        # ?uid= 限定到指定账号（可重复、逗号拼接），按行「导出」按钮就是这么用的。
+        # ?uid= 限定到指定账号（可重复、逗号拼接），按行导出时使用。
         realm = (query.get("realm") or [None])[0] or None
         if realm not in ("intl", "cn"):
             realm = None
@@ -714,11 +684,8 @@ class PanelRoutes(object):
         return self._json(200, _g().runtime_settings_view())
 
     def _get_updates(self):
-        """当前构建版本，以及是否存在更新的稳定版。
-
-        只读且便宜：只汇报上一次检查的结果，不发起检查。看板的「立即检查」是
-        下面的 POST。
-        """
+        """当前构建版本，以及是否存在更新的稳定版。只读且便宜：只汇报上一次检查的结果，
+        不发起检查；看板的「立即检查」是下面的 POST。"""
         if not self._authorized():
             return
         if _g().UPDATES:
@@ -828,7 +795,6 @@ class PanelRoutes(object):
         return self._send_web_file(_g().WEB_INDEX)
 
     def _handle_settings_save(self):
-        """保存 Web 设置页提交的面板托管设置。"""
         payload = self._payload_or_error()
         if payload is None:
             return
@@ -839,9 +805,8 @@ class PanelRoutes(object):
                 return self._error(400, "api_keys must be a list", "invalid_request_error")
             # 面板只显示掩码 key，行里的空值表示保留已存值，不表示清空。
             existing = {entry.get("id"): entry for entry in _g().configured_keys()}
-            # 带显式 delete 列表的提交按 upsert 处理，只退役列出的 id，过期或
-            # 不完整的列表（第二个标签页、保存与保存后重载竞争）才不会抹掉用户没删的
-            # key；旧面板不带该字段，维持按省略替换的契约。
+            # 带显式 delete 列表的提交按 upsert 处理，只退役列出的 id，过期或不完整的列表
+            # 才不会抹掉用户没删的 key；旧面板不带该字段，维持按省略替换的契约。
             delete_ids = payload.get("deleted_api_key_ids")
             upsert = isinstance(delete_ids, list)
             cleaned = []
@@ -1335,9 +1300,8 @@ class PanelRoutes(object):
             wb_settings.set_key_before_hidden(_g().ACCOUNTS_DIR, raw)
             reply["key_before_hidden"] = raw
         if "hidden_pages" in payload:
-            # 页面键列表，也是本分支唯一会动的东西：提交只带这个键，未点名的设置
-            # 写入后原样保留。裸字符串会被逐字符遍历，只会隐藏一堆乱码，所以非
-            # 字符串列表一律直接拒绝，不做规范化放行。
+            # 页面键列表是本分支唯一会动的东西，未点名的设置写入后原样保留。裸字符串会被
+            # 逐字符遍历只会隐藏一堆乱码，所以非字符串列表一律直接拒绝。
             raw = payload.get("hidden_pages")
             if not isinstance(raw, list) or any(not isinstance(k, str) for k in raw):
                 return self._error(400, "hidden_pages must be a list of page keys",
@@ -1422,7 +1386,6 @@ class PanelRoutes(object):
         return self._json(200, reply)
 
     def _handle_proxy_slots(self, path, payload):
-        """代理槽位管理（需面板会话）。"""
         if path == "/proxy/slots":
             return self._json(200, {"slots": wb_proxy_slots.proxy_slots_view(_g().POOL, _g().ACCOUNTS_DIR)})
         if path == "/proxy/slots/save":
@@ -1458,9 +1421,8 @@ class PanelRoutes(object):
             reply["id"] = slot_id
             reply["slot"] = None
             if probe["ok"]:
-                # 记住探测到的出口，面板无需再探就能显示。ok 只代表 IP 探测成功：
-                # geo 查询空手而归时保留已存的出口信息而不是抹成空白，查询抖动
-                # 不能冲掉上次成功探测学到的东西。
+                # 记住探测到的出口，面板无需再探就能显示。geo 查询空手而归时保留已存的出口
+                # 信息而不是抹成空白，查询抖动不能冲掉上次成功探测学到的东西。
                 updated_fields = {
                     "ip": probe["exit_ip"],
                     "probed_at": int(time.time()),
@@ -1498,10 +1460,8 @@ class PanelRoutes(object):
         return _g().agents_client_allowed(getattr(self, "client_address", None))
 
     def _agents_base_url_hint(self):
-        """本地客户端应当指向的 URL 的最佳猜测。
-
-        由绑定 socket 派生；绑 0.0.0.0 时客户端连不上，改报 127.0.0.1。
-        """
+        """本地客户端应当指向的 URL 的最佳猜测，由绑定 socket 派生；绑 0.0.0.0 时客户端
+        连不上，改报 127.0.0.1。"""
         host, port = "", 0
         try:
             host, port = self.server.server_address[:2]
@@ -1513,11 +1473,8 @@ class PanelRoutes(object):
         return "http://%s:%d/v1" % (host, int(port or 0))
 
     def _agents_models(self):
-        """给选择器的扁平模型列表；内置 intl+cn 目录，去重。
-
-        实时来源刻意不走这里：上游挂掉时面板也必须能回答，失败只是列表短一点，
-        绝不报错。
-        """
+        """给选择器的扁平模型列表；内置 intl+cn 目录，去重。实时来源刻意不走这里：上游
+        挂掉时面板也必须能回答，失败只是列表短一点，绝不报错。"""
         models = []
         seen = set()
         try:
@@ -1541,10 +1498,8 @@ class PanelRoutes(object):
                 seen.add(mid)
                 meta = meta if isinstance(meta, dict) else {}
                 entry = {"id": mid}
-                # 与 /v1/models 同一条查找链（上游值 > 内建知识表 > 本地缓存 >
-                # 默认），否则一键配置写进客户端的窗口会和网关声明的不一致：目录里
-                # contextWindow.defaultLength 只是桌面端默认档（deepseek-v4.1-flash
-                # 是 300k，网关声明 1M）。
+                # 与 /v1/models 同一条查找链（上游值 > 内建知识表 > 本地缓存 > 默认），否则
+                # 一键配置写进客户端的窗口会和网关声明的不一致（桌面端默认档 300k vs 1M）。
                 try:
                     ctx, out, _src = wb_modelsdev.lookup(
                         mid, meta.get("maxInputTokens"),
@@ -1577,9 +1532,8 @@ class PanelRoutes(object):
                     vision = False
                 if vision:
                     entry["supports_vision"] = True
-                # 可选思考档位交给客户端（DSH 用它生成会话里的档位选择器）。只声明
-                # 目录明确列出档位的模型：固定档位模型（只有 reasoning.effort、没有
-                # supportedEfforts）不列，选了也不会改变上游实际跑的档位。
+                # 可选思考档位交给客户端（DSH 用它生成档位选择器）。只声明目录明确列出档位
+                # 的模型：固定档位模型不列，选了也不会改变上游实际跑的档位。
                 efforts = (meta.get("reasoning") or {}).get("supportedEfforts")
                 if isinstance(efforts, (list, tuple)):
                     levels = [str(e).strip() for e in efforts
@@ -1592,12 +1546,8 @@ class PanelRoutes(object):
         return models
 
     def _get_agents_cli(self):
-        """提供 wb_agents.py，让远程机器可以取回配置器。
-
-        刻意不要面板会话、不做 loopback 校验：调用方就是别的机器，这正是 CLI
-        的用途（在它运行的机器上写配置文件）。文件不含秘密，与仓库里的副本
-        逐字节相同。
-        """
+        """提供 wb_agents.py，让远程机器可以取回配置器。刻意不要面板会话、不做 loopback
+        校验：调用方就是别的机器，这正是 CLI 的用途。文件不含秘密，与仓库里的副本逐字节相同。"""
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "wb_agents.py")
         try:
@@ -1647,11 +1597,8 @@ class PanelRoutes(object):
         })
 
     def _agents_resolve_key(self, payload, warnings):
-        """按载荷挑选交给客户端的网关 key。
-
-        返回 key 字符串，请求应当失败时返回 None。失败消息只在软回退情形追加到
-        `warnings`；硬失败经调用方的 400 映射抛出。
-        """
+        """按载荷挑选交给客户端的网关 key，请求应当失败时返回 None。失败消息只在软回退
+        情形追加到 `warnings`；硬失败经调用方的 400 映射抛出。"""
         wb_agents = _g().agents_module()
         key_id = str(payload.get("key_id") or "").strip()
         if key_id == "__global":
@@ -1698,10 +1645,8 @@ class PanelRoutes(object):
                 cleaned_models.append(item)
             elif isinstance(item, str) and item.strip():
                 cleaned_models.append({"id": item.strip()})
-        # 看板只送模型 id，而 DSH / Crush 这类客户端要求把规格写进自己的配置
-        # （上下文窗口、输出上限、思考档位）。这里按 id 补上网关目录规格（见
-        # enrich_agent_models），显式带来的字段优先；否则一键配置写出的模型列表
-        # 只有 id，客户端只能吃自己的内置默认值。
+        # 看板只送模型 id，而 DSH / Crush 这类客户端要求把规格写进自己的配置。这里按 id 补上
+        # 网关目录规格（见 enrich_agent_models），显式带来的字段优先。
         try:
             specs = {}
             for spec in self._agents_models():
@@ -1753,7 +1698,6 @@ class PanelRoutes(object):
         return self._json(200, result)
 
     def _handle_panel(self, path):
-        """面板登录、登出与设置页（密码 + API Key）。"""
         payload = self._payload_or_error()
         if payload is None:
             return
@@ -1806,7 +1750,6 @@ class PanelRoutes(object):
         return self._error(404, "not found", "invalid_request_error")
 
     def _handle_accounts(self, path, payload):
-        """账号管理端点（看板在用）。"""
         if _g().POOL is None:
             return self._error(503, "account pool unavailable")
         if path == "/accounts/import" and isinstance(payload, list):
@@ -1887,9 +1830,8 @@ class PanelRoutes(object):
                 continue
             try:
                 if account.set_product(target):
-                    # 立刻写盘：set_product() 只改内存，面板这一下是操作者的明确
-                    # 选择，不能等别的路径（refresh / 签到 / 查积分）碰巧存档才生效，
-                    # 否则切完就重启容器的人会白白丢掉这次切换。
+                    # 立刻写盘：set_product() 只改内存，这一下是操作者的明确选择，不能等别的
+                    # 路径碰巧存档才生效，否则切完就重启容器的人会白白丢掉这次切换。
                     try:
                         account.save(_g().ACCOUNTS_DIR)
                     except Exception as exc:
@@ -2055,11 +1997,8 @@ class PanelRoutes(object):
         return self._json(200, out)
 
     def _route_update_check(self):
-        """按操作者的明确请求，立即跑一次版本检查。
-
-        内联返回而不是「已启动，轮询 /updates」：单次有界的 GitHub 请求，答案
-        就是按钮的用途。manual=True 同时无视每日开关与 24 小时窗口。
-        """
+        """按操作者的明确请求，立即跑一次版本检查，内联返回而不是「已启动，轮询 /updates」：
+        单次有界的 GitHub 请求。manual=True 同时无视每日开关与 24 小时窗口。"""
         if not _g().UPDATES:
             return self._json(200, {"ok": False, "msg": "更新检查未运行"})
         status = _g().UPDATES.check(manual=True)
@@ -2094,13 +2033,10 @@ class PanelRoutes(object):
         return self._json(200, out)
 
     def _route_catalog_refresh(self, payload):
-        """面板「刷新模型清单」：强制向上游拉一次指定版本的目录。
-
-        版本（realm）由面板显式传当前视图的 intl/cn，每个版本只用自己的代表
-        账号与端点，绝不跨区。拉取同步执行（通常 1~3 秒，上游丢包时两次 10s
-        尝试封顶），同一版本有 30s 冷却；无论成败都以 200 + ok 标志回答，
-        msg 供面板直接展示（与 /pricing/refresh 同一条面板惯例）。
-        """
+        """面板「刷新模型清单」：强制向上游拉一次指定版本的目录。版本（realm）由面板显式
+        传当前视图的 intl/cn，每个版本只用自己的代表账号与端点，绝不跨区。拉取同步执行
+        （通常 1~3 秒，上游丢包时两次 10s 尝试封顶），同一版本有 30s 冷却；无论成败都以
+        200 + ok 标志回答，msg 供面板直接展示。"""
         realm = str((payload or {}).get("realm") or "").strip().lower()
         return self._json(200, refresh_catalog(realm))
 
@@ -2109,13 +2045,10 @@ class PanelRoutes(object):
         return self._json(200, {"ok": True})
 
     def _route_pricing_mapping(self, payload):
-        """面板手填一条「hub 模型 → OpenRouter id」映射。
-
-        写进 usage/pricing-overrides.json（运行期覆盖，不改源码 OVERRIDES，
-        也不随镜像升级丢失），随即触发一次取价，几秒内生效。or_id 为空表示
-        删除该映射。写入只认形状像 OpenRouter id 的值，快照里有该条目时予以
-        确认；没有也接受但要如实说明，上游可能刚上架而本地清单还没刷新。
-        """
+        """面板手填一条「hub 模型 → OpenRouter id」映射，写进 usage/pricing-overrides.json
+        （运行期覆盖，不改源码 OVERRIDES，也不随镜像升级丢失），随即触发一次取价。
+        or_id 为空表示删除该映射。写入只认形状像 OpenRouter id 的值，快照里有该条目时予以
+        确认；没有也接受但要如实说明，上游可能刚上架而本地清单还没刷新。"""
         if _g().PRICING is None:
             return self._json(200, {"ok": False, "msg": "价格刷新未运行"})
         if not wb_settings.pricing_enabled(_g().ACCOUNTS_DIR):
@@ -2182,10 +2115,8 @@ class PanelRoutes(object):
         if uid:
             targets = [_g().POOL.get(uid)]
         elif isinstance(uids, list):
-            # 「未活跃账号一键打卡」：面板把今天还没打过卡的国际版账号列成名单，
-            # 这里只按名单精确执行——打过的不打第二遍（重复打卡不给积分，只白烧
-            # 额度），名单外的不碰。空名单就是「一个都不打」，不能悄悄回落成全部，
-            # 那与按钮意图相反；要打全部就别传 uids。
+            # 「未活跃账号一键打卡」只按名单精确执行：打过的不打第二遍（重复打卡不给积分，
+            # 只白烧额度），空名单就是「一个都不打」，不能悄悄回落成全部；打全部就别传 uids。
             wanted = {str(item) for item in uids if item}
             targets = [a for a in _g().POOL.accounts
                        if a.realm == "intl" and a.enabled and str(a.uid) in wanted]
@@ -2205,11 +2136,9 @@ class PanelRoutes(object):
         return self._json(200, {"results": results, "accounts": wb_accounts.account_views()})
 
     def _route_accounts_daily_chat_web(self, payload):
-        """网页通道打卡：只建网页端会话，不发桌面端那条轻量对话。
-
-        手动触发用。刻意不写 lastDailyChat——那是「今天已打过卡」的闸门，
-        手动补打不该让定时巡检跳过当天的正常流程。
-        """
+        """网页通道打卡：只建网页端会话，不发桌面端那条轻量对话，手动触发用。刻意不写
+        lastDailyChat——那是「今天已打过卡」的闸门，手动补打不该让定时巡检跳过当天的
+        正常流程。"""
         uid = payload.get("uid")
         if uid:
             targets = [_g().POOL.get(uid)]
@@ -2246,11 +2175,8 @@ class PanelRoutes(object):
         return self._json(200, {"cancelled": _g().POOL.cancel_login(state)})
 
     def _route_accounts_import_desktop(self, payload):
-        # body 形状：
-        #   {}                     -> 只扫描（只读，不导入）
-        #   {"path": "..."}        -> 导入该凭据
-        #   {"all": true}          -> 导入扫描到的全部
-        #   {"recoverKey": true}   -> 从桌面客户端进程回收 at-rest 密钥
+        # body 形状：{} 只扫描（只读）；{"path"} 导入该凭据；{"all": true} 导入全部；
+        # {"recoverKey": true} 从桌面客户端进程回收 at-rest 密钥。
         target_path = payload.get("path")
         if payload.get("recoverKey"):
             try:
@@ -2333,11 +2259,8 @@ class PanelRoutes(object):
         return self._json(200, {"results": results})
 
     def _route_accounts_sync_profile(self, payload):
-        """看板手动刷新昵称。
-
-        本质是选择性启用：只在操作者要求时运行。上游响应带手机号等个人字段，
-        wb_accounts.fetch_account_profile 只解析 uid/nickname。
-        """
+        """看板手动刷新昵称。上游响应带手机号等个人字段，wb_accounts.fetch_account_profile
+        只解析 uid/nickname。"""
         uid = str(payload.get("uid") or "").strip()
         realm = payload.get("realm")
         if uid:
@@ -2392,12 +2315,9 @@ class PanelRoutes(object):
         return self._json(200, result)
 
     def _route_accounts_test_all(self, payload):
-        """一键测试：该区域每个已启用账号各打一条最小请求，外加一条本机连通性。
-
-        池子出问题时要一次看全：哪个账号真不行、哪个只是被本地窗口（熔断 /
-        降权 / 软限流）关着（测试成功会顺手清掉这些计数），以及本机网络通不通。
-        断网时每个账号都会失败，只报「账号全挂了」会让人以为账号本身有问题。
-        """
+        """一键测试：该区域每个已启用账号各打一条最小请求，外加一条本机连通性。池子出
+        问题时要一次看全：哪个账号真不行、哪个只是被本地窗口（熔断 / 降权 / 软限流）关着
+        （测试成功会顺手清掉这些计数），以及本机网络通不通；断网时每个账号都会失败。"""
         realm = str(payload.get("realm") or "").strip().lower()
         if realm not in ("intl", "cn"):
             realm = _g().CURRENT_REALM
@@ -2545,15 +2465,8 @@ class PanelRoutes(object):
         })
 
     def _route_accounts_import(self, payload):
-        # 导入先前导出的文档（或手写的账号列表）。接受的 body 形状见
-        # wb_accounts._coerce_account_rows：
-        #   {"format":"workbuddy-accounts","accounts":[...]}   <- 我们的导出
-        #   [...]                                              <- 裸列表
-        #   {"accessToken": ...}                               <- 单个账号
-        #   {"account":{...},"auth":{...}}                     <- 桌面凭据
-        # 选项：dryRun（bool）只校验并汇报，不写入；overwrite（bool）替换已存在的
-        # 同 uid 账号；realm（"intl"|"cn"）强制指定版本，不自动探测。
-        # `data` 承载文档，优先于裸 body，这样 body 还能带上面的选项。
+        # 导入先前导出的文档或手写列表（body 形状见 wb_accounts._coerce_account_rows）。选项：
+        # dryRun 只校验不写入；overwrite 替换同 uid 账号；realm 强制版本；data 优先于裸 body。
         blob = payload.get("data") if "data" in payload else payload
         if not isinstance(blob, (dict, list)):
             return self._error(400, "the document must be a JSON object or array",

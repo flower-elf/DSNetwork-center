@@ -205,7 +205,5 @@ class CatalogEntryTests(unittest.TestCase):
         self.assertEqual(obj["data"][0]["context_length"], 1000000)
 
 
-
-
 if __name__ == "__main__":
     unittest.main()

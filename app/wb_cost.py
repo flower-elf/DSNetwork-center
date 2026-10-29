@@ -55,10 +55,10 @@ def _row(item):
 
 
 def clean(raw):
-    """校验面板提交的费用估算设置，返回可以写进 settings.json 的形状。
+    """校验面板提交的费用估算设置，返回可写进 settings.json 的形状。
 
-    空模型名且价格全为 0 的行直接丢掉；模型名重复、价格非法或形状不对时抛
-    ValueError，由调用方转成 400。价格全为 0 的行表示不参与估算，同样不存储。
+    空模型名且价格全 0 的行直接丢掉，全 0 价格的行不存储；模型名重复、价格非法
+    或形状不对抛 ValueError，由调用方转成 400。
     """
     if not isinstance(raw, dict):
         raise ValueError("cost_estimate must be an object")
@@ -85,10 +85,7 @@ def clean(raw):
 
 
 def normalise(raw):
-    """读取磁盘上的设置；缺失或损坏时回到内置默认价格表。
-
-    空列表是有效配置：用户显式删掉全部模型后，没有模型参与估算。
-    """
+    """读取磁盘上的设置；缺失或损坏时回到内置默认价格表。空列表是有效配置。"""
     if not isinstance(raw, dict):
         return _default_config()
     credit_price = 0.0
@@ -125,12 +122,9 @@ def _number(value):
 
 
 def estimate(by_model, config):
-    """按官方价格折算每个模型的费用，并对比积分折算的支出。
-
-    `by_model` 是用量快照的 by_model 桶；`config` 是 normalise() 的结果。
-    没有价格（或三项价格全为 0）的模型 priced=False，金额按 0 计，不进入合计。
-    缓存命中价已经按剩余输入算，命中 token 不会重复按未命中价计费。
-    """
+    """按官方价格折算每个模型的费用，对比积分折算的支出；by_model 是用量快照的
+    by_model 桶，config 是 normalise() 的结果。没有价格（或三项全 0）的模型
+    priced=False、金额按 0 计、不进入合计；缓存命中价已按剩余输入算，不重复计费。"""
     config = config if isinstance(config, dict) else _default_config()
     credit_price = _number(config.get("credit_price"))
     prices = {}

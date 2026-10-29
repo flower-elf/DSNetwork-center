@@ -185,8 +185,6 @@ check("valid tool: finish_reason is tool_calls", res_c["choices"][0]["finish_rea
 check("valid tool: tool_calls present", len(res_c["choices"][0]["message"].get("tool_calls", [])) == 1)
 
 
-
-
 print("[11] additional_tools item in responses input is merged into chat tools")
 resp_additional = {
     "model": "gpt-6.1-sol",

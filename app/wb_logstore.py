@@ -15,8 +15,7 @@ _TRIM_INTERVAL = 5.0
 _IDLE_TICK = 5.0
 # 大小上限最贵，可能分批删除并执行 VACUUM，因此使用更慢的周期。
 _TRIM_BYTES_INTERVAL = 30.0
-# 单条消息原样存储；该上限防止异常载荷把文件一次撑到上限。64 KiB 已远超真实
-# 日志行。
+# 单条消息原样存储，上限防止异常载荷一次把文件撑到上限；64 KiB 远超真实日志行。
 _MSG_MAX = 64 * 1024
 
 _SCHEMA = """
@@ -36,11 +35,8 @@ _COLUMNS = ("id", "ts", "time", "level", "tag", "msg")
 
 
 class LogStore:
-    """网关日志环的持久化后端。
-
-    生命周期：用数据库路径构造，再以面板设置调用 configure。开关切换时启动
-    或停止工作线程；关闭时保留文件与行，重新打开后接着写。
-    """
+    """网关日志环的持久化后端：构造后以 configure 应用面板设置；开关切换启停工作
+    线程，关闭时保留文件与行，重新打开接着写。"""
 
     def __init__(self, path):
         self.path = path
@@ -52,16 +48,13 @@ class LogStore:
         self._last_trim = 0.0
         self._last_trim_bytes = 0.0
 
-    # -- 生命周期 ---------------------------------------------------------
     @property
     def enabled(self):
         return self._enabled
 
     def configure(self, enabled, max_rows=None, max_days=None, max_bytes=None):
-        """应用面板设置，并按开关启动或停止工作线程。
-
-        启动时与每次保存设置都会调用，要求幂等且廉价。
-        """
+        """应用面板设置并按开关启动或停止工作线程；启动与每次保存设置都会调用，
+        要求幂等且廉价。"""
         with self._lock:
             self._caps = {
                 "rows": max_rows if max_rows and max_rows > 0 else None,
@@ -92,7 +85,6 @@ class LogStore:
         if thread is not None:
             thread.join(timeout=5.0)
 
-    # -- 写入 --------------------------------------------------------------
     def append(self, entry):
         """排队一条记录，不阻塞请求路径。"""
         if not self._enabled:
@@ -117,7 +109,6 @@ class LogStore:
         self._submit("clear", wait=True)
         return True
 
-    # -- 读取 --------------------------------------------------------------
     def query(self, limit=200, level="", tag="", search="", since_id=0):
         """按看板筛选条件返回日志行，结构与 wb_proxy.get_logs 一致。"""
         if not self._enabled:
@@ -133,11 +124,8 @@ class LogStore:
         return self._submit("stats", wait=True)
 
     def max_id(self):
-        """返回已存的最大 id，没有时为 0。
-
-        启动时调用一次以续接编号。此处另开连接读取：工作线程可能尚未启动，
-        而它供给的计数器必须在记录第一行之前就正确。
-        """
+        """返回已存的最大 id，没有时为 0；启动时调用一次以续接编号。另开连接读取：
+        工作线程可能尚未启动，而它供给的计数器必须在第一行之前就正确。"""
         try:
             conn = sqlite3.connect(self.path, timeout=5)
         except Exception:
@@ -155,7 +143,6 @@ class LogStore:
             except Exception:
                 pass
 
-    # -- 工作线程 ----------------------------------------------------------
     def _submit(self, kind, payload=None, wait=False, timeout=8.0):
         fut = {"event": threading.Event(), "result": None, "error": None}
         self._queue.put((kind, payload, fut))
@@ -175,9 +162,9 @@ class LogStore:
         # auto_vacuum 必须在第一张表建好之前设置；已有表的库上这条是空操作，
         # 大小上限就退回整库 VACUUM，同样能把文件压回上限以内。
         conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-        # 所有语句都跑在这一个线程上，写入、读取、裁剪经队列串行，没有读写
-        # 竞态要解决；回滚日志让「文件大小」始终等于运维设定上限的那一个
-        # 文件（WAL 会把最新行放进旁文件，上限永远缩不到）。
+        # 所有语句都跑在这一个线程上，写入、读取、裁剪经队列串行，没有读写竞态；
+        # 回滚日志让「文件大小」始终等于运维设定上限的那一个文件（WAL 会把最新行
+        # 放进旁文件，上限永远缩不到）。
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
@@ -276,7 +263,6 @@ class LogStore:
         fut["error"] = error
         fut["event"].set()
 
-    # -- 查询 --------------------------------------------------------------
     def _query(self, conn, limit=200, level="", tag="", search="", since_id=0):
         where, args = [], []
         if since_id and since_id > 0:
@@ -317,7 +303,6 @@ class LogStore:
             "path": self.path,
         }
 
-    # -- 保留清理 ----------------------------------------------------------
     def _maybe_trim(self, conn):
         now = time.time()
         if now - self._last_trim >= _TRIM_INTERVAL:
@@ -354,11 +339,9 @@ class LogStore:
         conn.commit()
 
     def _trim_bytes(self, conn, cap):
-        """按从旧到新的顺序删除并重建，直到文件小于 `cap`。
-
-        按平均行长估算要删的行数，一次重建完成，不逐页收缩：incremental_vacuum
-        每次只释放一页，这种体量的库要跑上千次。估算偏小时再补一轮，文件装下即停。
-        """
+        """按从旧到新的顺序删除并重建，直到文件小于 `cap`。按平均行长估算要删的
+        行数，一次重建完成：incremental_vacuum 每次只释放一页，这种体量要跑上千次。
+        估算偏小时再补一轮，装下即停。"""
         size = self._size()
         if size <= cap:
             return

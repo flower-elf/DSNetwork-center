@@ -26,12 +26,10 @@ class AtRestError(RuntimeError):
     """解密链路的可预期失败：缺文件、密钥不对、进程内存找不到密钥等。"""
 
 
-# --------------------------------------------------------------- 受限路径
 def _safe_path(base, name):
     """把 `name` 限制在 `base` 目录内，返回规范化后的绝对路径。
 
-    三段校验：拒绝 `..` 段，只取文件名并丢掉目录成分，规范化后要求父目录
-    正好等于 base。调用方给任何名字都无法离开这个目录。
+    三段校验：拒绝 `..` 段、只取文件名丢掉目录成分、规范化后要求父目录正好等于 base。
     """
     raw = str(name).replace("\\", "/")
     if ".." in [seg for seg in raw.split("/") if seg]:
@@ -46,7 +44,6 @@ def _safe_path(base, name):
     return path
 
 
-# --------------------------------------------------------------------- 信封
 def _lp(text):
     raw = str(text).encode("utf-8")
     return len(raw).to_bytes(4, "big") + raw
@@ -104,7 +101,6 @@ def parse_envelope(value):
 
 
 def open_envelope(key, value, framing):
-    """解开一个信封，返回明文字节。"""
     env = parse_envelope(value)
     expect = derive_key_id(key)
     if env["keyId"] and env["keyId"] != expect:
@@ -114,10 +110,8 @@ def open_envelope(key, value, framing):
 
 
 def decrypt_field(key, value):
-    """解密一个可能加密、也可能本来就是明文的字段。
-
-    返回明文 `str`；空值返回 ""；非字符串且非信封的值返回 None，由调用方
-    决定回退方式，例如国内版昵称可以退回 UID 前缀。
+    """解密一个可能加密、也可能本来就是明文的字段。返回明文 str；空值返回 ""；
+    非字符串且非信封的值返回 None，由调用方决定回退方式（例如昵称退回 UID 前缀）。
     """
     if value is None or value == "":
         return ""
@@ -126,7 +120,6 @@ def decrypt_field(key, value):
     return open_envelope(key, value, "field").decode("utf-8", "replace")
 
 
-# ----------------------------------------------------------------- 纯 Python AES
 def _build_sbox():
     sbox = [0] * 256
     p = q = 1
@@ -163,7 +156,6 @@ def _mix_columns(s):
 
 class _AES256(object):
     """AES-256 分组加密，GCM 只需要正向加密。状态按列主序排成 16 字节。"""
-
     __slots__ = ("_w",)
 
     def __init__(self, key):
@@ -257,9 +249,7 @@ def _gcm_open(key, nonce, aad_bytes, ciphertext, tag):
 
 
 def seal(key, plaintext, framing, key_id=None, nonce=None):
-    """把明文封成 `$wbEncrypted` 信封。
-
-    生产链路只需要解密。这个函数用于自检与单测，同时也把信封格式写清楚。
+    """把明文封成 `$wbEncrypted` 信封；生产链路只需要解密，这个函数用于自检与单测。
     """
     if isinstance(plaintext, str):
         plaintext = plaintext.encode("utf-8")
@@ -281,19 +271,17 @@ def seal(key, plaintext, framing, key_id=None, nonce=None):
     return {ENVELOPE_KEY: SUITE, "envelope": base64.b64encode(blob).decode("ascii")}
 
 
-# ------------------------------------------------------------------ keyblob
 #: 桌面客户端的配置目录候选，keyblob 位于其中。与 wb_proxy.read_product_config_models
-#: 的判定一致：国际版装在 ~/.workbuddy-ai，国内版装在 ~/.workbuddy。不同版本的
-#: 安装器两者都可能写入，因此按存在性探测，不固定为一个目录。
+#: 的判定一致（国际版 ~/.workbuddy-ai、国内版 ~/.workbuddy）；不同版本的安装器两者都
+#: 可能写入，因此按存在性探测。
 CONFIG_DIR_CANDIDATES = (".workbuddy-ai", ".workbuddy")
 
 
 def config_dir():
-    """客户端配置目录，即 keyblob 所在目录。可用环境变量指向便携版位置。
+    """客户端配置目录，即 keyblob 所在目录；可用环境变量指向便携版位置。
 
-    未设环境变量时，按 CONFIG_DIR_CANDIDATES 顺序取第一个存在 keyblob 的目录，
-    兼容 `~/.workbuddy-ai` 与 `~/.workbuddy` 两种安装布局；都不存在时返回第一个
-    候选，让 load_keyblob() 报出「keyblob 不存在」，不在这里暴露探测细节。
+    未设环境变量时按 CONFIG_DIR_CANDIDATES 取第一个存在 keyblob 的目录（兼容
+    `~/.workbuddy-ai` 与 `~/.workbuddy` 两种布局）；都不存在时返回第一个候选。
     """
     env = (os.environ.get("WORKBUDDY_CONFIG_DIR")
            or os.environ.get("CODEBUDDY_CONFIG_DIR"))
@@ -313,7 +301,6 @@ def keyblob_path():
 
 
 def load_keyblob():
-    """读取客户端的 keyblob，路径固定，见 keyblob_path。"""
     path = keyblob_path()
     if not os.path.isfile(path):
         raise AtRestError("keyblob 不存在：%s（桌面客户端没装或没登录过？）" % path)
@@ -349,20 +336,13 @@ def unwrap_keyblob(key):
     raise AtRestError("keyblob 里没有可用的 static-v1 槽")
 
 
-# ----------------------------------------------------------- 进程内存里找密钥
-#
-# 三档扫描，命中即止，内存段按字节数均分给多个进程并行扫：
-#
-#   1) 密钥载荷：客户端把 atRestSecretKey 当成 44 字符的规范 base64 传递，
-#      JSON.parse 之后内存里是一段孤立的 base64 token，正则匹配走 C 层；
-#   2) stride=8 逐窗口哈希：原生 Buffer 按至少 16 字节边界分配，先按 8 字节栅格找；
-#   3) stride=1 逐窗口哈希：最后手段，保证不漏。
-#
-# 第 1 档的候选同样要过 keyblob 的 GCM 解封校验 `unwrap_keyblob` 才采信；校验不过就
-# 继续往后扫，因此不会引入误判。
+# 进程内存里找密钥：三档扫描，命中即止，内存段按字节数均分给多个进程并行扫。
+# 1) 密钥载荷：客户端把 atRestSecretKey 当成 44 字符的规范 base64 传递，JSON.parse
+#    之后内存里是一段孤立的 base64 token；2) stride=8 逐窗口哈希（原生 Buffer 按
+#    至少 16 字节边界分配）；3) stride=1 逐窗口哈希兜底。第 1 档的候选同样要过
+#    keyblob 的 GCM 解封校验 unwrap_keyblob 才采信，校验不过继续往后扫，无误判。
 CHUNK = 4 << 20
 OVERLAP = 31
-#: 分片粒度：把大段切开再分给各进程，否则一个 V8 大堆会把负载全压在单个进程上
 SLICE = 64 << 20
 MODE_LITERAL = "literal"
 MODE_SECRET = "secret"
@@ -485,9 +465,8 @@ def _private_regions(handle):
 
 
 def _scan_regions(job):
-    """在若干内存段里找密钥。job 为 pid、regions、key_id、mode、stride 五元组。
-
-    job 也可能来自扫描子进程，JSON 里的 regions 是 list，两种形状都支持。
+    """在若干内存段里找密钥。job 为 pid、regions、key_id、mode、stride 五元组，
+    也可能来自扫描子进程（JSON 里的 regions 是 list），两种形状都支持。
     """
     pid, regions, key_id, mode, stride = job
     win = _win32()
@@ -551,12 +530,9 @@ def _scan_regions(job):
 
 
 def _run_scan(jobs, say):
-    """并行跑一批扫描任务，任意一个命中就收工（其余子进程直接杀掉）。
-
-    并行只用子进程：绿色包内置的 Python 是精简发行版，没有 multiprocessing
-    模块，该模块的 spawn 在受限环境里也常常不可用；`sys.executable 本文件
-    --scan-worker` 这条路在任何 Python 上都能跑。
-    """
+    """并行跑一批扫描任务，任意一个命中就收工（其余子进程直接杀掉）。并行只用子
+    进程：绿色包内置的 Python 没有 multiprocessing，spawn 在受限环境也常不可用，
+    `sys.executable 本文件 --scan-worker` 这条路在任何 Python 上都能跑。"""
     if not jobs:
         return []
     if len(jobs) == 1:
@@ -623,10 +599,8 @@ def _run_scan_workers(jobs, say):
 
 
 def _worker_cli():
-    """子进程入口：从 stdin 读一个 job，扫完把命中打到 stdout。
-
-    由 `_run_scan_workers` 以 `python wb_atrest.py --scan-worker` 拉起。
-    """
+    """子进程入口：从 stdin 读一个 job，扫完把命中打到 stdout；由
+    _run_scan_workers 以 `python wb_atrest.py --scan-worker` 拉起。"""
     job = json.loads(sys.stdin.read() or "[]")
     if not job:
         return 2
@@ -637,10 +611,8 @@ def _worker_cli():
 
 
 def _slices(regions, limit=SLICE):
-    """把内存段切成不超过 limit 的片，好让多个进程真的并行。
-
-    不切的话，Electron 那种"一个 1 GB 私有大段 + 一堆小段"的布局会把整块
-    大段压在单个 worker 上，其余 worker 扫完小段就闲着。
+    """把内存段切成不超过 limit 的片，好让多个进程真的并行。不切的话，Electron
+    「一个 1 GB 私有大段 + 一堆小段」的布局会把大段压在单个 worker 上，其余闲着。
     """
     out = []
     for base, size in regions:
@@ -666,11 +638,9 @@ def hunt_hint():
 
 
 def hunt_key(key_id=None, workers=None, log=None):
-    """从桌面客户端主进程内存里找回静态密钥，返回 64 位小写 hex。
-
-    只读：OpenProcess(PROCESS_VM_READ|PROCESS_QUERY_INFORMATION) + VirtualQueryEx
-    + ReadProcessMemory，不往目标进程写任何东西。
-    """
+    """从桌面客户端主进程内存里找回静态密钥，返回 64 位小写 hex。只读：OpenProcess
+    (PROCESS_VM_READ|PROCESS_QUERY_INFORMATION) + VirtualQueryEx + ReadProcessMemory，
+    不往目标进程写任何东西。"""
     if not hunt_supported():
         raise AtRestError("从进程内存回收密钥只支持 Windows（当前系统：%s）——"
                           "其他平台请手动导入密钥，或改用浏览器登录" % sys.platform)
@@ -702,7 +672,6 @@ def hunt_key(key_id=None, workers=None, log=None):
         total = sum(size for _, size in regions)
         say("pid %d：%d 个可读私有内存段，共 %.0f MB" % (pid, len(regions), total / 1e6))
 
-        # 大段先切片，再按字节数均分给各 worker
         pieces = _slices(regions)
         slots = max(1, min(workers, len(pieces)))
         groups, load = [], [0] * slots
@@ -731,10 +700,8 @@ def hunt_key(key_id=None, workers=None, log=None):
     raise AtRestError(last_error or "没能在桌面客户端进程内存里找到密钥（keyId=%s）" % key_id)
 
 
-# ------------------------------------------------------------------ 内存密钥
-#: 只放在内存里：找到一次即可反复使用，不落盘、不进日志、不随凭证导出。
-#: `source` 记这把钥是怎么来的（"hunt" = 进程内存回收，"manual" = 手工导入），
-#: 只用于面板提示，不含密钥本身。
+#: 只放在内存里：找到一次即可反复使用，不落盘、不进日志、不随凭证导出。`source`
+#: 记这把钥的来路（"hunt" = 进程内存回收，"manual" = 手工导入），不含密钥本身。
 _KEY_CACHE = {"key": None, "recoveredAt": 0.0, "source": ""}
 _KEY_LOCK = threading.Lock()
 
@@ -747,23 +714,15 @@ def _remember_key(key, source):
         _KEY_CACHE["source"] = source
 
 
-#: 手工导入认两种写法：64 位 hex（已派生的保护密钥）、44 字符规范 base64
-#: （客户端载荷里的 atRestSecretKey，sha256 之后才是保护密钥）。
 _KEY_HEX = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 _KEY_B64 = re.compile(r"\A[A-Za-z0-9+/]{43}=\Z")
 
 
 def parse_key_text(text):
-    """把用户粘贴的密钥文本规整成 32 字节保护密钥；认不出来就抛 AtRestError。
-
-    两种写法都不需要用户自己换算：
-
-    * 64 位 hex —— 已派生的保护密钥 `sha256(atRestSecretKey)`；
-    * 44 字符规范 base64 —— 客户端载荷里的 `atRestSecretKey` 本身（对**字符串**
-      做 sha256 才是保护密钥，与 `_scan_regions` 的载荷档同一算法）。
-
-    首尾空白、大小写、`0x` 前缀都容错。这里只做格式归一，keyblob 自检见 `adopt_key`。
-    """
+    """把用户粘贴的密钥文本规整成 32 字节保护密钥；认不出来抛 AtRestError。两种
+    写法都无需用户换算：64 位 hex 是已派生的保护密钥，44 字符规范 base64 是客户端
+    载荷里的 atRestSecretKey 本身（对字符串做 sha256 才是保护密钥，与 _scan_regions
+    的载荷档同一算法）。"""
     raw = str(text or "").strip()
     if raw[:2].lower() == "0x":
         raw = raw[2:].strip()
@@ -781,12 +740,9 @@ def parse_key_text(text):
 
 
 def adopt_key(text, log=None):
-    """手工导入解码密钥（macOS / Linux 上无法回收进程内存时用），返回 32 字节密钥。
-
-    与 `hunt_key` 同一道闸：落进内存缓存之前必须过 `unwrap_keyblob()` 自检
-    （protectorKeyId 对得上、能解出 32 字节主密钥）。因此粘贴错了只会报错，
-    既不会留下坏密钥，也不会顶掉内存里已有的好密钥。
-    """
+    """手工导入解码密钥（macOS / Linux 无法回收进程内存时用），返回 32 字节密钥。
+    与 hunt_key 同一道闸：落进缓存前必须过 unwrap_keyblob() 自检，粘贴错了只会报错，
+    不会留下坏密钥，也不会顶掉内存里已有的好密钥。"""
     key = parse_key_text(text)
     unwrap_keyblob(key)              # 自检 1+2：keyId 不匹配 / 解不开就抛错
     _remember_key(key, "manual")

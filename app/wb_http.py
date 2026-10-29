@@ -35,7 +35,6 @@ def _g():
             import wb_proxy as _GATEWAY
     return _GATEWAY
 
-
 class Handler(PanelRoutes, ChatRoutes, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # 关闭 Nagle（对连接设 TCP_NODELAY）：响应头与响应体是两次独立 write，
@@ -1081,4 +1080,3 @@ class Handler(PanelRoutes, ChatRoutes, BaseHTTPRequestHandler):
         if meta:
             payload["catalog"] = meta
         return self._json(200, payload)
-

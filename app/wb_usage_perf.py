@@ -1,9 +1,6 @@
-"""性能统计：延迟分位、速率与模型维度矩阵。
-
-按 (sample, realm, 窗口) 维护环形样本，TTL 过期后只并入新增行；口径与整段
-重扫一致。数据源是 usage.jsonl 的尾部样本。
+"""延迟分位、速率与模型维度矩阵：按 (sample, realm, 窗口) 维护环形样本，
+TTL 过期后只并入新增行，口径与整段重扫一致（数据源是 usage.jsonl 尾部样本）。
 """
-
 import json
 import os
 import threading
@@ -18,11 +15,8 @@ from wb_usage import (
 )
 
 def _perf_block(vals):
-    """一个指标的汇总块，直接由原始样本算出。
-
-    分位必须从原始样本算，因此收的是数值序列，list 与 deque 都行。排序一次
-    得出三个分位；avg 与 max 读原序列，浮点求和顺序与逐次排序的写法一致。
-    """
+    """一个指标的汇总块：排序一次得出三个分位；avg 与 max 读原序列，浮点求和
+    顺序与逐次排序的写法一致。"""
     if not vals:
         return None
     ordered = sorted(vals)
@@ -44,16 +38,13 @@ _perf_cache = {}
 _perf_lock = threading.Lock()
 
 def _perf_stats_scope(sample, realm, range, since, until):
-    """（过滤用的 realm, since, until, 缓存键），perf_stats() 与它的 ETag 共用。
-
-    取数与派生 ETag 必须用同一套键：两边各写一份，只要有一处不同，校验符
-    就会落到别的缓存条目上。
-    """
+    """（过滤用的 realm, since, until, 缓存键），perf_stats() 与它的 ETag 共用；
+    取数与派生 ETag 必须用同一套键，否则校验符会落到别的缓存条目上。"""
     r = realm_scope(realm, _gw().CURRENT_REALM)
     lo, hi = range_window(range, since, until)
     try:
-        # 缓存键带上解析后的时间边界，不带 today/all 标志：本周与本月互相
-        # 重叠，标志区分不开，一个窗口的延迟会被算进另一个窗口的标签。
+        # 键带解析后的时间边界，不带 today/all 标志：本周与本月重叠，标志区分
+        # 不开会把一个窗口的延迟算进另一个窗口。
         key = (int(sample), r or "all",
                lo if lo is not None else -1, hi if hi is not None else -1)
     except Exception:
@@ -62,12 +53,8 @@ def _perf_stats_scope(sample, realm, range, since, until):
     return r, lo, hi, key
 
 def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=None):
-    """带缓存的包装：解析上万行很吃 CPU，而面板每隔几秒轮询一次。
-
-    重建在锁内做，突发轮询不会各自扫一遍日志。重建本身是增量的，
-    _perf_stats_incremental 按 (sample, realm, 窗口) 维持最近 sample 行的环，
-    只折叠上次重建后追加的字节。
-    """
+    """带缓存的包装：解析上万行很吃 CPU，而面板每隔几秒轮询一次。重建在锁内做
+    （突发轮询不会各自扫日志），重建本身是增量的，只折追加的字节。"""
     ttl = wb_usage._STATS_TTL if ttl is None else ttl
     r, lo, hi, key = _perf_stats_scope(sample, realm, range, since, until)
     now = time.time()
@@ -80,11 +67,8 @@ def perf_stats(sample=5000, realm=None, ttl=None, range=None, since=None, until=
     return data
 
 def perf_stats_etag(sample=5000, realm=None, range=None, since=None, until=None):
-    """perf_stats() 当前缓存条目的 ETag，条目还不存在时返回 None。
-
-    _json_cached() 在取数前后各调用一次并比对，两次一致才发出 tag，调用方
-    不必自己安排顺序。
-    """
+    """perf_stats() 当前缓存条目的 ETag，条目不存在时返回 None；_json_cached()
+    在取数前后各调用一次并比对，两次一致才发出 tag。"""
     _r, _lo, _hi, key = _perf_stats_scope(sample, realm, range, since, until)
     with _perf_lock:
         hit = _perf_cache.get(key)
@@ -103,17 +87,16 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
     ma_buckets = {}
     # 只读日志末尾 sample 行：readlines() 会把整份日志读进内存。
     rows = [raw.decode("utf-8", "replace") for raw in _tail_lines(_gw().USAGE_LOG, sample)]
-    # 尾部读取只取 sample 行，窗口宽于样本时只有最新的请求得到描述。两个事实
-    # 都要上报，矩阵才能说明延迟列只覆盖部分片段。
+    # 尾部只取 sample 行，窗口宽于样本时延迟列只覆盖部分片段；sample_from 与
+    # sample_capped 两个事实都要上报。
     sample_capped = len(rows) >= sample
     sample_from = None
     for line in rows:
         line = line.strip()
         if not line:
             continue
-        # 解析前先做子串预过滤，落窗口外的行不必付 json.loads。它只丢下面
-        # 本来也会丢的行，口径不变；没有窗口时不做检查。sample_from 还没定
-        # 下来时不过滤，否则报告范围会从窗口内第一行开始。
+        # 解析前先做子串预过滤，落窗口外的行不必付 json.loads；只丢本来也会丢的行，
+        # 口径不变。sample_from 未定时不过滤，否则报告范围会从窗口内第一行开始。
         if (since or until) and sample_from is not None and \
                 _line_outside_window(line, since or None, until or None):
             continue
@@ -133,8 +116,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
             continue
         total += 1
         outcome = row_outcome(r)
-        # 不管结果如何每行都进模型桶：只有取消请求的模型也以成功数 0 出现在
-        # 按模型表里，不会消失。
+        # 不管结果如何每行都进模型桶：只有取消请求的模型也以成功数 0 出现在表里。
         m_id = r.get("model") or "unknown"
         r_realm = row_realm(r)
         mb = m_buckets.setdefault(m_id, {"total": 0, "ok": 0, "err": 0, "aborted": 0,
@@ -152,8 +134,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
         mb["total"] += 1
         rb["total"] += 1
         ab["total"] += 1
-        # 客户端主动断开不算网关失败：不计入成功也不计入失败，单独进一个桶，
-        # 不压低成功率。
+        # 客户端主动断开不算网关失败：单独进 aborted 桶，不压低成功率。
         if outcome == "client_aborted":
             aborted += 1
             for b in (mb, rb, ab):
@@ -198,8 +179,7 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
     block = _perf_block
     return {
         "sampled": total,
-        # 样本切片从哪里开始、是否被截断：周/月视图据此说明延迟列并未覆盖
-        # 整个窗口。
+        # 样本切片的起点与截断标志：延迟列并未覆盖整个窗口时据此上报。
         "sample_from": sample_from,
         "sample_capped": sample_capped,
         "success": ok,
@@ -262,19 +242,12 @@ def _perf_stats_uncached(sample=5000, realm=None, since=None, until=None):
         }
     }
 
-# ---------------------------------------------------------------------------
-# perf 的增量样本。
-#
-# perf_stats 每次重建都要重读日志末尾 sample 行、逐行解析、把五个数值往全局
-# 与三层模型桶各追加一次，再排序求分位。这里按（sample, realm, 窗口）记一份
-# 环形样本状态：ring 是最近 sample 条非空行的折叠结果，agg 是这些行对聚合的
+# perf 的增量样本：ring 是最近 sample 条非空行的折叠结果，agg 是这些行对聚合的
 # 贡献，offset 是已折到的字节位置。TTL 过期后的重建只并入 offset 之后的新行、
-# 撤销滑出样本的行；位置校验不过（截断、换文件、同尺寸重写）才从日志尾部重建。
-# 口径与全量扫描一致，状态不落盘。
+# 撤销滑出样本的行；位置校验不过才从日志尾部重建。口径与全量扫描一致，状态不落盘。
 _perf_state = {}
-# 面板用到的键只有两三个（不带窗口的一个、带窗口的一个），多出来的按最近使用
-# 淘汰，避免来回切 range 时状态无限堆积。单份状态的内存与 sample 成正比，
-# 上限取 4 份；淘汰只让下次重建一次，不影响输出。
+# 面板只用两三个键，多出来的按最近使用淘汰（内存与 sample 成正比，上限 4 份；
+# 淘汰只让下次重建一次，不影响输出）。
 _PERF_STATE_MAX = 4
 # ring 条目的形状，见 _perf_line_entry：短元组 = 不贡献聚合的行。
 _PERF_REC_LEN = 10
@@ -293,8 +266,7 @@ def _perf_new_agg():
 def _perf_put(vals, value, add, front):
     """一个数值贡献：并入时追加，撤销时从对应那一头弹出。
 
-    滑出样本的是最旧的行（front），重折上一轮末尾半行时摘掉的是最新的行
-    （back）。每一头只对应同一行，撤销因此是 O(1)。
+    滑出样本的是最旧的行（front），重折半行时摘掉的是最新的行（back），撤销 O(1)。
     """
     if add > 0:
         vals.append(value)
@@ -304,12 +276,10 @@ def _perf_put(vals, value, add, front):
         vals.pop()
 
 def _perf_apply(state, entry, add, front):
-    """并入（add=1）或撤销（add=-1）一行对聚合的贡献。
-
-    撤销只回退并入做过的事：计数减回去、数值表从并进的那一头弹出、桶的 total
-    归零就删掉，重建时桶的存在与否只看样本里还有没有它的行。删掉的桶后来再有
-    行进来会重建在末尾，与重建时的首次出现顺序一致。判定条件与
+    """并入（add=1）或撤销（add=-1）一行对聚合的贡献；判定条件与
     _perf_stats_uncached 的逐行循环逐句对应。
+
+    撤销只回退并入做过的事；桶的 total 归零就删掉，后来再有行会重建在末尾。
     """
     if entry is None or len(entry) < _PERF_REC_LEN:
         return
@@ -341,8 +311,7 @@ def _perf_apply(state, entry, add, front):
     agg["total"] += add
     for b in (mb, rb, ab):
         b["total"] += add
-    # 客户端主动断开不算网关失败：单独计入 aborted，不压低成功率，与全量
-    # 扫描口径相同。
+    # 客户端主动断开单独计入 aborted，与全量扫描口径相同。
     if outcome == "client_aborted":
         agg["aborted"] += add
         for b in (mb, rb, ab):
@@ -398,12 +367,9 @@ def _perf_apply(state, entry, add, front):
                 del agg["ma"][m_id]
 
 def _perf_at_token(line):
-    """预过滤认可的写法里 at 的浮点值，读不到返回 None。
-
-    _line_outside_window 判定为窗外的行，形状已被它逐条核过：以 `{"at": ` 开头、
-    值以逗号收尾、是浮点字面量、后面没有第二个 at 键，所以这里读到的值与
-    json.loads 相同。只有被预过滤跳过的行需要它，用来确定 sample_from。
-    """
+    """预过滤认可的写法里 at 的浮点值，读不到返回 None。被 _line_outside_window
+    判为窗外的行形状已被它逐条核过，值与 json.loads 相同；只有被跳过的行需要
+    它来确定 sample_from。"""
     if not line.startswith(_AT_PREFIX):
         return None
     end = line.find(",", len(_AT_PREFIX))
@@ -420,17 +386,15 @@ def _perf_at_token(line):
 def _perf_line_entry(state, line):
     """把一行日志折成 ring 条目，与 _perf_stats_uncached 的逐行循环逐句对应。
 
-    None 表示没有可用的行数据；`(at,)` 表示解析成功但被 realm 或窗口过滤掉，
-    它不贡献聚合，但仍决定 sample_from；10 元组表示通过全部过滤，计入聚合。
+    None = 没有可用数据；`(at,)` = 被 realm/窗口过滤（不进聚合，但决定
+    sample_from）；10 元组 = 通过全部过滤，计入聚合。
     """
     since = state["since"]
     until = state["until"]
     realm = state["realm"]
-    # 廉价预过滤只丢窗口判断本来也会丢的行，口径不变；样本里还没有 at 非空
-    # 的行（n_at 为 0）时不过滤。跳过的行仍要记下它声明的 at 供 sample_from
-    # 用，所以额外要求 line.endswith("}")：写了一半的行走不了跳过分支，照旧
-    # 进 json.loads，sample_from 不会采信未写完的行。完整对象行总以 } 收尾，
-    # 这道判断不改变合法行的过滤结果。
+    # 预过滤只丢窗口判断本来也会丢的行；样本里还没有 at 非空的行（n_at 为 0）时
+    # 不过滤。跳过的行仍要记它声明的 at 供 sample_from 用，所以额外要求以 } 收尾：
+    # 写了一半的行走不了跳过分支，sample_from 不会采信未写完的行。
     if (since or until) and state["n_at"] and line.endswith("}") and \
             _line_outside_window(line, since or None, until or None):
         return (_perf_at_token(line),)
@@ -459,11 +423,8 @@ def _perf_drop_oldest(state):
     _perf_apply(state, old, -1, True)
 
 def _perf_push(state, line):
-    """把一行并进环：先腾位置，再折行、并入。
-
-    腾位置必须在折行之前：预过滤的开关是“样本里已有行的 at 非空”，滑出的行
-    不再算数；先折后淘汰会让新行按旧样本的口径被跳过，sample_from 跟着变。
-    """
+    """把一行并进环：先腾位置，再折行、并入。腾位置必须在折行之前——预过滤的
+    开关看样本里已有的行，先折后淘汰会让新行按旧样本的口径被跳过。"""
     sample = state["sample"]
     if sample <= 0:
         return
@@ -487,13 +448,9 @@ def _perf_pop_last(state):
     _perf_apply(state, old, -1, False)
 
 def _perf_fold(state):
-    """把 offset 之后的新行并进状态，尾部半行也作为样本的最后一行并进去。
-
-    整行推进 offset，半行不推进（内容可能被写完整，下次从同一位置重折）；半行
-    在样本里算一行，所以它进环，重折前先摘掉上一轮那一份。
-
-    返回样本是否变化，没变时渲染可以整段跳过。
-    """
+    """把 offset 之后的新行并进状态；返回样本是否变化，没变时渲染可整段跳过。
+    整行推进 offset，半行不推进（可能被写完整，下次从同一位置重折，进环前先
+    摘掉上一轮那一份）。"""
     if state["pending"]:
         _perf_pop_last(state)
         state["pending"] = False
@@ -530,8 +487,8 @@ def _perf_fold(state):
 def _perf_payload(state):
     """把环形样本的聚合渲染成载荷，键序与字段和全量扫描逐字一致。
 
-    三层桶的顺序取各桶在样本里第一次出现的顺序。增量维护要在每次淘汰时重排，
-    比渲染时扫一遍环更贵；这次扫描只读环、不解析，桶见齐就停。
+    三层桶的顺序取样本里第一次出现的顺序；渲染时扫一遍环比增量维护每次淘汰都
+    重排更便宜，桶见齐就停。
     """
     agg = state["agg"]
     order = {}          # model -> realm -> account（插入序 = 第一次出现序）
@@ -616,14 +573,11 @@ def _perf_payload(state):
         by_model_acct[mid] = acct_out
     return {
         "sampled": agg["total"],
-        # 样本切片从哪里开始、是否被截断：周/月视图据此说明延迟列并未覆盖
-        # 整个窗口。
         "sample_from": sample_from,
         "sample_capped": len(state["ring"]) >= state["sample"],
         "success": agg["ok"],
         "errors": agg["err"],
         "client_aborted": agg["aborted"],
-        # 成功率只对网关实际处理完的请求计算；客户端取消单独上报，不计为失败。
         "success_rate_pct": round(agg["ok"] * 100.0 / (agg["ok"] + agg["err"]), 1)
                              if (agg["ok"] + agg["err"]) else None,
         "ttft_ms": _perf_block(agg["ttfts"]),
@@ -657,8 +611,8 @@ def _perf_rebuild(key, sample, realm, since, until):
                 pending_raw = fh.read()
         except OSError:
             pending_raw = None
-    # 尾部半行由 _tail_lines 算进样本的最后一行（末尾残余非空白时），这里把它
-    # 从"完整行"里摘出来单独折——下面 offset 停在它前面，重折路径与它一致。
+    # 尾部半行由 _tail_lines 算进样本的最后一行，这里摘出来单独折：offset 停在
+    # 它前面，重折路径与它一致。
     if raw_lines and pending_raw is not None and raw_lines[-1] == pending_raw:
         raw_lines = raw_lines[:-1]
     for raw in raw_lines:
@@ -686,15 +640,13 @@ def _perf_trim_states():
 def _perf_stats_incremental(key, sample, realm, since, until):
     """perf_stats 的增量重建：输出与 _perf_stats_uncached 逐字节一致。
 
-    必须在 _perf_lock 里调用（perf_stats 就是这么调的）：状态与载荷缓存由
-    同一把锁保护。
+    必须在 _perf_lock 里调用：状态与载荷缓存由同一把锁保护。
     """
     try:
         state = _perf_state.get(key)
         log_key = _usage_log_key()
         if state is None or not _log_resume_ok(state, log_key):
-            # 没有状态，或日志被截断、换掉、同尺寸重写（位置校验见
-            # _log_resume_ok）：从尾部样本重建。
+            # 没有状态或位置校验不过（截断/换文件/同尺寸重写）：从尾部样本重建。
             state = _perf_rebuild(key, sample, realm, since, until)
         else:
             if _perf_fold(state):
@@ -702,8 +654,7 @@ def _perf_stats_incremental(key, sample, realm, since, until):
             state["key"] = _usage_log_key()
             state["tail"] = _log_tail_signature(state["offset"])
         if state["dirty"] or state["payload"] is None:
-            # 样本没变就不重渲染：0 新字节的 TTL 重算只花几十微秒，不对每个
-            # 桶重复排序求分位。
+            # 样本没变就不重渲染：0 新字节的 TTL 重算只花几十微秒。
             state["payload"] = _perf_payload(state)
             state["dirty"] = False
         payload = state["payload"]
@@ -711,8 +662,7 @@ def _perf_stats_incremental(key, sample, realm, since, until):
         _perf_trim_states()
         return payload
     except Exception as exc:
-        # 任何意外都退回整段重建：状态作废，不留半折的账，这一次仍然给出
-        # 正确载荷。
+        # 任何意外都退回整段重建：状态作废，不留半折的账，这次仍给出正确载荷。
         _perf_state.pop(key, None)
         _gw().log("perf incremental failed, falling back to full scan: %s" % exc)
         return _perf_stats_uncached(sample, realm, since=since, until=until)

@@ -22,13 +22,10 @@ import wb_upstream_pool
 import wb_webagent
 
 # ---------------------------------------------------------------------------
-# 网页版通道：对话走 console/as 下的 agent 会话，只带
-# Authorization: Bearer 与 X-User-Id，没有桌面端的 X-IDE-* 指纹。
-#
-# 建会话只是排队：agent 要等客户端接上沙箱（.../{id}/session 给的 link + token）
-# 并请求这一轮才会跑，否则停在 CREATING 且没有输出。顺序是 建会话 → 取 session
-# → ACP over HTTP+SSE（见 wb_webagent）；每日活跃奖励只认跑完的会话，所以国际版
-# 打卡要在桌面端对话之外再走一次并跑到 completed。
+# 网页版通道：对话走 console/as 下的 agent 会话，只带 Authorization: Bearer 与
+# X-User-Id，无桌面端 X-IDE-* 指纹。建会话只是排队：agent 要等客户端接上沙箱
+# （.../{id}/session 的 link + token）并请求这一轮才跑，否则停在 CREATING 无输出；
+# 每日活跃只认跑到 completed 的会话（顺序：建会话 → 取 session → ACP over HTTP+SSE）。
 # ---------------------------------------------------------------------------
 WEB_ORIGIN = "https://www.workbuddy.ai"
 WEB_ORIGIN_CN = "https://www.workbuddy.cn"
@@ -38,16 +35,13 @@ WEB_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
                   "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0")
 DAILY_CHAT_MODEL = "deepseek-v4.1-flash"
 DAILY_CHAT_WEB_PROMPT = "Hi"
-#: 网页通道一轮最多等多久（秒）。没配 settings 的账号（如单测里手工构造的）
-#: 用它兜底。
+#: 网页通道一轮最多等多久（秒）；没配 settings 的账号兜底用。
 WEB_TURN_TIMEOUT = int(os.environ.get("WB_WEB_TURN_TIMEOUT") or "120")
-#: 网页通道一共试几次（含第一轮）。第 N 轮的等待是首轮的 2^(N-1) 倍，所以
-#: 3 次 = 最多等 base×(1+2+4) 秒。设置页可改（见 wb_settings.daily_chat_web_attempts）。
+#: 网页通道总尝试次数（含第一轮）；第 N 轮等待为首轮的 2^(N-1) 倍。
 WEB_TURN_ATTEMPTS = 3
 
 
 def _retryable(exc):
-    """值得再试一次的暂时性网络故障：TLS 重置、超时、5xx。"""
     if isinstance(exc, ssl.SSLError):
         return True
     if isinstance(exc, urllib.error.HTTPError):
@@ -60,15 +54,12 @@ def _retryable(exc):
 
 
 def web_origin_for(realm):
-    """按区域给出网页控制台的域名：国内版或国际版。"""
     return WEB_ORIGIN_CN if str(realm or "").lower() == "cn" else WEB_ORIGIN
 
 
 def fetch_account_profile(account, timeout=15):
-    """网页控制台的账号资料 → (uid, 昵称)，其余字段不取。
-
-    端点还会返回手机号等个人字段，这里只解析 uid 与昵称，敏感值不会进入日志、
-    响应或存储。uid 与凭据不符时抛错，防止读到别的账号。
+    """账号资料 → (uid, 昵称)，其余字段不取：端点还返回手机号等个人字段，敏感值
+    不进日志、响应或存储；uid 与凭据不符时抛错，防止读到别的账号。
     """
     origin = web_origin_for(getattr(account, "realm", ""))
     req = wb_upstream_pool.Request(
@@ -101,8 +92,7 @@ _DIRECT_OPENER = wb_upstream_pool.build_opener()
 def opener_for_proxy(proxy):
     """为单个出站代理构造（并缓存）urllib opener。
 
-    空代理表示直连，返回 None，由调用方改用直连 opener。一个账号一个
-    opener，使每个账号的流量固定走自己的出口 IP，不与他人共用轮换池。
+    一个账号一个 opener，每个账号的流量固定走自己的出口 IP，不与他人共用轮换池。
     """
     proxy = str(proxy or "").strip()
     if not proxy:
@@ -118,13 +108,10 @@ def opener_for_proxy(proxy):
 
 
 def urlopen(req, timeout=30, proxy=""):
-    """urlopen，支持按账号指定代理，并复用长连接池。
+    """urlopen，支持按账号指定代理，并复用长连接池（urllib 自身每请求重建 TCP+TLS）。
 
-    urllib 的 AbstractHTTPHandler.do_open 会写死 Connection: close，每个请求都要
-    重新做 TCP+TLS 握手。默认改走 wb_upstream_pool：按（目标, 代理串）分池复用
-    连接。连接池处理不了的请求（非 http(s) 目标、非 HTTP 代理、需要跟随的 3xx
-    重定向）由 PoolBypass 回退到 urllib opener；面板「高级」关闭连接复用时也只走
-    这条路径。两条路径发送的头名写法相同。
+    连接池处理不了的请求（非 http(s) 目标、非 HTTP 代理、需跟随的 3xx）由 PoolBypass
+    回退到 urllib opener，面板关闭连接复用也只走这条路径；两条路径头名写法相同。
     """
     if wb_upstream_pool.enabled():
         try:
@@ -137,10 +124,8 @@ def urlopen(req, timeout=30, proxy=""):
 
 def http_json(url, data=None, method=None, headers=None, timeout=30,
               retries=3, backoff=1.0, log=None, proxy=""):
-    """urlopen 加 JSON 解码，失败自动重试。
-
-    国内网络与 CDN 边缘时常在 TLS 握手上断开（SSL: UNEXPECTED_EOF_WHILE_READING），
-    重试一次几乎都能成功，所以所有上游请求都走这里。
+    """urlopen 加 JSON 解码，失败自动重试：国内网络与 CDN 边缘常在 TLS 握手断开
+    （SSL: UNEXPECTED_EOF_WHILE_READING），重试一次几乎都能成功。
     """
     attempts = max(1, int(retries or 1))
     last = None
@@ -163,8 +148,8 @@ def http_json(url, data=None, method=None, headers=None, timeout=30,
             time.sleep(backoff * attempt)
     raise last
 
-# 旧凭证的登录域名仍是 WorkBuddy 主机。对话请求的 X-Domain 改为使用所选
-# 身份对应的域名；自定义域名与企业域名继续使用凭证里的值。
+# 旧凭证的登录域名仍是 WorkBuddy 主机；对话请求的 X-Domain 用所选身份对应的域名，
+# 自定义域名与企业域名继续使用凭证里的值。
 LEGACY_SESSION_DOMAINS = ("www.workbuddy.cn", "www.workbuddy.ai")
 
 REALM_CONFIGS = {
@@ -174,8 +159,7 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.workbuddy.ai",
         "origin": "https://www.workbuddy.ai",
         "domain": "www.workbuddy.ai",
-        # 桌面端 UA 是三段式，末段是客户端内置 CLI 的版本；取值与
-        # wb_identity.DESKTOP_UA_INTL 保持同一来源。
+        # UA 是三段式，末段是客户端内置 CLI 的版本号；与 wb_identity.DESKTOP_UA_INTL 同源。
         "chat_ua": wb_identity.DESKTOP_UA_INTL,
         "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_INTL,
         "info_filename": "workbuddy-desktop-ai.info",
@@ -188,8 +172,7 @@ REALM_CONFIGS = {
         "billing_upstream": "https://www.codebuddy.cn",
         "origin": "https://www.codebuddy.cn",
         "domain": "www.workbuddy.cn",
-        # 国内版的 applicationName 与 productName 都是 WorkBuddy；版本号同样
-        # 只从 wb_identity 取。
+        # 国内版 applicationName 与 productName 都是 WorkBuddy；版本号同取 wb_identity。
         "chat_ua": wb_identity.DESKTOP_UA_CN,
         "billing_ua": "WorkBuddy/%s" % wb_identity.DESKTOP_VERSION_CN,
         "info_filename": "workbuddy-desktop.info",
@@ -209,16 +192,14 @@ RESOURCE_FREE_PACKAGES_PATH = "/billing/meter/get-user-resource-free-packages"
 RESOURCE_PAID_PACKAGES_PATH = "/billing/meter/get-user-resource-paid-packages"
 CHECKIN_STATUS_PATH = "/v2/billing/meter/checkin-activity-status"
 ENTERPRISE_USAGE_PATH = "/billing/meter/get-enterprise-user-usage"
-#: 静态 API Key 的企业用量端点必须带 /v2 前缀；同一路径不带 /v2 会被 APISIX
-#: 直接返回 401。OAuth 企业账号继续用原路径。
+#: 静态 API Key 的企业用量端点必须带 /v2 前缀，不带会被 APISIX 直接 401；
+#: OAuth 企业账号继续用原路径。
 ENTERPRISE_USAGE_PATH_V2 = "/v2/billing/meter/get-enterprise-user-usage"
-#: 静态 API Key 账号的 source 标记。
 SOURCE_API_KEY = "api-key"
 
 LOGIN_PENDING = 11217
 LOGIN_TTL_SECONDS = 600
 USER_AGENT = REALM_CONFIGS['intl']['chat_ua']
-#: 国际版桌面端的版本号，从 wb_identity 取，保持单一来源。
 DEFAULT_UA_VERSION = wb_identity.DESKTOP_VERSION_INTL
 
 def get_realm_config(realm):
@@ -228,12 +209,9 @@ def get_realm_config(realm):
 def login_headers(realm, product, method="POST"):
     """auth/state 与 auth/token 的请求头，与所选官方客户端一致。
 
-    桌面端由主进程直接发送 Node 请求，带 X-Custom-Channel-Id 与链路头；VS Code
-    插件与 CLI 的 auth/state 还带 X-Domain 与 X-No-* 标记头，auth/token 的
-    GET 只带链路头与 X-No-*。三种客户端在登录时都不带浏览器的 Origin、Referer 与
-    X-Requested-With；GET 请求也没有 Content-Type。设备令牌（X-Device-Token）
-    与设备标识（X-Device-Id-List）来自本机原生 SDK，网关没有对应来源，
-    因此不发送。
+    VS Code 插件与 CLI 的 auth/state 带 X-Domain 与 X-No-*，auth/token 的 GET 只带
+    链路头与 X-No-*；三种客户端都不带 Origin/Referer/X-Requested-With。X-Device-Token
+    与 X-Device-Id-List 来自本机原生 SDK，网关没有来源，因此不发送。
     """
     product = wb_identity.normalize_product(product)
     headers = {
@@ -249,7 +227,6 @@ def login_headers(realm, product, method="POST"):
     if method == "GET":
         headers.pop("Content-Type", None)
     headers.update(wb_identity.login_trace_headers())
-    # 插件与 CLI 的 auth/state 带 enterpriseHeaders 的 X-Domain；auth/token 不带。
     if method != "GET" and product in (wb_identity.PRODUCT_VSCODE,
                                         wb_identity.PRODUCT_CLI):
         headers["X-Domain"] = wb_identity.endpoint_for(realm, product)[1]
@@ -292,22 +269,17 @@ def normalize_epoch(value):
         number /= 1000.0
     return int(number)
 
-#: token / 域名里能认出区域的字样。国内版有三套出口域名：
-#: copilot.tencent.com、codebuddy.cn、workbuddy.cn（新版国内客户端的 JWT issuer
-#: 就是 https://www.workbuddy.cn/…），三个都得认；只认前两个会把 workbuddy.cn
-#: 的国内账号判成国际版。
+#: token / 域名里能认出区域的字样。国内版有三套出口域名（copilot.tencent.com、
+#: codebuddy.cn、workbuddy.cn），三个都得认，少认一个会把国内账号判成国际版。
 CN_REALM_MARKERS = ("copilot.tencent.com", "codebuddy.cn", "workbuddy.cn")
 INTL_REALM_MARKERS = ("workbuddy.ai", "codebuddy.ai")
 REALM_MARKERS = {"cn": CN_REALM_MARKERS, "intl": INTL_REALM_MARKERS}
 
 
 def normalise_disabled_models(raw):
-    """把「人工禁用的模型名单」归一成干净的 list[str]。
-
-    供账号档加载与面板写入两条路共用，保证「内存里的判断」和「落盘的内容」
-    口径一致：保留非空字符串、按小写归一（与 is_model_banned 同口径）、去重、
-    保持输入顺序。非列表输入一律当作「没配」返回空列表——坏数据不至于让账号
-    加载失败。
+    """归一「人工禁用的模型名单」：保留非空字符串、小写归一（与 is_model_banned 同
+    口径）、去重、保持输入顺序。账号档加载与面板写入共用同一口径；非列表输入当作
+    「没配」返回空列表，坏数据不让账号加载失败。
     """
     out = []
     if not isinstance(raw, (list, tuple)):
@@ -323,19 +295,15 @@ def normalise_disabled_models(raw):
         out.append(m)
     return out
 
-#: 上游用一个远超任何真实计费周期的抵扣截止时间表示「不会过期」：免费版与
-#: 体验包的 DeductionEndTime 落在 2034/2035 年，而真实包周期是 14 天或 1 个月。
-#: 超过这个天数就按「不过期」处理，不再参与到期倒计时与临期判定。
+#: 上游用远超真实计费周期的抵扣截止时间表示「不会过期」（免费版/体验包落在
+#: 2034/2035 年，真实包周期是 14 天或 1 个月）；超过这个天数按「不过期」处理。
 EXPIRY_SENTINEL_DAYS = 730
 
 
 def deduction_end_text(acc):
-    """包的「抵扣截止时间」——积分到这个点就不能再抵扣，即作废时刻。
-
-    取上游的 DeductionEndTime（epoch 毫秒）。上游没给就返回空串，调用方
-    回退到 CycleEndTime。Bonus Pack / 裂变包 / 体验版的两个字段一致，但免费包
-    这类包的 CycleEndTime 只是每月的计费周期边界，两者能差 8 年——所以到期要
-    认这个字段。
+    """包的「抵扣截止时间」（上游 DeductionEndTime，epoch 毫秒），过了这个点积分
+    作废；上游没给返回空串，调用方回退 CycleEndTime。免费包的 CycleEndTime 只是
+    计费周期边界，两者能差 8 年，到期必须认这个字段。
     """
     raw = acc.get("DeductionEndTime")
     if raw in (None, "", 0, "0"):
@@ -353,11 +321,10 @@ def deduction_end_text(acc):
 
 
 def realm_evidence(token, domain=None):
-    """从 token / 域名里看区域，看不出返回 None（不要瞎猜成 intl）。
+    """从 token / 域名里看区域，看不出返回 None（不猜成 intl）。
 
-    先看 token 自己的 issuer，再看域名：域名是客户端随手记下来的字段，可能过期
-    或干脆是另一边的（同一台机器切区登录过就会这样），token 才是要拿去请求的
-    那一串，冲突时以它为准。
+    域名是客户端随手记下的字段，可能过期或属于另一区；token 才是要拿去请求的串，
+    冲突时以它为准。
     """
     iss = jwt_issuer(token).lower()
     if any(marker in iss for marker in CN_REALM_MARKERS):
@@ -375,10 +342,8 @@ def detect_realm_from_token(token, domain=None):
     return realm_evidence(token, domain) or "intl"
 
 def domain_for_realm(realm, domain):
-    """把域名归到所在区域：域名写着另一个区域时换成该区域的规范域名。
-
-    出站请求的 X-Domain 头跟着它走，区域既然以 token 为准，就不能让一个过期
-    域名再把请求带回另一边的出口。域名本身看不出区域时原样保留。
+    """把域名归到所在区域，写着另一区域时换成该区域的规范域名：区域以 token 为准，
+    过期域名不能再把请求带回另一边的出口。看不出区域时原样保留。
     """
     dom = str(domain or "").strip()
     other = "intl" if realm == "cn" else "cn"
@@ -389,10 +354,9 @@ def domain_for_realm(realm, domain):
 def desktop_effective_realm(hint, token, domain=None):
     """桌面凭据归哪个区域：token / 域名说了算，文件名只作兜底。
 
-    文件名（workbuddy-desktop.info → 国内、workbuddy-desktop-ai.info → 国际）
-    只是客户端两套安装的默认约定：同一个文件里完全可能登录另一个区域的账号
-    （切区登录就是这么用的）。按 token 判定才不会把国内账号塞进国际版列表——
-    那种账号导入后每个请求都会打到错区域的出口上。
+    文件名（workbuddy-desktop.info → 国内、workbuddy-desktop-ai.info → 国际）只是
+    两套安装的默认约定，同一文件里可能登录另一区域的账号，按文件名判会把请求打到
+    错误区域的出口。
     """
     evidence = realm_evidence(token, domain)
     if evidence:
@@ -406,11 +370,9 @@ _DEVICE_TOKEN_MAX_BYTES = 1024
 
 
 def resolve_device_token(accounts_dir):
-    """X-Device-Token 的兜底来源：字面值，或桌面端令牌文件。
-
-    与面板的 device_token.go 同一口径：桌面客户端把令牌写进文件，网关读取
-    （上限 1 KB，去空白）并缓存 5 分钟，标头热路径因此不用反复读盘。
-    读取失败退化为空令牌，不阻断请求。
+    """X-Device-Token 的兜底来源：配置字面值或桌面端令牌文件（与面板
+    device_token.go 同一口径：上限 1 KB、去空白、缓存 5 分钟）。读取失败退化为
+    空令牌，不阻断请求。
     """
     try:
         cfg = wb_settings.upstream_config(accounts_dir)
@@ -440,10 +402,8 @@ def resolve_device_token(accounts_dir):
 
 
 def next_local_4am(now=None):
-    """下一个本地 04:00 的 epoch 秒。
-
-    国内版积分的每日重置在夜间完成，欠费停机等的就是这道 04:00 的墙。
-    已过 04:00 的时刻顺延到明天，同一截止时刻不会被重复使用。
+    """下一个本地 04:00 的 epoch 秒：国内版积分每日夜间重置，欠费停机等的就是这道
+    04:00 的墙。
     """
     now = time.time() if now is None else now
     lt = time.localtime(now)
@@ -454,69 +414,60 @@ def next_local_4am(now=None):
     return stamp
 
 
-# 账号级失败治理：反复被软限流的凭据按指数退避，不再每个请求都重试；连续硬失败
-# 触发熔断，未知失败先降级一段时间。计数在 Account 上，这里只把次数换算成秒
-# （与面板项目的池语义一致）。
-SOFT_RATE_BASE = 600.0          # 账号级 429 首次冷却：10 分钟
-SOFT_RATE_MAX = 7200.0          # 逐次翻倍，最高 2 小时
-# 无范围的 429 只在该模型上给一个窗口：响应体没给重置时刻，看不出限的是凭据还是
-# 单个模型，所以窗口更短，且不超过凭据阶梯的第一档。裸的 usage exceeds frequency
-# limit 响应是上游最常发的 429，不能让它在凭据上停两小时。
+# 账号级失败治理：软限流按指数退避，连续硬失败触发熔断，未知失败先降级。计数在
+# Account 上，这里只把次数换算成秒（与面板项目的池语义一致）。
+SOFT_RATE_BASE = 600.0
+SOFT_RATE_MAX = 7200.0
+# 无范围 429 只在该模型上给窗口：响应体没给重置时刻，看不出限的是凭据还是单个模型，
+# 窗口更短且不超过凭据阶梯第一档。裸的 usage exceeds frequency limit 是上游最常见的
+# 429，不能让它在凭据上停两小时。
 SOFT_RATE_UNVERIFIED_BASE = 60.0
 SOFT_RATE_UNVERIFIED_MAX = 600.0
-BREAKER_THRESHOLD = 3           # 连续硬失败到几次触发熔断
-BREAKER_COOLDOWN = 1800.0       # 首次熔断窗口：30 分钟
-BREAKER_COOLDOWN_MAX = 21600.0  # 逐次翻倍，最高 6 小时
-# 上面那个「连续」必须有时间含义：fails 只在成功时归零，相隔很久的失败会凑成
-# 「连续 3 次」，把本来正常的账号关掉，而且次数越高关得越久。两次失败间隔超过
-# 这个窗口就重新从 1 数起。可用 WB_FAIL_WINDOW 覆盖，设 0 关闭衰减（按累计次数
-# 计）。
+BREAKER_THRESHOLD = 3
+BREAKER_COOLDOWN = 1800.0
+BREAKER_COOLDOWN_MAX = 21600.0
+# 「连续」必须有时间含义：fails 只在成功时归零，相隔很久的失败会凑成「连续 3 次」、
+# 误关正常账号。两次失败间隔超过这个窗口就重新从 1 数起；WB_FAIL_WINDOW 可覆盖，
+# 设 0 关闭衰减（按累计次数计）。
 try:
     FAIL_WINDOW = max(0.0, float(os.environ.get("WB_FAIL_WINDOW") or 600.0))
 except (TypeError, ValueError):
     FAIL_WINDOW = 600.0
-DEGRADE_THRESHOLD = 5           # 连续未知失败到几次触发降级
-DEGRADE_COOLDOWN = 600.0        # 首次降级窗口：10 分钟
-DEGRADE_COOLDOWN_MAX = 7200.0   # 逐次翻倍，最高 2 小时
+DEGRADE_THRESHOLD = 5
+DEGRADE_COOLDOWN = 600.0
+DEGRADE_COOLDOWN_MAX = 7200.0
 
 
 def _exponential_backoff(count, base, cap, offset):
-    """base * 2 ** (count - offset)，封顶 cap，指数最多取 20 步。"""
     step = max(0, int(count) - int(offset))
     return min(float(base) * (2 ** min(step, 20)), float(cap))
 
 
 def soft_backoff(streak):
-    """`streak` 次连续账号级软限流对应的冷却秒数。"""
     return _exponential_backoff(streak, SOFT_RATE_BASE, SOFT_RATE_MAX, 1)
 
 
 def unverified_soft_backoff(streak):
-    """`streak` 次无范围软限流（单个模型）的冷却秒数。
-
-    次数增加仍然升级，但从 60 秒起步，最高只到凭据阶梯的第一档（600 秒），
-    见 SOFT_RATE_UNVERIFIED_MAX。
+    """`streak` 次无范围软限流（单个模型）的冷却秒数：从 60 秒起步，最高只到凭据
+    阶梯的第一档（600 秒，SOFT_RATE_UNVERIFIED_MAX）。
     """
     return _exponential_backoff(streak, SOFT_RATE_UNVERIFIED_BASE,
                                 SOFT_RATE_UNVERIFIED_MAX, 1)
 
 
 def breaker_backoff(fails):
-    """`fails` 次连续硬失败对应的熔断冷却秒数。"""
     return _exponential_backoff(fails, BREAKER_COOLDOWN, BREAKER_COOLDOWN_MAX,
                                 BREAKER_THRESHOLD)
 
 
 def degrade_backoff(fails):
-    """`fails` 次连续未知失败对应的降级窗口秒数。"""
     return _exponential_backoff(fails, DEGRADE_COOLDOWN, DEGRADE_COOLDOWN_MAX,
                                 DEGRADE_THRESHOLD)
 
 def _access_token_value(raw):
-    """取出可用的 access token；形状不对就地抛错。
-
-    桌面端会把令牌存成加密信封（$wbEncrypted），也有把整段 JSON 当字符串塞进来
-    的文件，这些都不是网关能用的 JWT；导入、扫描与导入行校验共用这一处判断。
+    """取出可用的 access token，形状不对就地抛错：桌面端会把令牌存成加密信封
+    （$wbEncrypted）或整段 JSON 字符串，都不是网关能用的 JWT。导入、扫描与导入行
+    校验共用这一判断。
     """
     if isinstance(raw, dict) or "$wbEncrypted" in str(raw or ""):
         raise ValueError("access token is encrypted ($wbEncrypted) - "
@@ -543,9 +494,8 @@ LOAD_WINDOW_SECONDS = 3600
 #: 账号备注的最长字数，面板与导入行共用同一个上限。
 MAX_ACCOUNT_NOTE = 100
 
-#: 套餐周期时刻的布局与时区，取上游同款：腾讯下发的是不带时区标记的 UTC+8 墙钟
-#: 字符串，按本机时区解析会在非 UTC+8 的机器上整体错开数小时，且界面上看不出来；
-#: 上游用 time.ParseInLocation(layout, s, UTC+8)，这里等价。
+#: 套餐周期时刻取上游同款布局与时区：腾讯下发不带时区标记的 UTC+8 墙钟字符串，
+#: 按本机时区解析会在非 UTC+8 的机器上整体错开数小时（界面上看不出来）。
 PACKAGE_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 PACKAGE_TIME_TZ = timezone(timedelta(hours=8))
 #: 令牌剩余寿命低于这个值（秒）就认为需要刷新，ready() 与 refresh() 用同一个阈值。
@@ -553,7 +503,6 @@ TOKEN_REFRESH_MARGIN = 120
 
 
 def _normalise_priority(value):
-    """把存储的优先级夹回合法范围；无法解析时取默认值。"""
     if isinstance(value, bool):
         return DEFAULT_ACCOUNT_PRIORITY
     try:
@@ -564,17 +513,15 @@ def _normalise_priority(value):
 
 
 def _stored_note(value):
-    """凭证文件与导入行里的备注：不是字符串当作没有，超长按上限截断。"""
     if not isinstance(value, str):
         return ""
     return value.strip()[:MAX_ACCOUNT_NOTE]
 
 
 def parse_package_time(value):
-    """套餐周期时刻（epoch 秒），用于 CycleStartTime 与 CycleEndTime。
-
-    字段缺失、为空、格式不对都返回 None，不连累整次余额读取；能解析时必须先
-    贴上 UTC+8 再取时间戳，否则同一份响应在不同时区的机器上得出不同时刻。
+    """套餐周期时刻（epoch 秒），用于 CycleStartTime 与 CycleEndTime；字段缺失、
+    为空、格式不对都返回 None，不连累整次余额读取。解析时必须先贴 UTC+8 再取时间戳，
+    否则同一份响应在不同时区的机器上得出不同时刻。
     """
     if not isinstance(value, str):
         return None
@@ -608,16 +555,15 @@ class Account(object):
     def __init__(self, data, path=None):
         data = data or {}
         self.path = path
-        # 这份数据带了哪些字段：AccountPool.add() 用它判断替换账号时哪些面板
-        # 设置该沿用旧值（登录数据里没有那些键）。
+        # 记录数据带了哪些字段：AccountPool.add() 据此判断替换账号时哪些面板设置
+        # 沿用旧值（登录数据里没有那些键）。
         self.payload_keys = frozenset(data.keys())
         # 凭证文件所在目录：发请求时解析可选的 X-Device-Token 用。
         self.accounts_dir = os.path.dirname(path) if path else ""
         token = str(data.get("accessToken") or "")
-        # 静态 API Key 与 OAuth token 是两条鉴权路径：前者不是 JWT，没有
-        # refreshToken / 过期时间 / 个人身份。识别只看 ck_/pt_ 前缀；显式
-        # apiKey 字段用于导入时做一致性校验，标了 apiKey 但 accessToken
-        # 没有 ck_/pt_ 前缀时直接报错。
+        # 静态 API Key 与 OAuth 是两条鉴权路径：前者不是 JWT，没有 refreshToken /
+        # 过期时间 / 个人身份，识别只看 ck_/pt_ 前缀。标了 apiKey 但 accessToken
+        # 没有该前缀时直接报错。
         self.is_api_key = wb_identity.is_api_key_token(token)
         if data.get("apiKey") is True and not self.is_api_key:
             raise ValueError("apiKey is set but accessToken is not a ck_/pt_ key")
@@ -626,8 +572,7 @@ class Account(object):
             derived = wb_identity.api_key_id(token)
             uid = ("apikey-" + derived) if derived else ""
         self.uid = uid or jwt_uid(token)
-        # 国内桌面端的昵称存成加密信封（{"$wbEncrypted": ...}），不是纯字符串
-        # 就丢弃，改显示 uid 前缀。
+        # 国内桌面端的昵称存成加密信封（$wbEncrypted），非纯字符串就丢弃。
         raw_nickname = data.get("nickname")
         if isinstance(raw_nickname, str) and "$wbEncrypted" not in raw_nickname:
             self.nickname = raw_nickname.strip()
@@ -642,10 +587,8 @@ class Account(object):
         if not self.domain:
             self.domain = get_realm_config(self.realm)["domain"]
         self.platform = str(data.get("platform") or "CLI")
-        # 出站身份读回凭证文件里保存的值：面板手动切换与 429 自动切换都会经由
-        # save() 写入（to_dict() 序列化的是当下身份），重启后继续使用上次实际
-        # 生效的通道；普通账号缺失或值不合法时 normalize_product() 回退到
-        # workbuddy，静态 API Key 默认 CLI。
+        # 出站身份读回凭证档（面板切换与 429 自动切换都经 save() 写入），重启后继续
+        # 用上次生效的通道；缺失或非法时回退 workbuddy，静态 Key 默认 CLI。
         self.product = ("cli" if self.is_api_key and not data.get("product")
                         else wb_identity.normalize_product(data.get("product")))
         self.enterprise_id = str(data.get("enterpriseId") or "")
@@ -653,12 +596,11 @@ class Account(object):
         self.refresh_token = str(data.get("refreshToken") or "")
         self.expires_at = (0 if self.is_api_key
                            else normalize_epoch(data.get("expiresAt")) or jwt_exp(token))
-        # 令牌签发时刻：面板的有效期进度按「到期 - 签发」取满格；凭证文件里没有
-        # 这个字段时从令牌自身读，读不到就留 0。
+        # 面板的有效期进度按「到期 - 签发」取满格；凭证里没有就从令牌读，读不到留 0。
         self.issued_at = (0 if self.is_api_key
                           else normalize_epoch(data.get("issuedAt") or jwt_iat(token)))
-        # 企业账号登录时切到企业空间，企业 id 只写在 token 里，凭据文件的
-        # enterpriseId 往往是空的。不回填会让每个请求都带上 X-No-Enterprise-Id: 1。
+        # 企业 id 只写在 token 里，凭据文件的 enterpriseId 常为空；不回填会让每个
+        # 请求带上 X-No-Enterprise-Id: 1。
         if not self.enterprise_id and not self.is_api_key:
             self.enterprise_id = self.jwt_enterprise_id(token)
         self.added_at = data.get("addedAt") or time.time()
@@ -672,18 +614,15 @@ class Account(object):
                                                         self.product))
         self.proxy_slot = str(data.get("proxySlot") or "").strip()
         self.proxy_legacy = str(data.get("proxy") or "").strip()
-        # 运行期解析值，由 AccountPool.apply_proxy_slots() 重新计算。
         self.proxy = self.proxy_legacy
         self.enabled = data.get("enabled", True)
-        # 调用优先级：数字最小的先被选中，数字相同保持原轮询顺序；默认 100，
-        # 没调过的账号池保持默认行为。会话粘性优先于优先级。
+        # 数字最小的先被选中，相同保持轮询顺序；默认 100。会话粘性优先于优先级。
         self.priority = _normalise_priority(data.get("priority"))
-        # 面板备注：跟着凭证文件走，重新登录与桌面端导入不会带上它，
-        # AccountPool.add() 因此把它列进 KEEP_ON_REPLACE_FIELDS。
+        # 面板备注随凭证文件走，重新登录与桌面端导入不会带上它，AccountPool.add()
+        # 因此把它列进 KEEP_ON_REPLACE_FIELDS。
         self.note = _stored_note(data.get("note"))
-        # 单账号单模型的并发上限：0 表示不限。计数在内存里，重启即清空。
+        # 单账号单模型的并发上限，0 表示不限；计数在内存里，重启即清空。
         self.concurrency_limit = _stored_concurrency_limit(data.get("concurrencyLimit"))
-        # 手动调度权重（面板按账号设置，1 = 不干预）。随凭证文件持久化。
         try:
             self.weight = max(1, min(MAX_ACCOUNT_WEIGHT, int(data.get("weight") or 1)))
         except (TypeError, ValueError):
@@ -695,26 +634,19 @@ class Account(object):
         self.last_error = ""
         self.last_error_detail = ""
         self.cooldown_until = 0.0
-        # 按模型分别节流。上游限流（code 6004「usage exceeds frequency limit」）
-        # 只针对一个账号的单个模型，其他模型照常可用。只冷却出问题的模型：
-        # 连坐整个账号的话，单个被限流的模型会拖死账号的全部请求。刻意只存
-        # 运行期（不持久化）：见 VOLATILE_FIELDS。
+        # 按模型分别节流（code 6004 只限单账号单模型）：只冷却出问题的模型，不连坐
+        # 整个账号。刻意只存运行期（不持久化）：见 VOLATILE_FIELDS。
         self.model_cooldowns = {}
-        # 每个模型冷却窗口是**什么时候挂上的**（model -> epoch）。model_cooldowns
-        # 只留恢复时刻，起始时刻以前被丢掉：面板因此无法如实说「限流时刻」，只能
-        # 用「—」占位，把 60s 的短时 parking 和几小时的 6004 撞线画成一样。与
-        # model_cooldowns 同款运行时态：重启即清零（6004 的撞线时刻另有持久化的
-        # model_caps["at"]）。
+        # 每个模型冷却何时挂上（model -> epoch）：model_cooldowns 只留恢复时刻，面板
+        # 的「限流时刻」只能「—」占位。运行时态，重启清零（6004 撞线时刻另有持久化
+        # 的 model_caps["at"]）。
         self.model_cooldowns_at = {}
-        # 402（欠费）：一直停到下一个本地 04:00，不做短冷却，免得整天反复
-        # 重试一个空账号。与其他节流窗口一样只存运行期；余额刷新看到积分
-        # 恢复会提前解除。
+        # 402（欠费）：停到下一个本地 04:00，不做短冷却免得整天反复重试空账号。只存
+        # 运行期；余额刷新看到积分恢复会提前解除。
         self.balance_until = 0.0
-        # 账号级失败连击，换算见上面的 *_backoff() 辅助函数。都只存运行期，
-        # 与其他节流窗口一样：重启即清空，账号重新从零计数。
+        # 账号级失败连击，换算见 *_backoff()；只存运行期，重启即清空。
         self.soft_streak = 0
-        # 无范围软限流 429 单独计数：两条阶梯各自独立，不互相升级
-        # （见 note_unscoped_rate）。
+        # 无范围软限流 429 单独计数，两条阶梯互不升级（见 note_unscoped_rate）。
         self.unscoped_streak = 0
         self.fails = 0
         self.degrade_count = 0
@@ -725,14 +657,13 @@ class Account(object):
         # 最近一次软限流（429）的时刻：两条软限流阶梯用同一个时间窗。
         self.last_soft_at = 0.0
         self.credits = data.get("credits") or None
-        # 一次余额快照的到期列表：credits 整体替换时失效，避免每次列表接口
-        # 与评分选号都重新遍历、排序套餐。
+        # 一次余额快照的到期列表缓存：credits 整体替换时失效，避免每次列表接口与
+        # 评分选号都重新遍历、排序套餐。
         self._expiry_cache = None
-        # 每日到期目标只随时间缓慢变化：按余额快照与分钟缓存，选号热路径
-        # 不必每次重新遍历到期列表。
+        # 每日到期目标随时间缓慢变化：按余额快照与分钟缓存，选号热路径不重算。
         self._target_cache = None
-        # 评分分配用的运行时数据：最近一小时被选中的时刻与每天消耗的积分
-        # （由 wb_proxy 折叠 usage 日志后推下来），都不写回凭证文件。
+        # 评分用的运行时数据：最近一小时被选中的时刻与每天消耗的积分（wb_proxy 折叠
+        # usage 日志后推下来），都不写回凭证文件。
         self._pick_stamps = collections.deque()
         self._pick_lock = threading.Lock()
         self.credit_rate_per_day = 0.0
@@ -752,8 +683,8 @@ class Account(object):
                 continue
             if at > 0 and reset > 0:
                 self.model_caps[str(mid)] = {"at": at, "reset": reset}
-        # 429 带明确恢复时间的普通限流窗口（非 6004）：model -> {at, until}。
-        # 与 model_caps 分开：cap 表示「额度用满」，这里只是上游给的恢复时刻。
+        # 429 带明确恢复时间的普通限流窗口（非 6004）：model -> {at, until}。与
+        # model_caps 分开：cap 表示「额度用满」，这里只是上游给的恢复时刻。
         self.model_holds = {}
         for mid, entry in (data.get("modelHolds") or {}).items():
             if not isinstance(entry, dict):
@@ -765,13 +696,13 @@ class Account(object):
                 continue
             if at > 0 and until > 0:
                 self.model_holds[str(mid)] = {"at": at, "until": until}
-        # 低余额保护：余额降到这个值时账号停止接单，避免收到上游提醒短信。
-        # 由 AccountPool.apply_reserve_credits() 设置；0 表示关闭。
+        # 低余额保护：余额降到这个值时停止接单，避免收到上游提醒短信。由
+        # AccountPool.apply_reserve_credits() 设置；0 表示关闭。
         self.reserve_credits = 0
         # 临期积分优先：最早到期的积分包进入这个天数时优先派单。0 表示关闭。
         self.expiring_window_days = 0
-        # 每日 Token 限额：今日用量达到设定值时账号停止接单。
-        # daily_tokens_today 在代理折叠用量日志之前保持 None。
+        # 每日 Token 限额：今日用量达到设定值时停止接单。daily_tokens_today 在代理
+        # 折叠用量日志之前保持 None。
         self.daily_token_limit = 0
         self.daily_tokens_today = None
         # 每日积分限额：只限制付费模型，免费模型照常接单。
@@ -787,21 +718,19 @@ class Account(object):
         self._save_lock = threading.Lock()
         # 串行化 fetch_credits()，避免并发查询重复消耗计费调用。
         self._credits_lock = threading.Lock()
-        # 面板会快照这份状态，请求线程同时在更新它。与 _refresh_lock 分开
-        # 持锁：那把锁横跨网络请求。
+        # 面板会快照这份状态，请求线程同时在更新它。与 _refresh_lock 分开持锁：那把
+        # 锁横跨网络请求。
         self._throttle_lock = threading.Lock()
         # 在途请求计数：键是模型名；独立锁，面板读计数时不挡请求线程。
         self._concurrency_lock = threading.Lock()
         self._in_flight = {}
-        # 删除标记：面板删掉账号后，请求线程手里的旧引用还会走到 save()，
-        # 没有它就会把刚删掉的凭证文件重新写出来。
+        # 删除标记：面板删掉账号后，请求线程手里的旧引用还会走到 save()，没有它会把
+        # 刚删掉的凭证文件重新写出来。
         self.deleted = False
 
     def to_dict(self):
-        """账号的完整视图，含运行期状态。
-
-        导出文档以它为基础，因此带上运行期错误与冷却供检查。本地凭证文件
-        不能带这些：save() 写盘前剥掉 RUNTIME_ONLY_FIELDS。
+        """完整视图含运行期状态：导出文档以它为基础，带上错误与冷却供检查；本地凭证
+        文件不能带这些，save() 写盘前剥掉 RUNTIME_ONLY_FIELDS。
         """
         return {
             "uid": self.uid,
@@ -869,9 +798,8 @@ class Account(object):
     def credit_expiries(self):
         """套餐到期列表 [{at, amount, name}]，按到期时间升序。
 
-        只收余额大于 0 且解析出到期时刻的套餐，余额为 0 的套餐列出来只会让人
-        误以为还有额度。列表按余额快照缓存：积分刷新会整体替换 credits 对象，
-        缓存自然失效；调用方只读，不要原地修改返回的列表。
+        只收余额大于 0 且解析出到期时刻的套餐。列表按余额快照缓存，credits 整体替换
+        时失效；调用方只读，不要原地修改返回的列表。
         """
         source = self.credits
         cached = self._expiry_cache
@@ -884,8 +812,8 @@ class Account(object):
             for pack in packages:
                 if not isinstance(pack, dict):
                     continue
-                # 免费包与体验包的抵扣截止远在数年后，企业额度的周期结束是
-                # 重置额度，两者都不该进入“快到期”的排序与评分。
+                # 不过期的包不进到期排序（见 EXPIRY_SENTINEL_DAYS 与
+                # soonest_expiring_days）。
                 if pack.get("no_expiry") or pack.get("package_code") == "enterprise":
                     continue
                 at = pack.get("expireAt")
@@ -901,7 +829,6 @@ class Account(object):
         return rows
 
     def mark_pick(self, now=None):
-        """记录一次被选中；只保留最近一小时。"""
         now = time.time() if now is None else now
         with self._pick_lock:
             stamps = self._pick_stamps
@@ -910,7 +837,6 @@ class Account(object):
                 stamps.popleft()
 
     def recent_load(self, now=None):
-        """最近一小时被选中的次数。"""
         now = time.time() if now is None else now
         with self._pick_lock:
             stamps = self._pick_stamps
@@ -919,10 +845,8 @@ class Account(object):
             return len(stamps)
 
     def credit_target_per_day(self, now=None):
-        """到期前每天至少要消耗掉的积分；还没查过余额时返回 None。
-
-        对每个到期时刻，把在它之前到期的余额加总后除以离它的天数，取最大值；
-        已过期的套餐不计入；查过余额但没有未到期的套餐时返回 0。
+        """到期前每天至少要消耗掉的积分；还没查过余额时返回 None，查过余额但没有
+        未到期的套餐时返回 0。已过期的套餐不计入。
         """
         credits = self.credits if isinstance(self.credits, dict) else {}
         if not isinstance(credits.get("packages"), list):
@@ -980,8 +904,8 @@ class Account(object):
             "unscopedStreak": int(self.unscoped_streak),
             "breakerFor": round(max(0.0, self.breaker_until - now)) or None,
             "degradeFor": round(max(0.0, self.degrade_until - now)) or None,
-            # 连续失败计数（离熔断还差几次）与最近一次失败的时间：面板用它解释
-            # 「为什么这个账号被关了」，也是「一键测试」判定成功/失败的依据。
+            # 连续失败计数与最近失败时间：面板用它解释「为什么这个账号被关了」，
+            # 也是一键测试判定成功/失败的依据。
             "fails": int(self.fails),
             "failWindow": int(FAIL_WINDOW),
             "lastFailFor": (round(max(0.0, now - self.last_fail_at)) if self.last_fail_at else None),
@@ -1038,8 +962,8 @@ class Account(object):
             tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
             try:
                 payload = self.to_dict()
-                # 运行期错误与冷却状态不进凭证文件；写进去的话，早已恢复的
-                # 429 标记会在每次重启后复活（见 RUNTIME_ONLY_FIELDS）。
+                # 运行期错误与冷却状态不进凭证文件（见 RUNTIME_ONLY_FIELDS）：写进去
+                # 会让早已恢复的 429 标记在每次重启后复活。
                 for field in RUNTIME_ONLY_FIELDS:
                     payload.pop(field, None)
                 with open(tmp, "w", encoding="utf-8") as fh:
@@ -1055,7 +979,6 @@ class Account(object):
         return path
 
     def persist(self):
-        """把账号写回磁盘；凭据文件还没落盘或目录已消失时跳过。"""
         if self.path and os.path.exists(os.path.dirname(self.path)):
             self.save(os.path.dirname(self.path))
 
@@ -1066,9 +989,8 @@ class Account(object):
                 os.remove(self.path)
 
     def reserve_blocked(self):
-        """低余额保护应当让这个账号闲置时返回 True。
-
-        只有已知的余额才会拦截；从未查过余额的账号照常可用。
+        """低余额保护应当闲置这个账号时返回 True；只有已知的余额才会拦截，从未查过
+        余额的账号照常可用。
         """
         reserve = int(self.reserve_credits or 0)
         if reserve <= 0:
@@ -1086,15 +1008,10 @@ class Account(object):
         return remain <= reserve
 
     def soonest_expiring_days(self):
-        """最早到期且仍有余额的积分包还剩多少天到期。
-
-        说不清时返回 None：没有余额数据、没有可用余额的包，或上游从未给出
-        截止时间。
-
-        上游不会真正过期的包要跳过。企业额度到期时重置额度，余额不作废；
-        免费包与体验包的抵扣截止远在数年后。两者在生成处都标了 no_expiry，
-        把它们当成到期会让这类账号永远显示「即将到期」：免费包甚至每到月底
-        都告急，它的计费周期在滚动，积分却一直可用。
+        """最早到期且仍有余额的积分包还剩多少天；说不清时返回 None（没有余额数据、
+        没有可用余额的包，或上游从未给出截止时间）。上游不会真正过期的包要跳过：
+        企业额度到期时重置额度，免费包/体验包的抵扣截止远在数年后，当成到期会让
+        这类账号永远显示「即将到期」。
         """
         credits = self.credits
         if not isinstance(credits, dict):
@@ -1122,11 +1039,8 @@ class Account(object):
         return soonest
 
     def _expiring_rows(self, within_days, now=None):
-        """窗口内到期的 (距今天数, 剩余额度)，按天数升序。
-
-        与 soonest_expiring_days() 同一套过滤：认抵扣截止时间，跳过企业额度、
-        no_expiry 与已经过期的包。优先用 expireAt（秒），旧快照只有 days_left
-        时退回它。
+        """窗口内到期的 (距今天数, 剩余额度)，按天数升序；过滤与 soonest_expiring_days()
+        同一套。优先用 expireAt（秒），旧快照只有 days_left 时退回它。
         """
         try:
             window = float(within_days or 0)
@@ -1164,10 +1078,9 @@ class Account(object):
         return rows
 
     def expiring_rate_per_day(self, within_days, now=None):
-        """窗口内的临期积分每天至少要消耗掉多少。
-
-        对每个到期时刻，把在它之前到期的余额加总后除以离它的天数，取最大值。
-        余额分几笔到期时按各自的梯度累计，不会把六天后才到期的大包压到明天。
+        """窗口内的临期积分每天至少要消耗掉多少：对每个到期时刻，把它之前到期的
+        余额加总除以天数取最大。余额分几笔到期时按各自梯度累计，不会把六天后才
+        到期的大包压到明天。
         """
         best = 0.0
         cumulative = 0.0
@@ -1177,10 +1090,8 @@ class Account(object):
         return best
 
     def in_expiring_window(self):
-        """临期积分优先时这个账号应当插队派单。
-
-        余额未知或缺失一律不做偏好：网关判不了的账号保持普通轮转次序，
-        不做臆测插队。
+        """临期积分优先时应当插队派单；余额未知或缺失一律不做偏好，保持普通轮转
+        次序，不做臆测插队。
         """
         try:
             window = int(self.expiring_window_days or 0)
@@ -1192,9 +1103,8 @@ class Account(object):
         return soonest is not None and soonest <= window
 
     def daily_limit_blocked(self):
-        """今日已统计的用量达到设定限额时返回 True。
-
-        只有统计过的用量才会拦截：代理折叠用量日志之前计数是 None。
+        """今日已统计的用量达到设定限额时返回 True；只有统计过的用量才会拦截，
+        代理折叠用量日志之前计数是 None。
         """
         try:
             limit = int(self.daily_token_limit or 0)
@@ -1211,14 +1121,11 @@ class Account(object):
             return False
 
     def model_is_free(self, model):
-        """当前区域的免费模型目录里有 `model` 时返回 True。"""
         return bool(model) and model in (self.free_models or ())
 
     def credit_limit_reached(self):
-        """今日已统计的积分消耗达到每日限额时返回 True。
-
-        这是账号级事实，与请求哪个模型无关：ready() 把它与 model_is_free()
-        组合，免费模型照常服务；面板把它显示为限额守卫的状态。
+        """今日已统计的积分消耗达到每日限额时返回 True。这是账号级事实，与请求哪个
+        模型无关：ready() 把它与 model_is_free() 组合，免费模型照常服务。
         """
         try:
             limit = int(self.daily_credit_limit or 0)
@@ -1235,24 +1142,18 @@ class Account(object):
             return False
 
     def credit_limit_blocked(self, model=None):
-        """积分限额守卫应当把这个账号挡在 `model` 之外时返回 True。
-
-        达到限额后免费模型照常可用，这正是守卫的目的。没有模型可判
-        （model 为 None）时这里不拦截：调用方无从知道这次请求是否会消耗积分。
+        """积分限额守卫应当把这个账号挡在 `model` 之外时返回 True。达到限额后免费
+        模型照常可用；model 为 None 时不拦截：调用方无从知道这次请求是否会消耗积分。
         """
         if not model or self.model_is_free(model):
             return False
         return self.credit_limit_reached()
 
     def note_model_cap(self, model, reset_at, now=None):
-        """记下「这个模型的窗口额度被上游判定用满」（429 / code 6004）。
+        """记下「这个模型的窗口额度被上游判定用满」（429 / code 6004）；返回是否新记。
 
-        持久化：6004 带的重置时刻是上游给的事实，跨重启仍然成立——否则重启后
-        要等到下一次撞线才重新发现，而那个组合本来就在恢复时间内。返回是否新记
-        （重复撞同一个窗口不算新，避免每次都重写凭证档）。
-
-        不按模型范围和计费方式过滤：付费模型同样会收到 6004，上游给了恢复
-        时刻就该跨重启生效。
+        6004 带的重置时刻是上游给的事实，跨重启仍然成立，所以持久化；重复撞同一个
+        窗口不算新，不重写凭证档。不按模型范围与计费方式过滤：付费模型同样收 6004。
         """
         if not model or not reset_at:
             return False
@@ -1264,22 +1165,19 @@ class Account(object):
         with self._throttle_lock:
             old = self.model_caps.get(model)
             if old is not None and float(old.get("reset") or 0) == reset:
-                # 同一个窗口的重复撞线：不用重写凭证档，但冷却要重新挂上——
-                # 中间可能被换身份之类的清理顺手清掉过；挂不回来，这个窗口
-                # 就一直不会被禁用。
+                # 同一个窗口的重复撞线：不重写凭证档，但冷却要重新挂上——中间可能
+                # 被换身份之类的清理顺手清掉过。
                 if self.model_cooldowns.get(model, 0.0) < reset:
                     self.model_cooldowns[model] = reset
                 return False
             self.model_caps[model] = {"at": now, "reset": reset}
-            # 恢复时间之前这个模型接不了单：挂上模型冷却，分派与账号行因此
-            # 立刻反映（重启后由 restore_model_caps() 重新挂）。
+            # 挂上模型冷却，分派与账号行立刻反映（重启后由 restore_model_caps() 重新挂）。
             self.model_cooldowns[model] = max(self.model_cooldowns.get(model, 0.0), reset)
             # 撞线时刻就是这次禁用的起点：面板的 startedAt 与 cappedAt 同一瞬间。
             self.model_cooldowns_at[model] = now
         return True
 
     def cap_until(self, model, now=None):
-        """这个模型处于「上游判定额度用满」状态的截止时刻；不在其中返回 0。"""
         entry = self.model_caps.get(model)
         if not isinstance(entry, dict):
             return 0.0
@@ -1291,16 +1189,15 @@ class Account(object):
         return reset if reset > now else 0.0
 
     def capped_model_names(self, now=None):
-        """此刻仍在恢复时间内的模型（上游判定额度用满）。"""
         now = time.time() if now is None else now
         return sorted(mid for mid in self.model_caps
                       if self.cap_until(mid, now) > 0)
 
     def note_model_hold(self, model, until, now=None):
-        """记下一次带明确恢复时间的普通 429 窗口（非 6004）。
+        """记下一次带明确恢复时间的普通 429 窗口（非 6004）；返回是否新记。
 
-        与 6004 一样持久化：恢复时刻是上游给的事实，重启后仍然成立。返回是否
-        新记；已有更晚的恢复时刻时只补冷却，不重写凭证档。
+        与 6004 一样持久化（恢复时刻是上游给的事实，重启后仍成立）；已有更晚的
+        恢复时刻时只补冷却，不重写凭证档。
         """
         if not model or not until:
             return False
@@ -1324,7 +1221,6 @@ class Account(object):
         return True
 
     def hold_until(self, model, now=None):
-        """这个模型处于普通 429 恢复窗口的截止时刻；不在其中返回 0。"""
         entry = self.model_holds.get(model)
         if not isinstance(entry, dict):
             return 0.0
@@ -1336,10 +1232,8 @@ class Account(object):
         return until if until > now else 0.0
 
     def restore_model_caps(self, now=None):
-        """重启后把仍在恢复时间内的 6004 重新挂成模型冷却。
-
-        6004 的恢复时间跨重启有效，而模型冷却是纯内存的——不挂回来的话，重启
-        会让这些组合重新接单，直到下一次撞 429 才又停。
+        """重启后把仍在恢复时间内的 6004 重新挂成模型冷却：恢复时间跨重启有效而
+        模型冷却是纯内存的，不挂回来这些组合会重新接单，直到下次撞 429 才又停。
         """
         now = time.time() if now is None else now
         restored = []
@@ -1357,7 +1251,6 @@ class Account(object):
         return sorted(restored)
 
     def restore_model_holds(self, now=None):
-        """重启后把仍在恢复时间内的普通 429 窗口挂回模型冷却。"""
         now = time.time() if now is None else now
         restored = []
         with self._throttle_lock:
@@ -1375,9 +1268,8 @@ class Account(object):
         return sorted(restored)
 
     def model_token_limit_blocked(self, model=None):
-        """`model` 今天的 Token 额度已经用完时返回 True。
-
-        只拒绝这一个模型，账号的其他模型照常工作；没有统计的模型不拦截。
+        """`model` 今天的 Token 额度用完时返回 True；只拒绝这一个模型，其他模型照常
+        工作，没有统计的模型不拦截。
         """
         try:
             limit = int(self.model_daily_token_limit or 0)
@@ -1397,10 +1289,8 @@ class Account(object):
             return False
 
     def blocked_model_names(self):
-        """当前额度用完的模型集合。
-
-        AccountPool.apply_model_daily_token_limit() 用它只记录状态真正变化
-        的模型，避免每次刷新都给每个模型写一行日志。
+        """当前额度用完的模型集合；apply_model_daily_token_limit() 用它只记录状态
+        真正变化的模型，避免每次刷新都给每个模型写一行日志。
         """
         per = self.model_daily_tokens
         if not isinstance(per, dict):
@@ -1412,33 +1302,28 @@ class Account(object):
         return out
 
     def unavailable_reason(self, model=None):
-        """这个账号此刻为什么接不了单；可用时返回空字符串。
-
-        `ready()` 是个布尔判断：池子被抽干的时候它只能说「不行」，说不清有几个
-        账号、各自卡在哪一条。判定顺序与 ready() 保持一致，所以报出来的原因就是
-        它拒绝的原因（唯一不覆盖的是临期凭证那条：它会真的发起刷新，诊断路径上
-        不该顺带打上游）。
+        """这个账号此刻为什么接不了单；可用时返回空字符串。判定顺序与 ready() 一致，
+        报出的原因就是它拒绝的原因（唯一不覆盖临期凭证那条：它会真的发起刷新，
+        诊断路径上不该顺带打上游）。
         """
         if not self.enabled:
             return "已停用"
         if not self.access_token:
             return "无凭证"
-        # 与 ready() 同序：人工黑名单排在所有「暂时不可用」之前，所以
-        # 「所有账号都禁用了这个模型」时，池子抽干的报错里会逐个号写明原因。
+        # 与 ready() 同序：人工黑名单排在所有「暂时不可用」之前，池子抽干的报错里
+        # 会逐个号写明原因。
         if self.model_disabled(model):
             return "该模型已被人工禁用"
         now = time.time()
-        # 四种惩罚的到期时间各走各的，谁把时间推得最远就报谁：只报「冷却」
-        # 会让人往 429 的方向查，而实际可能是上游连续断连触发的熔断（30 分钟
-        # 起，与账号本身无关），或者余额保护这类完全不同的原因。
+        # 四种惩罚谁把时间推得最远就报谁：只报「冷却」会让人往 429 的方向查，实际
+        # 可能是断连触发的熔断（30 分钟起，与账号无关）或余额保护这类原因。
         penalties = [("熔断", self.breaker_until), ("降权", self.degrade_until),
                      ("余额保护", self.balance_until), ("软限流冷却", self.cooldown_until)]
         if model:
             penalties.append(("模型 %s 冷却" % model, self.model_cooldowns.get(model, 0.0)))
         label, until = max(penalties, key=lambda item: item[1])
         if until > now:
-            # 剩余时间要精确到秒：还剩 42 秒时写「0 min」，读起来就是
-            # 「已经该能用了却还被挡着」。连续次数一并带上，才看得出是在
+            # 剩余时间精确到秒（见 _human_left）；连续次数一并带上，看得出是在
             # 升级还是刚开始。
             streak = ""
             if label == "软限流冷却" and self.soft_streak > 1:
@@ -1460,11 +1345,8 @@ class Account(object):
         return ""
 
     def model_disabled(self, model):
-        """这个账号被人工禁用了该模型？空名单恒为 False。
-
-        与自动节流区分：`model_cooldowns` / `model_caps` 表达「暂时不该用」，
-        这里是用户明确指定的「这个号就别碰这几个模型」。精确匹配（名单在
-        加载时已按小写归一），不做前缀匹配。
+        """这个账号被人工禁用了该模型？空名单恒为 False。与自动节流区分：这里是用户
+        明确指定的禁用。精确匹配（名单加载时已按小写归一），不做前缀匹配。
         """
         if not model or not self.disabled_models:
             return False
@@ -1474,8 +1356,8 @@ class Account(object):
         """不需要刷新凭证就能判断的接单条件：启用、有凭证、不在冷却与各项限额内。"""
         if not self.enabled or not self.access_token:
             return False
-        # 人工黑名单排在最前：它是静态配置（最便宜），而且在语义上优先于所有
-        # 「暂时不可用」的判断 —— 被禁用的模型不该因为账号恰好恢复了就漏进来。
+        # 人工黑名单排在最前：静态配置，语义上优先于所有「暂时不可用」——被禁用的
+        # 模型不该因为账号恰好恢复了就漏进来。
         if self.model_disabled(model):
             return False
         if self.throttle_wait(model=model) > 0:
@@ -1486,11 +1368,9 @@ class Account(object):
         # 今天的 Token 预算用完：把名额留给明天，免得余下时间都收到上游的 429。
         if self.daily_limit_blocked():
             return False
-        # 当日积分消耗达到上限：付费模型停用，免费模型照常服务
-        # （见 credit_limit_blocked）。
+        # 当日积分消耗达到上限：付费模型停用，免费模型照常服务（见 credit_limit_blocked）。
         if self.credit_limit_blocked(model):
             return False
-        # 单个模型额度用完不连累整个账号：这里只拒绝这一个模型。
         if self.model_token_limit_blocked(model):
             return False
         return True
@@ -1512,21 +1392,12 @@ class Account(object):
         return wb_identity.auth_headers(self.access_token, self.is_api_key)
 
     def headers(self, purpose="chat", model=""):
-        """组出这一轮的出站标头。
+        """组出这一轮的出站标头：chat 用途走 wb_identity，billing 用途维持轻量标头；
+        model 非空时带 X-Model-ID。
 
-        chat 用途走 wb_identity（CLI 头 / WorkBuddy 头，可切换）；
-        billing 用途维持原本的轻量标头，计费端点不使用那套身份。
-
-        model 非空时带上 X-Model-ID，与官方客户端发往该端点的模型 id 一致。
-
-        chat 标头按桌面端对话请求整理：官方对话请求不带 X-Session-ID（该头只
-        用于反馈上报），所以这里也不发，避免每个账号恒定的派生值成为一处
-        「网关特征」。
-
-        billing 标头带 X-Session-ID，按账号派生：网关是一个进程冒充几十台设备，
-        一旦取进程级的值，全部账号就会共用同一个 session id，那是一条把它们
-        串起来的关联键（与每账号一台设备的隔离口径相悖）。见
-        wb_fingerprint.session_id。
+        官方对话请求不带 X-Session-ID（只用于反馈上报），chat 也不发，避免恒定派生
+        值成为网关特征；billing 带按账号派生的 X-Session-ID，一个进程冒充几十台设备，
+        不能让全部账号共用同一关联键（见 wb_fingerprint.session_id）。
         """
         cfg = get_realm_config(self.realm)
 
@@ -1570,9 +1441,8 @@ class Account(object):
             tenant_id=self.enterprise_id,
             domain=chat_domain,
         )
-        # 桌面 CLI 只发身份标头与 JSON 请求体：Origin / Referer /
-        # X-Requested-With / x-codebuddy-request 是面板 XHR 调用的标头，
-        # 出现在模型请求上会成为网关特征。
+        # 桌面 CLI 只发身份标头与 JSON 请求体：Origin / Referer / X-Requested-With /
+        # x-codebuddy-request 是面板 XHR 的标头，出现在模型请求上会成为网关特征。
         headers = dict(identity)
         if model:
             headers["X-Model-ID"] = str(model)
@@ -1589,9 +1459,8 @@ class Account(object):
         return resolve_device_token(directory)
 
     def sync_nickname(self):
-        """手动刷新网页控制台昵称。
-
-        只由面板/API 的显式操作调用，余额调度器从不调用；新昵称立即持久化。
+        """手动刷新网页控制台昵称：只由面板/API 的显式操作调用，余额调度器从不调用；
+        新昵称立即持久化。
         """
         if self.is_api_key:
             return self.nickname
@@ -1606,24 +1475,20 @@ class Account(object):
         return nickname
 
     def set_product(self, value):
-        """切换出站身份（cli <-> workbuddy）。返回 True 表示真的换了。
-
-        身份会写回凭证档，重启后仍然有效。save() 需要目录参数。
+        """切换出站身份（cli <-> workbuddy），返回 True 表示真的换了。身份写回凭证档，
+        重启后仍然有效。
         """
         new = wb_identity.normalize_product(value)
         if new == self.product:
             return False
         self.product = new
         try:
-            # 清的是限流状态；上游判定额度用满的禁用（仍在恢复期内的
-            # model_caps）跨身份成立，不能被这次切换顺手清掉。
             self.clear_error(keep_caps=True)
         except Exception:
             pass
         return True
 
     def chat_base_url(self):
-        """这个账号当前身份应当请求的端点。"""
         return wb_identity.endpoint_for(self.realm, self.product)[0]
 
     def can_refresh(self):
@@ -1731,10 +1596,8 @@ class Account(object):
         }
 
     def daily_chat_model(self):
-        """每日活跃跑在哪个模型上。
-
-        设置页配置了就用设置页的，否则用内置免费模型 id。桌面腿与网页腿都读
-        它，改一处就整体生效。
+        """每日活跃跑在哪个模型上：设置页配置优先，否则用内置免费模型 id；桌面腿与
+        网页腿都读它。
         """
         candidates = []
         if self.path:
@@ -1756,18 +1619,12 @@ class Account(object):
         return candidates[0]
 
     def daily_chat_web(self, prompt=None, trigger="unknown"):
-        """网页通道的每日活跃会话。
-
-        只建会话不算有效对话：agent 要等客户端接上沙箱并请求这一轮才会跑，否则
-        会话停在 CREATING、没有任何输出。按网页端的顺序走完：建会话 → 取沙箱
-        link+token → ACP 的 initialize / session/load / session/prompt（见
-        wb_webagent）→ 轮询到 completed。
+        """网页通道的每日活跃会话：建会话 → 取沙箱 link+token → ACP → 轮询到
+        completed。
 
         返回 {"ok": True, "conversation": id, "status": "completed", "chunks": n,
-        "elapsed_ms": n}，失败时 {"ok": False, "error": ...}（尽量带上会话 id）。
-
-        trigger 只用于活动历史的来源标注；trigger=None 表示这一步算在外层尝试
-        里、不单独记一行 —— daily_chat() 内部就是这么调的。
+        "elapsed_ms": n}，失败 {"ok": False, "error": ...}（尽量带会话 id）。trigger
+        只用于活动历史的来源标注；trigger=None 表示这一步算在外层尝试里、不单独记一行。
         """
         if self.realm != "intl":
             return {"ok": False, "error": "web daily chat is only for international accounts"}
@@ -1776,15 +1633,11 @@ class Account(object):
         return res
 
     def _daily_chat_web_upstream(self, prompt=None):
-        """网页通道的实际流程；返回形状见 daily_chat_web。
+        """网页通道的实际流程；返回形状见 daily_chat_web，另带 attempts（实际轮数）。
 
-        失败会再试（见 daily_chat_web_policy）：一共最多 attempts 次（含第一轮），
-        第 N 轮的等待是首轮的 2^(N-1) 倍 —— 默认 3 次、首轮 120 秒，也就是
-        120 / 240 / 480。最典型的失败是「会话还没跑完」（状态=working），它往往
-        只是慢，多等一轮就好，所以这里把等待时间当成重试的代价，不再额外 sleep。
-        业务拒绝（建会话返回非 0 code）不再试：同一个被拒的请求再发一次也一样被拒。
-
-        返回里带 attempts（实际跑了几轮），其余字段与 _daily_chat_web_once 一致。
+        失败会再试（见 daily_chat_web_policy）：第 N 轮的等待是首轮的 2^(N-1) 倍
+        （默认 3 次、首轮 120 秒，即 120/240/480），等待即重试的代价、不再额外
+        sleep。业务拒绝（建会话返回非 0 code）不再试。
         """
         base, total = self.daily_chat_web_policy()
         attempt = 0
@@ -1796,12 +1649,9 @@ class Account(object):
             attempt += 1
 
     def daily_chat_web_policy(self):
-        """(首轮等待秒数, 总尝试次数)。设置页改过就按设置页的来。
-
-        重试开关默认开（见 wb_settings.daily_chat_web_retry），关掉就是只试一次。
-        等待时间没设过时用 WEB_TURN_TIMEOUT —— 它吃 WB_WEB_TURN_TIMEOUT 环境变量，
-        别让这个新设置项把它悄悄顶掉。没配 settings 的账号（单测里手工构造的）
-        同样按内置默认走。
+        """(首轮等待秒数, 总尝试次数)，设置页优先；重试开关默认开，关掉即只试一次。
+        等待时间没设过时用 WEB_TURN_TIMEOUT（吃 WB_WEB_TURN_TIMEOUT 环境变量），
+        别让这个新设置项把它悄悄顶掉。
         """
         if not self.path:
             return WEB_TURN_TIMEOUT, WEB_TURN_ATTEMPTS
@@ -1814,10 +1664,8 @@ class Account(object):
                 total)
 
     def _daily_chat_web_once(self, prompt=None, wait_seconds=None):
-        """网页通道的一轮尝试；返回形状见 daily_chat_web。
-
-        结果里的 retryable 说明这一轮的失败值不值得再试一次（重试策略见
-        _daily_chat_web_upstream）。
+        """网页通道的一轮尝试；返回形状见 daily_chat_web。结果里的 retryable 说明
+        这一轮的失败值不值得再试（重试策略见 _daily_chat_web_upstream）。
         """
         if wait_seconds is None:
             wait_seconds = WEB_TURN_TIMEOUT
@@ -1853,7 +1701,7 @@ class Account(object):
                     % (payload.get("code"), payload.get("msg")),
                     "retryable": False}
 
-        # 建完只是排队：接上沙箱、请求这一轮，它才会真的跑起来。
+        # 建完只是排队，接上沙箱请求这一轮才会跑（见模块头部说明）。
         try:
             session = (self._web_conversation_get(conversation, "/session") or {}).get("data") or {}
         except Exception as exc:
@@ -1898,15 +1746,11 @@ class Account(object):
         return str((data or {}).get("status") or "")
 
     def daily_chat(self, web=None, trigger="unknown"):
-        """国际版每日活跃对话（官方每日活跃 30/50 积分）。
+        """国际版每日活跃对话（官方每日活跃 30/50 积分）：桌面端身份的轻量对话 +
+        网页通道会话。web=None 时按 settings.json 的 daily_chat_web 决定。
 
-        两步：桌面端身份的轻量对话，以及网页通道的会话（算数的是「跑完的 agent
-        会话」）。web=None 时按 settings.json 里的 daily_chat_web 决定，True/False
-        可显式指定。
-
-        trigger 只用于活动历史的来源标注；整次尝试记一行，网页通道那一步的结果
-        并进同一行的说明里，不再多记一行。ok 以真正计入积分的网页腿为准：网页腿
-        开着且失败时整次算失败（桌面腿跑过也不算数）。
+        trigger 只用于活动历史的来源标注，整次尝试记一行。ok 以真正计入积分的
+        网页腿为准：网页腿开着且失败时整次算失败（桌面腿跑过也不算数）。
         """
         if self.realm != "intl":
             return {"ok": False, "error": "daily chat is only for international accounts"}
@@ -1958,17 +1802,15 @@ class Account(object):
                                         res.get("chunks") or 0, res.get("elapsed_ms") or 0))
                 else:
                     # 桌面腿成功不等于当天打卡完成：计入官方「每日活跃」的只有网页腿
-                    # （#75/#59/#90）。面板与活动历史按 ok 画成功/失败，网页腿失败却
-                    # 报成功的话，「今天这 30/50 积分没到账」在界面上一直看不见。
+                    # （#75/#59/#90）。ok 抬成成功的话，「今天这 30/50 积分没到账」在界面上看不见。
                     tries = res.get("attempts") or 1
                     suffix = "（已重试 %d 次）" % (tries - 1) if tries > 1 else ""
                     result["ok"] = False
                     result["error"] = "网页通道失败：%s%s" % (res.get("error"), suffix)
                     result["msg"] = "每日活跃对话未完成（网页通道失败：%s%s）" % (
                         res.get("error"), suffix)
-            # 只有真正计入官方「每日活跃」的网页通道成功了才算今天做过：网页腿失败时
-            # 若照写 lastDailyChat，当天后续巡检会直接跳过该账号，那天的 30/50 积分静默
-            # 丢掉且不再重试。web=False（没开网页通道）时维持原语义：桌面腿成功即算完成。
+            # 只有网页通道成功才记 lastDailyChat：网页腿失败若照写，当天后续巡检会跳过
+            # 该账号，30/50 积分静默丢掉且不再重试。web=False 时桌面腿成功即算完成。
             if web_ok:
                 self.last_daily_chat = time.strftime("%Y-%m-%d %H:%M:%S")
                 self.persist()
@@ -1983,10 +1825,8 @@ class Account(object):
             return {"ok": False, "error": str(exc)}
 
     def checkin(self, trigger="unknown"):
-        """国内版每日签到。
-
-        trigger 只用于活动历史的来源标注（scheduler / manual / account_add /
-        account_import）；记录写失败不会改变签到结果。
+        """国内版每日签到。trigger 只用于活动历史的来源标注；记录写失败不会改变
+        签到结果。
         """
         if self.realm != "cn":
             return {"ok": False, "error": "checkin is only available for CN realm accounts"}
@@ -2010,8 +1850,8 @@ class Account(object):
             code = payload.get("code", -1)
             msg = payload.get("msg") or "ok"
             ok = code in (0, 10001)
-            # 只有真的签到成功才记时存盘：失败响应（风控、服务端报错）写进
-            # last_checkin 会让这个账号今天再也不会重试。
+            # 只有真的签到成功才记时存盘：失败响应（风控、服务端报错）写进 last_checkin
+            # 会让这个账号今天再也不会重试。
             if ok:
                 self.last_checkin = time.strftime("%Y-%m-%d %H:%M:%S")
                 self.persist()
@@ -2057,7 +1897,6 @@ class Account(object):
         elif size > 0 and remain <= 0 and used < size:
             remain = max(0.0, size - used)
 
-        # 提取发放原因（如“官方活动发放”、“拉新奖励”等）
         grant_reason = ""
         for attr in (acc.get("AccountAttributes") or []):
             if isinstance(attr, dict) and attr.get("Key") == "grantReason":
@@ -2076,9 +1915,8 @@ class Account(object):
                 create_time = str(raw_create)
 
         end_time_str = acc.get("CycleEndTime") or acc.get("ExpiredTime") or ""
-        # 到期认「抵扣截止时间」。「周期结束时间」只是计费周期的边界，积分
-        # 未必跟着作废；免费包/体验版这两个字段能差 8 年，只认 CycleEndTime
-        # 会让这类账号每到月底都被误判成「即将到期」。
+        # 到期认「抵扣截止时间」（见 deduction_end_text）：只认 CycleEndTime 会把免费包/
+        # 体验版每到月底误判成「即将到期」。
         expire_time_str = deduction_end_text(acc) or end_time_str
         days_left = None
         is_expired = False
@@ -2129,10 +1967,8 @@ class Account(object):
 
     def _build_credits(self, packages, totals, is_paid_user, checkin):
         """按统一形状写入 self.credits 并落盘；返回 fetch_credits 的成功形状。
-
-        totals 为 (remain, used, size)。额度包就地排序，使用中优先、未过期
-        按到期时间升序、已过期排最后，再挑出最近到期且仍有余额的一包做到期
-        提示。
+        totals 为 (remain, used, size)。额度包就地排序：使用中优先、未过期按到期
+        时间升序、已过期排最后，再挑出最近到期且仍有余额的一包做到期提示。
         """
         def _pkg_sort_key(p):
             in_use_score = 0 if p.get("in_usage") else 1
@@ -2180,7 +2016,6 @@ class Account(object):
         headers["X-Client-Platform"] = "web"
         base_billing = cfg["billing_upstream"]
 
-        # 1. 套餐概览
         summary_url = base_billing + RESOURCE_SUMMARY_PATH
         s_res = http_json(summary_url, data=b"{}", method="POST", headers=headers,
                           timeout=15, proxy=self.proxy)
@@ -2190,7 +2025,6 @@ class Account(object):
         summary_pkgs = s_data.get("Packages") or []
         pkg_codes = [p.get("PackageCode") for p in summary_pkgs if p.get("PackageCode")]
 
-        # 2. 免费包
         free_accs = []
         if pkg_codes:
             free_url = base_billing + RESOURCE_FREE_PACKAGES_PATH
@@ -2202,7 +2036,6 @@ class Account(object):
             except Exception:
                 pass
 
-        # 3. 付费包
         paid_accs = []
         if pkg_codes:
             paid_url = base_billing + RESOURCE_PAID_PACKAGES_PATH
@@ -2214,7 +2047,6 @@ class Account(object):
             except Exception:
                 pass
 
-        # 4. 每日签到状态
         checkin_info = None
         try:
             checkin_url = cfg.get("chat_upstream", "https://www.workbuddy.cn") + CHECKIN_STATUS_PATH
@@ -2294,18 +2126,12 @@ class Account(object):
             if isinstance(getattr(self, "credits", None), dict) else None)
 
     def jwt_enterprise_id(self, token=None):
-        """企业空间 id，取自 token 自身（或已存的 accessToken）。
-
-        企业账号是登录时切到企业空间换来的 token（token_source=enterprise_switch），
-        账号文件里的 enterpriseId 常常是空的——只有 token 里有。拿不到就返回 ""。
-        """
+        """企业空间 id，取自 token 自身（或已存的 accessToken）；拿不到返回 ""。"""
         return str(_jwt_claims(token or self.access_token).get("enterprise_id") or "")
 
     def is_enterprise(self):
-        """这个账号属于企业（团队）空间时返回 True。
-
-        企业成员没有个人资源包，个人计费端点总是返回 TotalCount=0，面板显示
-        0/0。他们的额度在 /billing/meter/get-enterprise-user-usage 上。
+        """企业成员没有个人资源包，个人计费端点总是返回 TotalCount=0；他们的额度在
+        /billing/meter/get-enterprise-user-usage 上。
         """
         return bool(self.enterprise_id or self.jwt_enterprise_id())
 
@@ -2319,11 +2145,9 @@ class Account(object):
         return bool(self.is_enterprise() or self.is_api_key)
 
     def probe_api_key(self, timeout=15, apply_credits=False):
-        """用企业额度端点验证一次静态 Key。
-
-        静态 Key 没有本地可校验的签名字段，唯一可靠的验证是请求一次上游；
-        添加账号前先验证再保存，避免无效账号进入账号池后被反复选中、反复冷却。
-        apply_credits 为真时把同一份响应直接写成余额快照，添加流程不再重复请求。
+        """用企业额度端点验证一次静态 Key：静态 Key 没有本地可校验的签名字段，唯一
+        可靠的验证是请求一次上游；添加账号前先验证再保存，避免无效账号进池后被反复
+        选中、反复冷却。apply_credits 为真时把同一份响应直接写成余额快照。
         """
         if not self.is_api_key:
             return {"ok": False, "error": "not an API key"}
@@ -2355,10 +2179,8 @@ class Account(object):
                 "cycle_end": data.get("cycleEndTime"), "credits": credits}
 
     def _enterprise_credits(self, data, strict=False):
-        """企业额度响应 -> 面板积分快照。
-
-        strict 用于添加账号前探测：缺字段或字段不是数字直接拒绝，避免空 data
-        因 code=0 通过校验，把无效 Key 写进账号池。
+        """企业额度响应 -> 面板积分快照。strict 用于添加账号前探测：缺字段或字段
+        不是数字直接拒绝，避免空 data 因 code=0 通过校验、把无效 Key 写进账号池。
         """
         if strict:
             if not isinstance(data, dict):
@@ -2377,7 +2199,7 @@ class Account(object):
             size = round(float(data.get("limitNum") or 0), 2)
         except (TypeError, ValueError):
             size = 0.0
-        # 上游只给额度与已用；已用超过额度（或额度缺失）时不要算出负余额。
+        # 上游只给额度与已用；已用超过额度（或额度缺失）时不算负余额。
         remain = round(max(0.0, size - used), 2) if size > 0 else 0.0
         cycle_start = str(data.get("cycleStartTime") or "")
         cycle_end = str(data.get("cycleEndTime") or data.get("cycleResetTime") or "")
@@ -2420,11 +2242,9 @@ class Account(object):
         }
 
     def _fetch_credits_enterprise(self):
-        """企业账号积分：周期内已用 + 周期额度，剩余 = 额度 - 已用。
-
-        上游只返回 4 个字段：credit（本周期已消耗）、limitNum（周期额度）、
-        cycleStartTime / cycleEndTime。没有包列表，所以合成一个包条目，让看板的
-        明细弹窗与到期提示照常工作。
+        """企业账号积分：剩余 = 周期额度 - 周期内已用。上游只返回 4 个字段（credit、
+        limitNum、cycleStartTime / cycleEndTime），没有包列表，所以合成一个包条目，
+        让看板的明细弹窗与到期提示照常工作。
         """
         cfg = get_realm_config(self.realm)
         path = (ENTERPRISE_USAGE_PATH_V2 if self.is_api_key
@@ -2443,10 +2263,9 @@ class Account(object):
         return {"ok": True, "credits": self.credits}
 
     def fetch_credits(self):
-        """刷新余额；余额恢复时还会提前解除 402 停机（revive_balance_cooldown）。
-
-        按账号串行：后台刷新线程与签到/每日活跃任务都走到这里，没有锁的话
-        两个重叠调用各花一次上游计费请求，后返回的答复还会覆盖先写入的余额。
+        """刷新余额；余额恢复时还会提前解除 402 停机（revive_balance_cooldown）。按
+        账号串行（_credits_lock）：后台刷新线程与签到/每日活跃都走到这里，没有锁的话
+        两个重叠调用各花一次计费请求，后返回的答复还会覆盖先写入的余额。
         """
         with self._credits_lock:
             before = _credits_remain(self.credits)
@@ -2485,7 +2304,6 @@ class Account(object):
         return self._fetch_credits_fallback()
 
     def _set_last_error(self, message):
-        """把刷新错误记进面板展示的状态里。"""
         with self._throttle_lock:
             self.last_error = str(message)[:200]
             self.last_error_detail = ""
@@ -2494,28 +2312,23 @@ class Account(object):
                    detail=None):
         with self._throttle_lock:
             self.last_error = str(message)[:200]
-            # 可见标签维持原有截断；detail 带上未改动的上游原文，面板可在
-            # 悬停时展示。
+            # 可见标签维持原有截断；detail 带未改动的上游原文，面板悬停展示。
             self.last_error_detail = str(detail)[:2000] if detail else ""
             if model:
-                # 模型级限流：账号对其他模型照常可用。
                 wait = max(1.0, float(until) - time.time()) if until else (
                     3.0 if single_account else float(cooldown))
                 now = time.time()
                 self.model_cooldowns[model] = now + wait
-                # 起始时刻：面板要如实说「限流时刻 + 恢复时间」，而恢复时刻减不出
-                # 起始时刻（wait 来自 60s→10m 的阶梯，不持久化）。记这一次就够了。
+                # 恢复时刻减不出起始时刻（wait 来自 60s→10m 的阶梯，不持久化），
+                # 面板的「限流时刻」只能记这一次。
                 self.model_cooldowns_at[model] = now
                 return
             actual_cooldown = 3 if single_account else cooldown
             self.cooldown_until = time.time() + actual_cooldown
 
     def note_balance_cooled(self, message="insufficient credits"):
-        """402（欠费）：停到下一个本地 04:00。
-
-        短冷却几分钟后又会把这个空账号发出去，请求照样失败；积分要到每日
-        重置才回来，所以停到那时。余额刷新看到积分恢复可提前解除，见
-        revive_balance_cooldown()。
+        """402（欠费）：停到下一个本地 04:00（短冷却几分钟后又会把空账号发出去）。
+        余额刷新看到积分恢复可提前解除，见 revive_balance_cooldown()。
         """
         until = next_local_4am()
         with self._throttle_lock:
@@ -2524,9 +2337,8 @@ class Account(object):
         return until
 
     def revive_balance_cooldown(self):
-        """余额刷新看到积分恢复时，只解除 402 停机。
-
-        限流与模型冷却原样保留，通用清理走 clear_error()。
+        """余额刷新看到积分恢复时，只解除 402 停机；限流与模型冷却原样保留，通用
+        清理走 clear_error()。
         """
         if not self.balance_until:
             return False
@@ -2554,11 +2366,9 @@ class Account(object):
         return wait
 
     def _decay_soft_streak(self):
-        """软限流阶梯也要有时间窗（调用方已持有 _throttle_lock）。
-
-        阶梯若只加不减、只有成功才归零：昨天被限过 3 次，今天第一个 429 就
-        从 2400s 起步，直到 7200s 封顶，账号早已恢复正常也会被按几十分钟到
-        两小时。窗口内才算连续，隔得久就回到第一档（600s / 60s）。
+        """软限流阶梯也要有时间窗（调用方已持有 _throttle_lock）：阶梯只加不减的话，
+        昨天被限过的账号今天第一个 429 就从 2400s 起步、最高 7200s。窗口内才算
+        连续，隔得久就回到第一档（600s / 60s）。
         """
         now = time.time()
         if FAIL_WINDOW and self.last_soft_at and now - self.last_soft_at > FAIL_WINDOW:
@@ -2567,12 +2377,9 @@ class Account(object):
         self.last_soft_at = now
 
     def note_unscoped_rate(self, model):
-        """无范围软限流 429：走自己的连击计数，返回这个模型的窗口。
-
-        计数与 soft_streak 刻意分开。共用一个计数会让两条阶梯互相喂档：
-        四次无范围 429 会把接下来真正的凭据级限流直接顶到 7200s 上限，而
-        凭据连击也会让下一个无范围窗口起步变高。两种范围各有计数，一次
-        成功请求通过 note_success() 同时清零。
+        """无范围软限流 429：走自己的连击计数，返回这个模型的窗口。计数与
+        soft_streak 刻意分开，共用会让两条阶梯互相喂档（四次无范围 429 就把接下来
+        的凭据级限流顶到 7200s 上限）；一次成功请求同时清零。
         """
         with self._throttle_lock:
             self._decay_soft_streak()
@@ -2591,9 +2398,8 @@ class Account(object):
         return self.breaker_until
 
     def _decay_strikes(self):
-        """两次失败隔得太久就不再算「连续」，从头计数。
-
-        调用方必须已持有 _throttle_lock。窗口设 0 时保持旧的累计语义。
+        """两次失败隔得太久就不再算「连续」，从头计数。调用方必须已持有
+        _throttle_lock；窗口设 0 时保持旧的累计语义。
         """
         now = time.time()
         if FAIL_WINDOW and self.last_fail_at and now - self.last_fail_at > FAIL_WINDOW:
@@ -2648,11 +2454,9 @@ self.balance_until - now, self.breaker_until - now, self.degrade_until - now)
         return wait
 
     def clear_error(self, model=None, keep_caps=False):
-        """清掉限流状态；keep_caps 保留上游给了恢复时刻的禁用。
-
-        换身份/重试要清的是限流窗口，而 6004 的额度用满和普通 429 的恢复
-        时刻都是上游给的事实（时刻之前这个组合就是不可用），不能顺手清掉：
-        auto-switch 开着时清掉它，账号在撞线之后立刻又可用，禁用形同不存在。
+        """清掉限流状态；keep_caps 保留上游给了恢复时刻的禁用（6004 额度用满与
+        普通 429 的恢复时刻是上游给的事实，不能顺手清掉：auto-switch 开着时清掉它，
+        禁用形同不存在）。
         """
         with self._throttle_lock:
             if model:
@@ -2726,9 +2530,7 @@ def _claim(account, model, claim):
 
 
 def normalise_concurrency_limit(value):
-    """返回（限额、错误）：单账号并发上限的校验结果。
-
-    上限按「账号 + 模型」统计在途请求；0 表示不限。
+    """返回（限额、错误）。上限按「账号 + 模型」统计在途请求；0 表示不限。
     """
     if isinstance(value, bool) or value is None or (
             isinstance(value, float) and not value.is_integer()):
@@ -2749,7 +2551,6 @@ def _stored_concurrency_limit(value):
 
 
 def parse_account_priority(value):
-    """校验 /accounts/set 的 priority；返回 (priority, error)。"""
     if isinstance(value, bool) or not isinstance(value, int):
         return None, "priority must be a whole number between 0 and 9999"
     if not 0 <= value <= MAX_ACCOUNT_PRIORITY:
@@ -2758,9 +2559,8 @@ def parse_account_priority(value):
 
 
 def parse_account_set(payload):
-    """校验 /accounts/set 的请求体；返回 (changes, error)。
-
-    先整体校验再应用字段，靠后的非法字段才不会让靠前的字段先落盘。
+    """校验 /accounts/set 的请求体；返回 (changes, error)。先整体校验再应用字段，
+    靠后的非法字段才不会让靠前的字段先落盘。
     """
     changes = {}
     if "proxySlot" in payload:
@@ -2809,29 +2609,23 @@ def _human_delta(seconds):
     return "%d min" % int(seconds / 60)
 
 # ---------------------------------------------------------------------------
-# 积分变动流水
-#
-# 余额读取成功、而合计比上一次已知值增加时追加一行 JSONL：签到、每日活跃、
-# 旅行、套餐到账都会体现在这里。基线就是凭证文件里的 credits，因此重启后接着
-# 比对；首次读取只建立基线。写入目录由 wb_proxy 注入，wb_accounts 不认识
-# USAGE_DIR。
+# 积分变动流水：余额读取成功且合计比上一次已知值增加时追加一行 JSONL（签到、
+# 每日活跃、旅行、套餐到账都体现在这里）。基线是凭证文件里的 credits，重启后
+# 接着比对，首次读取只建立基线。写入目录由 wb_proxy 注入。
 # ---------------------------------------------------------------------------
 #: 返回积分流水文件路径的回调；未注入时一次也不记录。
 CREDIT_EVENTS_PROVIDER = None
 
 
 def set_credit_events_provider(provider):
-    """注入「积分流水写到哪个文件」的来源，传 None 表示不记录。
-
-    注入回调：--usage-dir 可以在启动时改变 USAGE_DIR，每次重新求值才能一直
-    指向真正在用的目录。
+    """注入「积分流水写到哪个文件」的来源，传 None 表示不记录。--usage-dir 可以在
+    启动时改变 USAGE_DIR，回调每次重新求值才能一直指向真正在用的目录。
     """
     global CREDIT_EVENTS_PROVIDER
     CREDIT_EVENTS_PROVIDER = provider
 
 
 def credit_events_file():
-    """积分流水当前的写入路径，没有注入来源时为空串。"""
     provider = CREDIT_EVENTS_PROVIDER
     return str(provider() or "") if provider else ""
 
@@ -2852,10 +2646,9 @@ _CREDIT_EVENTS_LOCK = threading.Lock()
 
 
 def record_credit_event(account, before, after):
-    """余额增加时追加一条积分流水，返回这条记录；没有记录时为 None。
-
-    before 为 None 表示还没有基线，只建立基线不记流水；写入失败直接抛出，
-    流水缺行比一次余额读取失败更难发现。
+    """余额增加时追加一条积分流水，返回这条记录；没有记录时为 None。before 为 None
+    表示还没有基线，只建立基线不记流水；写入失败直接抛出，流水缺行比一次余额读取
+    失败更难发现。
     """
     if before is None or after is None or after <= before:
         return None
@@ -2898,11 +2691,9 @@ def record_credit_event(account, before, after):
     return row
 
 def _human_left(seconds):
-    """还剩多久，精确到秒（对外解释「为什么现在不能用」时用）。
-
-    `_human_delta` 是给凭据有效期那种以天计的场景用的，小于一分钟一律写
-    「0 min」；而冷却/熔断的剩余时间经常就是几十秒，写成 0 分钟会让人以为
-    账号已经可用、网关还在挡它。
+    """还剩多久，精确到秒。`_human_delta` 给以天计的凭据有效期用（小于一分钟写
+    「0 min」），而冷却/熔断的剩余时间常是几十秒，写 0 分钟会让人以为账号已经可用、
+    网关还在挡它。
     """
     secs = max(0, int(round(seconds)))
     if secs < 60:
@@ -2917,15 +2708,11 @@ def _human_left(seconds):
     return "%.1f days" % (secs / 86400.0)
 
 class SessionAffinity(object):
-    """记录某个会话由哪个上游账号服务，下一轮可以回到同一个账号。
+    """记录会话由哪个上游账号服务，下一轮回到同一账号。
 
-    每个会话保留一个最近使用的账号列表。队首是 `get()` 返回的账号，即上一轮的去
-    向；其后是更早服务过该会话的账号，越近越靠前。队首不可用（冷却、停用、禁用）
-    时，下一次选号优先挑这个会话已经在上游热过的账号，不挑冷账号，提示词缓存因此
-    随迁移保留。每个条目各自到期，久未回访的账号自己掉出列表。
-
-    历史长度故意很小（`history` 为 3）：它记录的是可能仍持有该会话前缀的账号，
-    不是负载均衡手段。
+    队首是 get() 返回的账号（上一轮的去向），其后按远近排列、各自到期。队首不可用时
+    优先挑本会话已热过的账号，提示词缓存随迁移保留。history 刻意小（3）：它记录的是
+    可能仍持有该会话前缀的账号，不是负载均衡手段。
     """
 
     def __init__(self, ttl=7200, max_entries=5000, history=3):
@@ -2971,11 +2758,9 @@ class SessionAffinity(object):
             entries.insert(0, (uid, now + self.ttl))
             self.bindings[key] = entries[:self.history]
     def demote(self, key, uid=None):
-        """从会话里丢掉一个账号，其余保留。
-
-        失败路径用它替代 unbind：刚失败的账号（429 / 402 / 401 / 5xx /
-        断连）不能接下一次尝试，排在它前面的账号可能还持有这个会话的前缀，
-        下次选号应先试它们，再退到冷账号。默认丢队首；传 `uid` 丢指定账号。
+        """从会话里丢掉一个账号，其余保留。失败路径用它替代 unbind：刚失败的账号不能
+        接下一次尝试，排在它前面的账号可能还持有会话前缀，下次选号先试它们。默认丢
+        队首；传 `uid` 丢指定账号。
         """
         if not key: return
         with self._lock:
@@ -2996,9 +2781,8 @@ class SessionAffinity(object):
         with self._lock:
             return len(self.bindings)
 
-#: 会话归属的打点：面板据此判断「一段对话换了账号」这类缓存损失发生了多少次。
-#: bound_hit = 绑定命中且该账号接单；bound_lost = 有绑定但那个账号不能接单；
-#: fresh_binding = 会话键第一次出现；no_key = 客户端没给会话标识；
+#: 会话归属的打点：bound_hit = 绑定命中且该账号接单；bound_lost = 有绑定但那个
+#: 账号不能接单；fresh_binding = 会话键第一次出现；no_key = 客户端没给会话标识；
 #: smart_pick / cursor_pick 记录两种选号方式各被用过多少次。
 ROUTING_COUNTERS = ("bound_hit", "bound_lost", "fresh_binding", "no_key",
                     "smart_pick", "cursor_pick")
@@ -3010,7 +2794,7 @@ REMAINING_URGENCY_STEP = 0.05
 
 #: 面板可改、而登录与桌面端导入数据里通常不带的字段（payload 键 -> 属性名）。
 #: AccountPool.add() 替换同 uid 账号时，只有新数据确实写了这个键才覆盖，否则继承
-#: 旧值：一次重新登录不该抹掉用户设置的优先级或出站身份。
+#: 旧值：一次重新登录不该抹掉用户设置。
 KEEP_ON_REPLACE_FIELDS = (
     ("product", "product"),
     ("loginProduct", "login_product"),
@@ -3028,11 +2812,9 @@ KEEP_ON_REPLACE_FIELDS = (
 
 
 def _realm_limit(values, realm):
-    """某个守卫值按账号区域取值。
-
-    `values` 是 wb_settings.limit_values() 给的映射：
-    {"global": g, "intl": ..., "cn": ...}。区域为空或无法识别时退回 global
-    默认值，区域判不出来的账号仍受全局数字约束。
+    """某个守卫值按账号区域取值。`values` 是 wb_settings.limit_values() 给的映射
+    （{"global": g, "intl": ..., "cn": ...}）；区域为空或无法识别时退回 global 默认值，
+    区域判不出来的账号仍受全局数字约束。
     """
     if isinstance(values, dict):
         value = values.get(realm)
@@ -3047,17 +2829,12 @@ def _realm_limit(values, realm):
 
 
 class CreditsRefresher(threading.Thread):
-    """在请求路径之外保持账号余额新鲜。
+    """在请求路径之外保持账号余额新鲜（派发偏好读 account.credits）。
 
-    派发偏好读 `account.credits`；没有这个线程时只有登录与每日活跃任务会刷新它，
-    重启只能继承磁盘上的旧余额。每 tick 只刷新最陈旧且已过 TTL 的一个账号，上游
-    计费调用因此有界（每 tick 一次），在账号间平摊、陆续发出。刷新失败的账号
-    停用六小时，坏凭据不会每个 tick 重试。
-
-    请求量由 tick 决定，与池子大小无关：默认半小时一个 tick，一天最多 48 次计费
-    调用。TTL 为 12 小时时 28 个账号一天要 56 次，比 tick 能给的多，所以实际刷新
-    间隔会略高于 TTL。这是有意的取舍：派发偏好以天计，几小时的偏差比省下的调用
-    划算。
+    每 tick 只刷新最陈旧且已过 TTL 的一个账号，计费调用有界（每 tick 一次）；刷新
+    失败的账号停用六小时。请求量由 tick 决定、与池子大小无关：默认半小时一 tick、
+    一天最多 48 次；TTL 12 小时时 28 个账号一天要 56 次，所以实际刷新间隔会略高于
+    TTL——这是有意的取舍：派发偏好以天计，几小时的偏差比省下的调用划算。
     """
 
     def __init__(self, pool, interval_seconds=1800):
@@ -3071,7 +2848,7 @@ class CreditsRefresher(threading.Thread):
         self._stop_event = threading.Event()
         self._wake = threading.Event()
         self._lock = threading.Lock()
-        self._parked = {}          # uid -> 暂停到哪个时刻
+        self._parked = {}
         self._failed_cooldown = 6 * 3600.0
 
     def log(self, msg):
@@ -3100,10 +2877,8 @@ class CreditsRefresher(threading.Thread):
             return 0.0
 
     def stalest_account(self, ttl_seconds, now=None):
-        """余额最陈旧且已过 TTL 的账号；没有则返回 None。
-
-        从未查过余额算无限陈旧，新装的环境先补齐全部账号，之后才回头刷新
-        超时的。
+        """余额最陈旧且已过 TTL 的账号，没有则返回 None。从未查过余额算无限陈旧，
+        新装的环境先补齐全部账号，之后才回头刷新超时的。
         """
         now = time.time() if now is None else now
         with self.pool._lock:
@@ -3186,17 +2961,15 @@ class AccountPool(object):
         self.logins = {}
         self._lock = threading.RLock()
         self._cursor = 0
-        # 临期积分窗口的平滑加权轮询状态，按 uid 记（见 _weighted_pick）。
-        # 只存运行期：重启就重新开始轮转。
+        # 临期积分窗口的平滑加权轮询状态，按 uid 记（见 _weighted_pick）；只存运行期。
         self._expiry_weights = {}
-        # 剩余用量：wb_proxy 每请求推来的 {(uid, model): 权重}（只有它读得到
-        # 剩余估算）。空表表示没有组合接近估计限额。智能分配把它折进评分。
+        # 剩余用量：wb_proxy 每请求推来的 {(uid, model): 权重}（只有它读得到剩余
+        # 估算）。空表表示没有组合接近估计限额，智能分配把它折进评分。
         self._remaining_weights = {}
-        # 手动权重优先（面板按账号设置，weight > 1 才生效）的平滑加权轮询
-        # 累计值，键是 uid：与临期偏好的轮次分开。派生值，不落盘。
+        # 手动权重（weight > 1 才生效）的平滑加权轮询累计值，与临期偏好的轮次分开。
         self._manual_weights = {}
-        # 页内轮转（超限对话）的每页游标，键是 (页号, 页大小)；整池轮转仍用
-        # _cursor，两条轮转互不挪动对方的位置。派生值，不落盘。
+        # 页内轮转（超限对话）的每页游标，键是 (页号, 页大小)；整池轮转仍用 _cursor，
+        # 两条轮转互不挪动对方的位置。
         self._page_cursors = {}
         # uid 排序表的缓存：池成员没变就直接复用，变了重建（见 _page_ranks）。
         self._page_order_cache = None
@@ -3224,9 +2997,6 @@ class AccountPool(object):
                     self.accounts.append(account)
             self.apply_reserve_credits()
             self.apply_expiring_window()
-            # 6004 的恢复时间跨重启有效：把还在恢复时间内的组合重新挂成模型
-            # 冷却，否则重启会把它们重新放出去，直到下次撞 429 才又停。普通
-            # 429 带恢复时间的窗口同样挂回。
             self.restore_model_caps()
             self.restore_model_holds()
             return self.accounts
@@ -3278,8 +3048,8 @@ class AccountPool(object):
             if existing is not None:
                 account.added_at = existing.added_at
                 account.path = existing.path
-                # 新数据里没写这个键、或写了个 null：沿用旧值。登录数据本来就没有
-                # 这些字段，显式 null 也不该把面板上的设置清掉。
+                # 新数据里没写这个键、或写的是 null：沿用旧值。登录数据本来就没有
+                # 这些字段，显式 null 也不该清掉面板设置。
                 for key, attr in KEEP_ON_REPLACE_FIELDS:
                     if key in account.payload_keys and getattr(account, attr) is not None:
                         continue
@@ -3302,9 +3072,8 @@ class AccountPool(object):
             return True
 
     def preview_import_rows(self, rows, realm=None, overwrite=False):
-        """报告 import_rows() 会做什么，不动账号池。
-
-        与 import_rows() 共用同一套接收/跳过规则，预演与实际导入的结果一致。
+        """报告 import_rows() 会做什么，不动账号池；与 import_rows() 共用同一套
+        接收/跳过规则，预演与实际导入的结果一致。
         """
         preview = {"added": [], "updated": [], "skipped": [], "invalid": []}
         known = {a.uid for a in self.accounts}
@@ -3328,15 +3097,10 @@ class AccountPool(object):
         return preview
 
     def import_rows(self, rows, realm=None, overwrite=False):
-        """从导出或外来行里添加账号。
-
-        返回报告字典：
-            added       —— 池里没有的新 uid
-            updated     —— 原来就存在、被替换的 uid
-            skipped     —— [{"uid","reason"}] 未导入的行
-            invalid     —— [{"index","reason"}] 解析失败的行
-
-        每行解析干净才写入，一条坏行不会中止整个文件的导入。
+        """从导出或外来行里添加账号。返回报告字典：added（池里没有的新 uid）、
+        updated（原来就存在、被替换的 uid）、skipped（[{"uid","reason"}] 未导入的行）、
+        invalid（[{"index","reason"}] 解析失败的行）。每行解析干净才写入，一条坏行
+        不会中止整个文件的导入。
         """
         added, updated, skipped, invalid = [], [], [], []
         seen = set()
@@ -3398,14 +3162,9 @@ class AccountPool(object):
         return account.public()
 
     def set_disabled_models(self, uid, models):
-        """设置该账号**人工**禁用的模型名单，保存并返回公共视图。
-
-        语义：这些模型不再派给这个账号。不影响该账号的其他模型，也不影响其他
-        账号对同一模型的可用性 —— 请求会自动落到池子里别的号上。传空列表 =
-        清空禁用、恢复原行为。
-
-        名单按 normalise_disabled_models 归一；坏输入退化成空列表（= 不禁用），
-        不抛错：面板传进来什么形状都不该让一个账号加载失败。
+        """设置该账号**人工**禁用的模型名单，保存并返回公共视图。这些模型不再派给
+        这个账号，不影响该账号的其他模型，也不影响其他账号；传空列表 = 清空禁用。
+        名单按 normalise_disabled_models 归一，坏输入退化成空列表（不禁用）、不抛错。
         """
         account = self.get(uid)
         if account is None:
@@ -3424,10 +3183,8 @@ class AccountPool(object):
         return account.public()
 
     def apply_proxy_slots(self, slots=None):
-        """按绑定的代理槽重新解析每个账号的运行期 `proxy`。
-
-        `proxy_slot` 是持久化的真值来源；`proxy` 是派生的运行期值，众多出站
-        调用点因此不用改。
+        """按绑定的代理槽重新解析每个账号的运行期 `proxy`。`proxy_slot` 是持久化的
+        真值来源，`proxy` 是派生的运行期值，众多出站调用点因此不用改。
         """
         import wb_settings
 
@@ -3443,12 +3200,9 @@ class AccountPool(object):
                     account.proxy = account.proxy_legacy
 
     def apply_reserve_credits(self, values=None):
-        """为每个账号重新解析低余额守卫。
-
-        形态与 apply_proxy_slots() 相同：settings.json 是真值来源，账号值
-        在这里派生，请求路径不用再查设置。`values` 是按区域解析的守卫值
-        （{"global": g, "intl": ..., "cn": ...}）；每个账号取自己区域的值，
-        区域覆盖只作用于该区域的账号，global 默认值继续覆盖两个区域。
+        """为每个账号重新解析低余额守卫。形态与 apply_proxy_slots() 相同：settings.json
+        是真值来源，账号值在这里派生。`values` 是按区域解析的守卫值（{"global": g,
+        "intl": ..., "cn": ...}），每个账号取自己区域的值。
         """
         import wb_settings
 
@@ -3460,10 +3214,7 @@ class AccountPool(object):
         return values
 
     def apply_expiring_window(self, values=None):
-        """为每个账号重新解析临期积分窗口。
-
-        形态与 apply_reserve_credits() 相同：settings.json 按区域存窗口
-        （默认 global），每个账号取自己那份，请求路径不用再查设置。窗口是
+        """为每个账号重新解析临期积分窗口，形态与 apply_reserve_credits() 相同。窗口是
         派单偏好，不是守卫：它从不把账号变不可用，只决定谁先出池。
         """
         import wb_settings
@@ -3476,12 +3227,9 @@ class AccountPool(object):
         return values
 
     def apply_remaining_weights(self, weights):
-        """换上 wb_proxy 算好的 (账号, 模型) 权重表（剩余用量并入智能分配）。
-
-        数据方向与 apply_daily_* 同款：只有 wb_proxy 读得到剩余估算（折叠、
-        预算与载荷都在那边），池不反向依赖它，只存派生值。None / 空表表示
-        这一刻没有组合接近估计限额（或智能分配关着），上次的权重会被清掉。
-        权重 <= 1 的条目没有偏好意义，直接丢弃。返回存下来的表（测试用）。
+        """换上 wb_proxy 算好的 (账号, 模型) 权重表（剩余用量并入智能分配）。只有
+        wb_proxy 读得到剩余估算，池只存派生值；None / 空表清掉上次的权重。权重 <= 1
+        的条目没有偏好意义，直接丢弃。返回存下来的表（测试用）。
         """
         table = {}
         for pair, weight in (weights or {}).items():
@@ -3497,11 +3245,9 @@ class AccountPool(object):
         return table
 
     def apply_daily_token_limit(self, values=None, usage=None):
-        """为每个账号重新解析每日 Token 守卫。
-
-        形态与 apply_reserve_credits() 相同：settings.json 按区域存限额，
-        `usage`（uid -> 今日已统计 Token）由调用方传入，只有代理读得到用量
-        日志。传 None 保留上次计数，改设置不会把计数变成「未知」。
+        """为每个账号重新解析每日 Token 守卫，形态与 apply_reserve_credits() 相同。
+        `usage`（uid -> 今日已统计 Token）由调用方传入；传 None 保留上次计数，
+        改设置不会把计数变成「未知」。
         """
         import wb_settings
 
@@ -3530,12 +3276,9 @@ class AccountPool(object):
         return values
 
     def apply_daily_credit_limit(self, values=None, credits=None, free_models=None):
-        """为每个账号重新解析每日积分守卫。
-
-        形态与 apply_daily_token_limit() 相同：settings.json 按区域存限额，
-        `credits`（uid -> 今日已消耗）与 `free_models`（区域 -> 免费模型 id）
-        由调用方传入，只有代理读得到用量日志与模型目录。传 None 保留上次
-        数值，改设置不会把它们变成「未知」。
+        """为每个账号重新解析每日积分守卫，形态与 apply_daily_token_limit() 相同。
+        `credits`（uid -> 今日已消耗）与 `free_models`（区域 -> 免费模型 id）由调用方
+        传入，只有代理读得到用量日志与模型目录。传 None 保留上次数值。
         """
         import wb_settings
 
@@ -3568,11 +3311,9 @@ class AccountPool(object):
         return values
 
     def apply_model_daily_token_limit(self, values=None, per_model=None):
-        """为每个账号重新解析「单模型每日 Token」守卫。
-
-        `per_model` 是 uid -> {model: 今日已统计 Token}；None 保留上次计数。
-        单个模型被拦不连累整个账号：ready(model) 只拒绝额度用完的模型，
-        也只记录这些模型的状态变化。
+        """为每个账号重新解析「单模型每日 Token」守卫。`per_model` 是
+        uid -> {model: 今日已统计 Token}，None 保留上次计数。单个模型被拦不连累
+        整个账号：ready(model) 只拒绝额度用完的模型。
         """
         import wb_settings
 
@@ -3653,9 +3394,7 @@ class AccountPool(object):
         self.apply_proxy_slots()
 
     def apply_smart_routing(self, value=None):
-        """重新解析这个池的派单设置。
-
-        形态与其他守卫相同：settings.json 是真值来源，池里只存解析后的
+        """重新解析这个池的派单设置：settings.json 是真值来源，池里只存解析后的
         布尔值；传 None 表示读取当前设置。
         """
         import wb_settings
@@ -3695,9 +3434,8 @@ class AccountPool(object):
         return sum(1 for a in snapshot if a.enabled and a.access_token and a.ready(model=model))
 
     def unavailable_reason(self, uid, realm=None, model=None):
-        """为什么这个账号现在不能接单；可以接单时返回空串。
-
-        测试台可以只用一个账号发请求，拒绝时要说清是这个账号的哪一条限制。
+        """为什么这个账号现在不能接单；可以接单时返回空串。测试台可以只用一个账号
+        发请求，拒绝时要说清是这个账号的哪一条限制。
         """
         account = self.get(uid)
         if account is None:
@@ -3720,11 +3458,9 @@ class AccountPool(object):
 
     def pick_for_session(self, realm=None, session_key=None, exclude=None, model=None,
                          page=None, claim=None):
-        """为对话的一轮挑选账号。
-
-        有绑定的对话沿用上一轮的账号；该账号不可用时，先试这段对话的其他
-        热账号，再走池子的自动偏好。`page` 标记超限对话，在一页内轮转，
-        不做绑定。`claim` 在发出账号前先占好每账号的请求名额。
+        """为对话的一轮挑选账号：有绑定的对话沿用上一轮的账号，不可用时先试本会话的
+        其他热账号，再走池子的自动偏好。`page` 标记超限对话，在一页内轮转、不做绑定；
+        `claim` 在发出账号前先占好每账号的请求名额。
         """
         exclude = exclude or set()
         if session_key and not wb_settings.session_affinity(self.dir):
@@ -3752,8 +3488,7 @@ class AccountPool(object):
         account = self.pick(realm=realm, exclude=exclude, model=model, page=page,
                             claim=claim)
         if account is None and page is not None:
-            # 这一页此刻没有可用账号。从页外找账号服务这段对话，总好过完全
-            # 不服务。
+            # 页内没有可用账号时从页外找：总好过完全不服务。
             account = self.pick(realm=realm, exclude=exclude, model=model, claim=claim)
         # 页内对话刻意不绑定：轮转让这一页的每个账号保持热度，绑定会让它回到
         # 单个账号（正是它被释放出来的状态）。轮转位置由页游标保存。
@@ -3773,9 +3508,8 @@ class AccountPool(object):
             snapshot = self._page_slice(snapshot, page)
         if not snapshot:
             return None
-        # 手动权重优先：面板给账号设了 >1 的权重时，这些账号先于一切自动
-        # 偏好接单，彼此之间按权重平滑加权轮询。它们此刻都不可用（冷却、
-        # 限额、被排除、名额满）时落回下面的自动偏好与轮询。
+        # 手动权重 >1 的账号先于一切自动偏好接单（见 _pick_weighted_first），彼此按
+        # 权重平滑加权轮询；都不可交时落回下面的自动偏好与轮询。
         while True:
             account = self._pick_weighted_first(snapshot, exclude, model)
             if account is None:
@@ -3784,8 +3518,8 @@ class AccountPool(object):
                 account.mark_pick()
                 return account
             exclude.add(account.uid)
-        # 智能调度打开时由积分义务与最近忙闲评分选号；它已经包含了对
-        # 接单能力的判断与名额占用。
+        # 智能调度打开时由 _pick_scored 按积分义务与忙闲评分选号（已含接单能力判断
+        # 与名额占用）。
         if self.smart_routing:
             return self._pick_scored(realm=realm, exclude=exclude, model=model,
                                      claim=claim, snapshot=snapshot)
@@ -3797,19 +3531,14 @@ class AccountPool(object):
                 account.mark_pick()
                 return account
             exclude.add(account.uid)
-        # 智能分配关闭时按优先级与轮询顺序派单：剩余用量偏好已并入智能分配的
-        # 评分，不再作为独立分层。
+        # 智能分配关闭时按优先级与轮询顺序派单；剩余用量偏好已并入智能分配的评分，
+        # 不再作为独立分层。
         return self._rotate_pick(snapshot, exclude, model, cursor_key=page, claim=claim)
 
     def _pick_weighted_first(self, snapshot, exclude, model):
-        """手动权重 > 1 的账号优先接单，或 None（没有可交的）。
-
-        与临期积分那条同款的两层结构，只是这层的权重来自用户在面板上的明确
-        设置，优先级也最高：权重是「我就想让这个号多用」的直接表达，不该被
-        自动偏好覆盖。同层之间按权重平滑加权轮询——两个高权重账号按权重比
-        分流量，它们与权重 1 的账号之间则是「先用完我再轮别人」。权重 1 的
-        账号完全不进这一层：临期积分、剩余用量这些自动子权重照旧在它们身上
-        生效，一行都不变。
+        """手动权重 > 1 的账号优先接单，或 None（没有可交的）。权重是用户在面板上的
+        明确设置，优先级最高、不被自动偏好覆盖；同层之间按权重平滑加权轮询。权重 1
+        的账号完全不进这一层，临期、剩余用量这些自动子权重照旧在它们身上生效。
         """
         ready = []
         for account in snapshot:
@@ -3825,12 +3554,9 @@ class AccountPool(object):
         return self._smooth_weighted_pick(ready, "_manual_weights")
 
     def _pick_expiring_first(self, snapshot, exclude, model):
-        """窗口内的账号先服务；没有可用的返回 None。
-
-        窗口内做加权轮询：积分越临近作废，份额越大，但没有任何账号独占整个
-        窗口。严格按最早到期排序会把每个请求都压到明天到期的那个账号上，直到
-        它被上游限流，这正是要摊开的突发；加权保留偏好，也给晚到期的账号真实
-        份额。同一天到期的账号权重相同，因此继续轮流。
+        """窗口内的账号先服务；没有可用的返回 None。窗口内做加权轮询：积分越临近
+        作废份额越大，但没有账号独占窗口——严格按最早到期排序会把每个请求都压到
+        明天到期的那个账号上，直到它被上游限流。
         """
         urgent = [a for a in snapshot if a.in_expiring_window()]
         if not urgent:
@@ -3841,11 +3567,9 @@ class AccountPool(object):
         return self._weighted_pick(ready)
 
     def _expiry_weight(self, account):
-        """窗口内的账号按「每天要消耗掉的临期积分」分配流量。
-
-        权重等于窗口内各笔到期余额按到期梯度累计出的每日最低消耗：六天后才
-        到期的大包不会压到明天，只按它自己的期限分摊。窗口边缘的账号也仍有
-        一份，不会被饿到余额全过期。
+        """权重等于窗口内各笔到期余额按到期梯度累计出的每日最低消耗：六天后才到期的
+        大包不会压到明天，只按它自己的期限分摊；窗口边缘的账号也仍有一份，不会被
+        饿到余额全过期。
         """
         try:
             window = int(account.expiring_window_days or 0)
@@ -3860,25 +3584,18 @@ class AccountPool(object):
         return max(1, int(round(window - days)) + 1)
 
     def _weighted_pick(self, ready):
-        """临期积分那条的入口：在窗口内的账号之间平滑加权轮询。"""
         return self._smooth_weighted_pick(
             [(account, account.uid, self._expiry_weight(account))
              for account in ready], "_expiry_weights")
 
     def _smooth_weighted_pick(self, entries, state_name):
-        """在 (账号, key, 权重) 三元组上做平滑加权轮询。
-
-        nginx 的算法：每次挑选给每项累加自己的权重，累计值最大的胜出，胜出者付出整轮
-        的权重。权重相同时退化成普通轮转，同权重的项因此依次轮流。
-
-        `key` 是轮转状态的键，`state_name` 是持有该状态的池属性名。
+        """在 (账号, key, 权重) 三元组上做平滑加权轮询（nginx 算法）：每次挑选给每项
+        累加自己的权重，累计值最大的胜出并付出整轮权重，权重相同退化成普通轮转。
 
         状态会裁到本轮实际参与的项：掉出的账号（冷却、被过滤、名额已满）丢掉自己的
-        累计值，之后回来时从零起步，不背着离开前的欠账。
-
-        轮转状态由所有请求线程共用，读改写都在池锁内完成。喂给它的 `ready()` 检查不
-        持锁：那些检查可能访问网络（刷新令牌），为一张将过期的凭据持锁会把该区域的
-        每次派发都串行化。
+        累计值，回来时从零起步。轮转状态由所有请求线程共用，读改写都在池锁内完成；
+        喂进来的 `ready()` 检查不持锁——那些检查可能刷新令牌，持锁会把该区域的
+        派发全部串行化。
         """
         keys = set(key for _account, key, _weight in entries)
         with self._lock:
@@ -3899,14 +3616,10 @@ class AccountPool(object):
         return chosen[0]
 
     def _page_slice(self, snapshot, page):
-        """池子里某一页上的账号。
-
-        一页是固定槽位：账号在本区域账号中的排名（按 uid 排序）对页大小取模。按区域
-        排名（不跨整池，也不按加载顺序或文件名）才能让页保持声明的容量：混合区域的
-        池子里，全局排名会让某页只剩一个可用账号，把会话绑死在那里。按 uid 排序也让
-        会话的页在重启与重载后保持稳定；增删账号最多影响每页一个槽位。
-
-        页不会大于区域：页大小覆盖全部账号（或更多）时，这一页就是该区域的全部。
+        """池子里某一页上的账号。一页是固定槽位：账号在本区域账号中的排名（按 uid
+        排序）对页大小取模。按区域排名才能让页保持声明的容量（全局排名会让某页只剩
+        一个可用账号，把会话绑死在那里）；按 uid 排序也让页在重启与重载后稳定。
+        页不会大于区域：页大小覆盖全部账号时，这一页就是该区域的全部。
         """
         try:
             index, size = int(page[0]), int(page[1])
@@ -3923,10 +3636,8 @@ class AccountPool(object):
         return out
 
     def _page_ranks(self, snapshot):
-        """uid -> 在快照账号中的排名，缓存到快照变化为止。
-
-        快照是按区域过滤后的池（不含可用性判断），排名（即分页）只在该区域
-        增删账号时才会变。
+        """uid -> 在快照账号中的排名，缓存到快照变化为止。快照是按区域过滤后的池
+        （不含可用性判断），排名只在该区域增删账号时才会变。
         """
         uids = tuple(sorted(a.uid for a in snapshot if a.uid))
         cached = self._page_order_cache
@@ -3940,17 +3651,10 @@ class AccountPool(object):
                      snapshot=None):
         """按积分到期节奏与最近一小时的忙闲给新对话选号。
 
-        每个账号到期前每天至少要消耗掉的积分是它的义务，义务减去今天的消耗
-        速度是它的欠账；欠账占候选账号欠账总和的比例就是它应当承担的份额，
-        再减去最近一小时实际接到的份额，差得最多的先派过去。全员都跟得上时
-        比例为 0，退化成「最近一小时最少接单的先派」。
-
-        候选账号只包括此刻能接单、又没被排除的账号：拿不到新对话的账号若算进
-        总和，它的欠账永远消不掉，会把其余账号的份额压平。
-
-        评分之前先过临期积分层：窗口内的账号按到期节奏加权先接单，与关闭
-        智能分配时一致；都没命中才按欠账与忙闲评分。估计剩余接近耗尽的
-        （账号、模型）组合在评分里获得一点倾斜，越接近限额越靠前，但不独占流量。
+        到期前每天要消耗掉的积分是义务，义务减去今天的消耗速度是欠账；欠账占候选
+        欠账总和的比例是应担份额，减去最近一小时实际接到的份额，差得最多的先派。
+        候选只包括此刻能接单的账号（接不了单的算进总和会把其余账号的份额压平）。
+        评分前先过临期积分层；估计剩余接近耗尽的组合获得一点倾斜，但不独占流量。
         """
         exclude = exclude or set()
         if snapshot is None:
@@ -3981,8 +3685,7 @@ class AccountPool(object):
             account.mark_pick(now)
             return account
 
-        # 临期积分优先：窗口内的账号先接单，窗口内按「临期余额除以剩余天数」
-        # 加权轮询。
+        # 临期积分优先层：窗口内按「临期余额除以剩余天数」加权轮询。
         while True:
             urgent = self._pick_expiring_first(snapshot, exclude, model)
             if urgent is None:
@@ -4036,10 +3739,8 @@ class AccountPool(object):
         return None
 
     def _rotate_pick(self, group, exclude, model, cursor_key=None, claim=None):
-        """对一组账号轮询选号，推进它的游标。
-
-        整池轮转用一直存在的 `_cursor`。页轮转每页各有游标，页内选号与普通
-        选号互不挪动对方的位置。
+        """对一组账号轮询选号，推进它的游标。整池轮转用一直存在的 `_cursor`；页轮转
+        每页各有游标，两条轮转互不挪动对方的位置。
         """
         total = len(group)
         if total == 0:
@@ -4047,7 +3748,6 @@ class AccountPool(object):
         with self._lock:
             start = (self._page_cursors.get(cursor_key, 0) if cursor_key is not None
                      else self._cursor)
-        # 优先级数字小的先被选中，数字相同按轮询顺序。
         order = sorted(range(total), key=lambda i: (group[i].priority,
                                                     (i - start) % total))
         for index in order:
@@ -4073,10 +3773,8 @@ class AccountPool(object):
             return candidates[0] if candidates else None
 
     def start_login(self, realm, product):
-        """向上游申请授权链接，platform 参数与所选官方客户端一致。
-
-        product 同时记下来，登录完成后成为新账号的出站身份，登录用的客户端与
-        之后对话用的客户端保持同一个。
+        """向上游申请授权链接，platform 参数与所选官方客户端一致。product 同时记下来，
+        登录完成后成为新账号的出站身份，登录用的客户端与之后对话用的客户端保持同一个。
         """
         product = wb_identity.normalize_product(product)
         platform = wb_identity.login_platform(realm, product)
@@ -4212,20 +3910,16 @@ class AccountPool(object):
         return account
 
 def desktop_atrest_key(force=False, log=None):
-    """拿到桌面端 at-rest 密钥（内存里有就直接用，没有才去进程内存里找回）。
-
-    只有真的遇到加密信封才会走到这里，所以旧客户端 / 明文凭据完全不受影响。
-    回收失败（客户端没开、系统不是 Windows、权限不够）时抛 wb_atrest.AtRestError，
-    由调用方翻译成给用户看的话。
+    """拿到桌面端 at-rest 密钥（内存里有就直接用，没有才去进程内存里找回）。只有
+    真的遇到加密信封才会走到这里，旧客户端 / 明文凭据不受影响；回收失败抛
+    wb_atrest.AtRestError，由调用方翻译成给用户看的话。
     """
     return wb_atrest.recover_key(force=force, log=log or (lambda msg: None))
 
 
 def desktop_decrypt_tokens(auth, log=None):
-    """返回 (accessToken 明文, 密钥或 None)。
-
-    桌面客户端把 token 存成 `$wbEncrypted` 信封，这里统一在读取处解密；
-    仍然是明文的客户端原样返回、不去碰密钥。
+    """返回 (accessToken 明文, 密钥或 None)。桌面客户端把 token 存成 `$wbEncrypted`
+    信封，统一在读取处解密；仍然是明文的客户端原样返回、不去碰密钥。
     """
     raw = auth.get("accessToken")
     if not wb_atrest.is_envelope(raw):
@@ -4248,11 +3942,9 @@ def desktop_refresh_token(auth, key):
 
 
 def desktop_auth_dirs():
-    """桌面客户端可能存放 *.info 凭据的目录。
-
-    Windows 用 %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth；其他
-    平台探测 Application Support 下可能的程序名。目录不存在也无妨：调用方
-    只读取存在的文件。
+    """桌面客户端可能存放 *.info 凭据的目录：Windows 用
+    %LOCALAPPDATA%\\CodeBuddyExtension\\Data\\Public\\auth，其他平台探测 Application
+    Support 下可能的程序名。目录不存在也无妨，调用方只读取存在的文件。
     """
     dirs = []
     if os.name == "nt":
@@ -4283,14 +3975,9 @@ def desktop_credential_candidates():
 
 
 def scan_desktop_credentials():
-    """描述这台机器上找到的桌面客户端凭据。
-
-    只读：不会往池子里加任何东西。看板展示结果，由用户决定导入哪些，代理不会
-    悄悄接管桌面端的登录。
-
-    凭据可能是加密信封，得先把密钥回收回来才能读。这里只查内存里已有的密钥，
-    不触发回收（回收要扫客户端进程内存，得由用户在弹窗里显式点一次），所以
-    扫描总是很快返回。
+    """只读扫描本机的桌面客户端凭据，不往池子里加任何东西（导入由用户在看板决定）。
+    凭据可能是加密信封：这里只查内存里已有的密钥，不触发回收（回收要扫客户端进程
+    内存，得由用户在弹窗里显式点一次），所以扫描总是很快返回。
     """
     found = []
     key = None
@@ -4366,18 +4053,16 @@ def scan_desktop_credentials():
 
 # --------------------------------------------------------------- 导出 / 导入
 #
-# 账号以单个 JSON 文档流转，账号池因此可以在机器间迁移（或备份），无须手动
-# 进出账号目录。导入接受的容器：
+# 账号以单个 JSON 文档流转，账号池因此可以在机器间迁移（或备份）。导入接受的容器：
 #   1. 本模块自己的导出 -> {"format": "workbuddy-accounts", "accounts": [...]}
-#   2. 裸列表          -> [ {...}, {...} ]           （手写）
-#   3. 单个账号对象    -> {...}                       （一次性粘贴）
+#   2. 裸列表 -> [ {...} ]；3. 单个账号对象 -> {...}（一次性粘贴）
 # 桌面端凭据（{"auth": {...}, "account": {...}}）同样接受。
 
 EXPORT_FORMAT = "workbuddy-accounts"
 EXPORT_VERSION = 1
 
-# 描述运行期状态的字段，与凭证本身无关。导出供检查，但导入时不采信：另一台
-# 机器带来的陈旧冷却或停用标记会悄悄拖垮目标账号池。
+# 描述运行期状态的字段，与凭证本身无关。导出供检查，导入时不采信：另一台机器带来的
+# 陈旧冷却或停用标记会悄悄拖垮目标账号池。
 VOLATILE_FIELDS = ("cooldownUntil", "lastError", "credits", "lastCheckin",
                    "lastDailyChat", "lastActivityReport", "modelCaps")
 
@@ -4410,10 +4095,8 @@ def account_to_export(account):
 
 
 def build_export_document(accounts, realm=None, include_secrets=True, uids=None):
-    """把账号包进自描述的导出文档。
-
-    `uids` 把导出限定到指定账号，在区域过滤之上再收窄，所以指定的账号不在
-    该区域时得到空文档，不会导出错误的账号。
+    """把账号包进自描述的导出文档。`uids` 把导出限定到指定账号，在区域过滤之上再
+    收窄，指定的账号不在该区域时得到空文档，不会导出错误的账号。
     """
     wanted = None
     if uids is not None:
@@ -4439,9 +4122,8 @@ def build_export_document(accounts, realm=None, include_secrets=True, uids=None)
 
 
 def _coerce_account_rows(blob):
-    """把任何可接受的容器归一成账号字典列表。
-
-    返回 (rows, error)。接受导出文档、裸列表、单个账号对象或桌面端凭据。
+    """把任何可接受的容器归一成账号字典列表，返回 (rows, error)。接受导出文档、
+    裸列表、单个账号对象或桌面端凭据。
     """
     if isinstance(blob, list):
         rows = blob
@@ -4475,9 +4157,8 @@ def _coerce_account_rows(blob):
 
 
 def normalise_import_row(row, realm=None):
-    """把一条导出或外来行转成 Account 的 kwargs。
-
-    扁平账号结构与嵌套的桌面凭据结构都接受。行里没有可用凭证时抛 ValueError。
+    """把一条导出或外来行转成 Account 的 kwargs。扁平账号结构与嵌套的桌面凭据
+    结构都接受；行里没有可用凭证时抛 ValueError。
     """
     # cockpit tools 导出的是裸的 snake_case OAuth 行数组。映射成本函数已支持的
     # 扁平结构；expires_at 是毫秒，下面的 normalize_epoch() 会换成秒。
@@ -4507,9 +4188,8 @@ def normalise_import_row(row, realm=None):
         raise ValueError("apiKey is set but accessToken is not a ck_/pt_ key")
     api_key = wb_identity.is_api_key_token(token)
 
-    # 账号归属的区域。调用方强制的区域优先（API 选项就是干这个的），否则由
-    # token / 域名判定：行里带的过期 realm（曾被归错区域、又导出过的账号）
-    # 不能把它拽回错的区域，错区域会把每个请求发到错误的上游。
+    # 账号归属的区域：调用方强制的区域优先，否则由 token / 域名判定。行里带的过期
+    # realm 不能把账号拽回错的区域，错区域会把每个请求发到错误的上游。
     forced = str(realm or "").strip().lower()
     evidence = realm_evidence(token, pick("domain"))
     row_realm = str(pick("realm") or "").strip().lower()

@@ -1,10 +1,9 @@
 """Responses 与 Anthropic Messages 到 Chat Completions 的互转。
 
-网关对客户端暴露 /v1/responses 与 /v1/messages 两种形状，上游只接受 Chat
-Completions：请求在这里翻译成上游形状，回复再翻译回客户端要的事件流。同时提供
-SSE 读取与聚合、工具命名空间展开、内置网页工具的结果回填。
+网关对客户端暴露 /v1/responses 与 /v1/messages 两种形状，上游只接受 Chat Completions：请求在这里
+翻译成上游形状，回复再翻译回客户端要的事件流。同时提供 SSE 读取与聚合、工具命名空间展开、
+内置网页工具的结果回填。
 """
-
 import json
 import re
 import socket
@@ -23,7 +22,6 @@ CJK_RE = re.compile(r"[\u4e00-\u9fff\u3400-\u4dbf]")
 
 
 def _gateway():
-    """网关模块：本模块运行期要用它的目录、日志与上游打开。"""
     module = wb_host.loaded_gateway("open_upstream", "log", "ACCOUNTS_DIR")
     if module is None:
         import wb_proxy as module
@@ -39,25 +37,19 @@ def estimate_tokens(text):
     other = len(text) - cjk
     return cjk + max(1, int(other / 3.6))
 
-# 每次向流式响应要多少字节。64 KiB 远大于一条典型几百字节的 SSE 事件，
-# 又远小于 http.client 单次 read 的上限，按块读取把逐行 syscall 摊成按块，
-# 同时不增加首字节延迟，见 iter_sse_lines。
+# 每次向流式响应要多少字节：64 KiB 远大于典型几百字节的 SSE 事件、远小于 http.client 单次 read
+# 上限，摊掉逐行 syscall 且不增加首字节延迟，见 iter_sse_lines。
 SSE_READ_BLOCK = 64 * 1024
 
 def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None):
     """按块读取流式响应并逐行产出，摊掉逐行 read 的 syscall 开销。
 
-    直接迭代 http.client.HTTPResponse 时每一行都要走一次 read() syscall，
-    并在二十来个 handler 线程之间反复交接 GIL。read1() 每次最多一次底层
-    syscall，按块取回后在内存里切行，syscall 数降一到两个数量级；read1()
-    一有字节就返回，完整的行立刻产出，延迟不变。
-
-    产出的行带换行符，与直接迭代 response 的形状一致。没有 read1 的对象
-    退回普通迭代。
-
-    before_read 在每个可能阻塞的 read1 之前调用一次，调用方可以在这里
-    把攒下的写出掉：一个读取块里的事件合成一次 write，下一个字节一到就
-    立即产出。
+    直接迭代 http.client.HTTPResponse 时每一行都要走一次 read() syscall，并在二十来个 handler 线程
+    之间反复交接 GIL。read1() 每次最多一次底层 syscall，按块取回后在内存里切行，syscall 数降一到两
+    个数量级；read1() 一有字节就返回，完整的行立刻产出，延迟不变。
+    产出的行带换行符，与直接迭代 response 的形状一致；没有 read1 的对象退回普通迭代。
+    before_read 在每个可能阻塞的 read1 之前调用一次，调用方可以在这里把攒下的写出掉：一个读取块里
+    的事件合成一次 write，下一个字节一到就立即产出。
     """
     read1 = getattr(source, "read1", None)
     if read1 is None:
@@ -84,19 +76,13 @@ def iter_sse_lines(source, block_size=SSE_READ_BLOCK, before_read=None):
         yield buf
 
 class UpstreamStreamError(Exception):
-    """上游把回复截断：缺少终止标记，或收到错误帧。
-
-    流式路径发送协议自己的错误事件，非流式路径回 502，
-    半段回答不会被当作完整结果交出去。
-    """
+    """上游把回复截断（缺少终止标记，或收到错误帧）：流式路径发送协议自己的错误事件，非流式路径
+    回 502，半段回答不会被当作完整结果交出去。"""
 
 
 def heartbeat_frame(raw):
-    """把一条上游行转成可直接转发的保活注释，非注释行返回 None。
-
-    上游用 SSE 注释维持长静默的连接，有时以 ":" 开头，有时包在 data: 里；
-    统一按注释转发，客户端自己的空闲超时就不会在模型思考期间断开。
-    """
+    """非注释行返回 None。上游用 SSE 注释维持长静默的连接，有时以 ":" 开头，有时包在 data: 里；
+    统一按注释转发，客户端自己的空闲超时就不会在模型思考期间断开。"""
     line = raw.decode("utf-8", "replace").strip()
     if not line:
         return None
@@ -109,7 +95,6 @@ def heartbeat_frame(raw):
 
 
 def upstream_error_text(chunk):
-    """一条上游帧携带的错误文本；正常分块返回 None。"""
     if not isinstance(chunk, dict) or chunk.get("choices"):
         return None
     err = chunk.get("error")
@@ -139,7 +124,6 @@ def _newer_usage(usage, part):
 
 
 def _estimated_usage(prompt_est, comp_tokens, reason_tokens):
-    """没有真实用量时按 token 数合成的 chat usage 估算值。"""
     prompt_est = max(1, prompt_est)
     return {
         "prompt_tokens": prompt_est,
@@ -259,7 +243,6 @@ def clean_responses_frame(frame):
 
 
 def aggregate_stream(raw_iter, model, resp_id):
-    """把 SSE 流折叠成一个非流式的 chat.completion 对象。"""
     content, reasoning, finish = [], [], "stop"
     tool_calls_map = {}
     usage = None
@@ -323,9 +306,8 @@ def aggregate_stream(raw_iter, model, resp_id):
                     if fn_args:
                         entry["function"]["arguments"] = (entry["function"]["arguments"] or "") + fn_args
             fc = delta.get("function_call")
-            # 上游会在流末尾发 function_call:{"name":"","arguments":""} 占位。
-            # name 与 arguments 都为空时视为无效占位跳过，不生成 tool_call，
-            # 否则 finish_reason 会被改成 "tool_calls"，严格客户端会一直等待。
+            # 上游会在流末尾发 function_call:{"name":"","arguments":""} 占位；name 与 arguments 都为空
+            # 时视为无效占位跳过，否则 finish_reason 会被改成 "tool_calls"，严格客户端会一直等待。
             if isinstance(fc, dict) and (fc.get("name") or fc.get("arguments")):
                 idx = 0
                 if idx not in tool_calls_map:
@@ -362,9 +344,8 @@ def aggregate_stream(raw_iter, model, resp_id):
             k: v for k, v in tool_calls_map.items()
             if (v.get("function") or {}).get("name")
         }
-    # 因 max_tokens 或连接中断而截断的流，最后一个工具调用可能只有半截 JSON。
-    # 丢弃无法解析的参数，不把坏参数交给客户端；只有非空且解析失败的字符串
-    # 才算截断，无参数的工具保留。
+    # 因 max_tokens 或连接中断而截断的流，最后一个工具调用可能只有半截 JSON；丢弃无法解析的参数，
+    # 只有非空且解析失败的字符串才算截断，无参数的工具保留。
     if tool_calls_map and (finish == "length" or not saw_done):
         tool_calls_map = {
             k: v for k, v in tool_calls_map.items()
@@ -404,11 +385,8 @@ def aggregate_stream(raw_iter, model, resp_id):
 # ---------------------------------------------------------------------------
 # Responses API (/v1/responses) 与 Chat Completions 互转
 # ---------------------------------------------------------------------------
-#
-# Kelivo 等客户端使用 OpenAI 的 Responses API，上游只支持 Chat Completions：
-# 出站把请求转成 Chat，回程再转成 Responses 对象与 SSE 事件。
+# 上游只支持 Chat Completions：出站把请求转成 Chat，回程再转成 Responses 对象与 SSE 事件。
 def local_ip_addresses():
-    """本机所有非回环 IPv4 地址。"""
     found = []
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
@@ -466,16 +444,11 @@ def _flatten_content(content):
 # ---------------------------------------------------------------------------
 # Responses API 的 custom 自由格式工具
 #
-# Codex 等客户端把文件编辑工具声明为 type="custom" 的自由格式工具，未使用
-# JSON-schema function：
-#
-#     {"type": "custom", "name": "apply_patch", "format": {...grammar...}}
-#
-# 模型应回一个 custom_tool_call，把原始载荷放在 input 里；结果再以
-# custom_tool_call_output 返回。上游 chat 端点不认识 custom 工具，所以出站
-# 降级为只有一个 input 字符串参数的普通 function，回程再还原成
-# custom_tool_call。缺了这一步工具会被静默忽略：模型把载荷当普通正文输出，
-# 客户端收不到任何工具调用。
+# Codex 等客户端把文件编辑工具声明为 type="custom" 的自由格式工具（{"type": "custom",
+# "name": "apply_patch", "format": {...grammar...}}），模型回 custom_tool_call、载荷放 input，
+# 结果以 custom_tool_call_output 返回。上游 chat 端点不认识 custom 工具，出站降级成只有一个
+# input 字符串参数的普通 function，回程再还原；缺了这一步工具会被静默忽略，模型把载荷当正文
+# 输出，客户端收不到任何工具调用。
 # ---------------------------------------------------------------------------
 
 CUSTOM_TOOL_HINT = (
@@ -490,13 +463,9 @@ def _is_custom_tool(tool):
 
 
 def custom_tool_names(tools, _depth=0):
-    """Responses 请求里声明为自由格式 custom 的工具名集合。
-
-    需要递归进入 namespace：新版 Codex Desktop 把自由格式工具嵌在 functions
-    命名空间里，exec 的 type 就是 "custom"。漏掉名字会让回程被判定为
-    function_call，客户端按 name、namespace、kind 三元组匹配不到执行器，
-    调用不执行也不返回。namespace 只是客户端给工具分组的方式。
-    """
+    """需要递归进入 namespace：新版 Codex Desktop 把自由格式工具嵌在 functions 命名空间里，exec 的
+    type 就是 "custom"。漏掉名字会让回程被判定为 function_call，客户端按 name、namespace、kind 三元组
+    匹配不到执行器，调用不执行也不返回。"""
     names = set()
     if _depth > NAMESPACE_MAX_DEPTH:
         return names
@@ -516,7 +485,6 @@ def custom_tool_names(tools, _depth=0):
 
 
 def _downgrade_custom_tool(tool):
-    """把 Responses 的 custom 工具改写成 Chat function 工具。"""
     desc = tool.get("description") or ""
     fmt = tool.get("format") or {}
     extra = ""
@@ -542,14 +510,10 @@ def _downgrade_custom_tool(tool):
 # ---------------------------------------------------------------------------
 # namespace 工具：展开 + 还原
 #
-# Codex App 把 MCP／外挂工具用 namespace 形式送出：
-#   {"type":"namespace","name":"codex_app","tools":[{name:"list_threads",...}]}
-#
-# 上游 Chat Completions 只认 flat function；App 回程却用 (name, namespace) 两个
-# 字段找执行器，只给 flat name 会一律回 "unsupported call"。
-#
-# 三件事：送上游前展开成 flat function 并记住 name -> namespace；模型返回的
-# name 可能是 js / ns__js / ns::js，都要能解析；回程的 function_call 与
+# Codex App 把 MCP／外挂工具用 namespace 形式送出（{"type":"namespace","name":"codex_app",
+# "tools":[...]}）。上游 Chat Completions 只认 flat function；App 回程却用 (name, namespace) 找
+# 执行器，只给 flat name 会一律回 "unsupported call"。三件事：送上游前展开成 flat function 并记住
+# name -> namespace；模型返回的名字可能是 js / ns__js / ns::js，都要能解析；回程的 function_call 与
 # custom_tool_call 补上 namespace 字段。
 # ---------------------------------------------------------------------------
 
@@ -564,7 +528,6 @@ def expand_namespace_tools(tools, _depth=0):
       * namespace 子工具常常没有 type 字段，展开时补成上游认得的 flat function
       * custom / web_search 等非 function 项目原样留下，交给既有管线处理
       * 同名只留第一个
-      * 返回 (flat_tools, name_to_namespace)
     """
     flat = []
     mapping = {}
@@ -651,11 +614,8 @@ def resolve_namespaced_name(name, mapping):
 
 
 def stamp_namespace(item, mapping):
-    """把模型返回的扁平工具名还原成 (name, namespace)。
-
-    流式的 response.output_item.done 事件才是客户端派发工具调用的依据，
-    所以每个 function_call / custom_tool_call 项目都要在送出前补上 namespace。
-    """
+    """流式的 response.output_item.done 事件才是客户端派发工具调用的依据，所以每个
+    function_call / custom_tool_call 项目都要在送出前补上 namespace。"""
     if not mapping or not isinstance(item, dict):
         return item
     bare, ns = resolve_namespaced_name(item.get("name"), mapping)
@@ -666,7 +626,6 @@ def stamp_namespace(item, mapping):
 
 
 def apply_namespace_to_calls(output_items, mapping):
-    """替 Responses 的 function_call / custom_tool_call 补上 namespace。"""
     if not mapping or not isinstance(output_items, list):
         return output_items, 0
     fixed = 0
@@ -686,13 +645,9 @@ def apply_namespace_to_calls(output_items, mapping):
 
 
 def additional_tools_from_input(payload):
-    """从 input 数组里收集 additional_tools 条目的 tools。
-
-    新版 Codex Desktop 把工具放在 input 内的
-    {"type": "additional_tools", "tools": [...]} 条目里，顶层 tools 为空。
-    出站 responses_to_chat 与回程 custom_tool_names、request_meta.tools
-    都必须走这里，否则两边看到不同的工具清单。
-    """
+    """新版 Codex Desktop 把工具放在 input 内的 {"type": "additional_tools", "tools": [...]} 条目里，
+    顶层 tools 为空。出站 responses_to_chat 与回程 custom_tool_names、request_meta.tools 都必须走这里，
+    否则两边看到不同的工具清单。"""
     collected = []
     for item in payload.get("input") or []:
         if isinstance(item, dict) and item.get("type") == "additional_tools":
@@ -712,7 +667,6 @@ def _tools_for_chat(tools):
 
 
 def _unwrap_custom_input(args):
-    """从 {"input": "..."} 参数块里取回自由格式字符串。"""
     if not isinstance(args, str):
         return json.dumps(args or "", ensure_ascii=False)
     try:
@@ -729,19 +683,11 @@ def _unwrap_custom_input(args):
         return parsed
     return args
 
-# 网关可以自己执行 web_search / web_fetch，由面板开关决定。
-#
-# Codex App 等客户端把 web_search 声明为服务端工具，但上游没有对应执行器：
-# 原样转发时模型会当作没有工具可用。开关打开后，网关把声明换成自己的
-# function，截下调用交给 wb_webtools 本地执行，再把结果喂回模型。
-#
-# 默认关闭：声明原样转发，自带同名搜索工具的客户端会收到自己的调用。
-# 打开后网关会按模型要求抓取网址，出网策略由操作者决定。
+# web_search / web_fetch 可由网关自己执行（local_web_tools 开关，出网策略由操作者决定）：上游没有
+# 对应执行器，原样转发时模型会当作没有工具可用；开关打开后把声明换成自己的 function，截下调用交给
+# wb_webtools 本地执行再喂回模型。默认关闭，声明原样转发，自带同名工具的客户端会收到自己的调用。
 def local_web_tools_enabled():
-    """面板开关：网关是否自己执行 web_search / web_fetch。
-
-    每个请求读取一次，切换面板后下一个请求即生效，无需重启。
-    """
+    """每个请求读取一次，切换面板后下一个请求即生效，无需重启。"""
     try:
         return wb_settings.local_web_tools(_gateway().ACCOUNTS_DIR) is True
     except Exception:
@@ -749,20 +695,14 @@ def local_web_tools_enabled():
 
 
 def web_tools_active(body):
-    """本请求的工具是否已替换为网关自己的定义。
-
-    只拦截网关注入过定义的请求：开关关闭时，客户端自己的同名 function
-    必须原样转发，不能被这里吞掉。
-    """
+    """只拦截网关注入过定义的请求：开关关闭时，客户端自己的同名 function 必须原样转发，不能被这里
+    吞掉。"""
     return isinstance(body, dict) and body.get("_web_tools") is True
 
 
 def sum_usage(total, part):
-    """把一轮的 token 用量累加起来。
-
-    代跑网络工具会多跑几轮上游，每轮的 token 都实际消耗，记账要加总，
-    不能让最后一轮覆盖前面几轮。
-    """
+    """代跑网络工具会多跑几轮上游，每轮的 token 都实际消耗，记账要加总，不能让最后一轮覆盖前面
+    几轮。"""
     if not isinstance(part, dict):
         return total
     if not isinstance(total, dict):
@@ -781,10 +721,7 @@ _CITATION_MD_RE = re.compile(r"\[([^\]\n]{1,200})\]\((https?://[^)\s]+)\)")
 
 
 def build_citations(text, sources):
-    """把模型实际引用到的来源转成 url_citation annotations。
-
-    只标注真的出现在工具输出里的网址，模型自己编的链接不会被当成引用。
-    """
+    """只标注真的出现在工具输出里的网址，模型自己编的链接不会被当成引用。"""
     text = str(text or "")
     if not text or not sources:
         return []
@@ -838,12 +775,8 @@ def build_citations(text, sources):
 
 def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_start,
                                 lease=None, drop_tools=False):
-    """执行网络工具并把结果喂回模型，返回新的上游连接。
-
-    drop_tools=True 表示最后一轮：从工具清单收回网络工具，模型只能用手上的
-    结果收尾。回合用尽时直接失败，不合成 status=completed、output=[] 的
-    resp_wrapup。
-    """
+    """drop_tools=True 表示最后一轮：从工具清单收回网络工具，模型只能用手上的结果收尾。回合用尽时
+    直接失败，不合成 status=completed、output=[] 的 resp_wrapup。"""
     convo = holder.get("convo_messages")
     if convo is None:
         convo = list(holder.get("base_messages") or [])
@@ -889,11 +822,8 @@ def follow_up_with_tool_results(internal_calls, holder, model, session_key, t_st
 
 
 def internal_calls_from_chat(chat_obj, web_tools=False):
-    """聚合后的 chat completion 中由网关自己执行的调用。
-
-    只有网关注入过工具定义的请求才可能带这类调用；开关关闭时，客户端
-    自己的同名 function 归客户端，这里返回空列表。
-    """
+    """只有网关注入过工具定义的请求才可能带这类调用；开关关闭时，客户端自己的同名 function 归
+    客户端，这里返回空列表。"""
     message = ((chat_obj.get("choices") or [{}])[0] or {}).get("message") or {}
     out = []
     if not web_tools:
@@ -916,11 +846,8 @@ def tool_name_of(tool):
 
 
 def _tool_output_content(raw, keep_image=False):
-    """工具结果压成 chat 的 content：列表保留视觉分片，对象序列化成 JSON 文本。
-
-    keep_image=True 时对象形状的图片转成结构化 image_url 分片，用于 function
-    结果；其余场景对象一律走 JSON 文本，保持原有形状。
-    """
+    """列表保留视觉分片，对象序列化成 JSON 文本。keep_image=True 时对象形状的图片转成结构化
+    image_url 分片，用于 function 结果；其余场景对象一律走 JSON 文本，保持原有形状。"""
     if isinstance(raw, list):
         return _flatten_content(raw)
     if isinstance(raw, dict):
@@ -932,12 +859,8 @@ def _tool_output_content(raw, keep_image=False):
 
 
 def _push_assistant(messages, pending_reasoning, body=None, call=None):
-    """把 assistant 的正文或工具调用并回上一条 assistant 消息，返回剩余 reasoning。
-
-    body 与 call 二选一。相邻 assistant 消息合并让 tool_calls 与文本留在同一条
-    消息里，不打断工具序列。reasoning 只回填一次：目标消息已有 reasoning_content
-    时原文返回，留给后续消息。
-    """
+    """body 与 call 二选一。相邻 assistant 消息合并让 tool_calls 与文本留在同一条消息里，不打断工具
+    序列。reasoning 只回填一次：目标消息已有 reasoning_content 时原文返回，留给后续消息。"""
     if messages and messages[-1].get("role") == "assistant":
         prev = messages[-1]
         if call is not None:
@@ -964,7 +887,6 @@ def _push_assistant(messages, pending_reasoning, body=None, call=None):
 
 
 def _responses_input_to_messages(payload):
-    """把 Responses 的 input 条目转成 chat 消息。"""
     messages = []
     instructions = payload.get("instructions")
     if isinstance(instructions, str) and instructions.strip():
@@ -1111,7 +1033,6 @@ def _responses_input_to_messages(payload):
 
 
 def responses_to_chat(payload):
-    """把 Responses API 请求体转成 Chat Completions 请求体。"""
     messages = _responses_input_to_messages(payload)
     chat = {"model": payload.get("model"), "messages": messages}
     for key in ("temperature", "top_p", "seed"):
@@ -1141,10 +1062,8 @@ def responses_to_chat(payload):
         flat_tools, ns_map = expand_namespace_tools(raw_tools)
         chat["tools"] = _tools_for_chat(flat_tools)
         chat["_namespace_map"] = ns_map
-    # 客户端声明 web_search / web_fetch 时，把那份声明换成我们的
-    # function（见 wb_webtools.install_tool_defs）。
-    # 看板开关关闭时原样透传，客户端自己的同名工具不受影响。
-    # 用合并后的清单：工具可能整份都在 additional_tools 里，只看顶层会漏。
+    # 客户端声明 web_search / web_fetch 时换成我们的 function（见 wb_webtools.install_tool_defs）；
+    # 开关关闭时原样透传。用合并后的清单：工具可能整份在 additional_tools 里，只看顶层会漏。
     if local_web_tools_enabled():
         wants = wb_webtools.client_wants_web(raw_tools)
         if wants["search"] or wants["fetch"]:
@@ -1161,7 +1080,6 @@ def responses_to_chat(payload):
 # Anthropic Messages API (/v1/messages) 与 Chat Completions 互转
 # ---------------------------------------------------------------------------
 def anthropic_error_type(status):
-    """把 HTTP 状态码映射成 Anthropic 的 error.type。"""
     try:
         status = int(status)
     except (TypeError, ValueError):
@@ -1274,11 +1192,8 @@ def _anthropic_block_text(block):
 
 
 def _anthropic_tool_result_content(value, is_error=None):
-    """工具结果里的图片保留结构化 image_url，纯文本仍压成一个字符串。
-
-    上游把 data URL 当普通文本计费，一张截图就可能把长上下文顶过限制；
-    有图片时返回多段 content，没有图片时保持原来的字符串形态。
-    """
+    """上游把 data URL 当普通文本计费，一张截图就可能把长上下文顶过限制；有图片时保留结构化
+    image_url 并返回多段 content，没有图片时纯文本保持原来的字符串形态。"""
     if not isinstance(value, list):
         return _anthropic_content_to_text(value, is_error)
     parts = []
@@ -1504,7 +1419,6 @@ def _anthropic_blocks_to_messages(role, blocks):
 
 
 def messages_to_chat(payload):
-    """把 Anthropic Messages 请求转成 Chat Completions 请求。"""
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
     model = _anthropic_text(payload.get("model")).strip()
@@ -1629,7 +1543,6 @@ def _anthropic_stop_reason(finish_reason):
 
 
 def chat_to_messages(obj):
-    """把一个 Chat Completions 对象折叠成 Anthropic Messages 对象。"""
     if not isinstance(obj, dict):
         obj = {}
     choices = obj.get("choices") if isinstance(obj.get("choices"), list) else []
@@ -1689,7 +1602,6 @@ def _anthropic_estimate_chat_tokens(chat):
 
 
 def stream_messages_events(raw_iter, model, holder=None, tool_alias=None):
-    """把 chat-completions SSE 流转成 Anthropic Messages SSE 帧。"""
     holder = holder if isinstance(holder, dict) else {}
     tool_alias = tool_alias or {}
     state = {
@@ -1929,14 +1841,9 @@ def _call_output_item(item_id, call_id, name, arguments, custom):
 
 
 def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, namespace_map=None, sources=None):
-    """把一个 Chat Completions 对象折叠成 Responses API 响应对象。
-
-    custom_names 是客户端声明为自由格式 custom 的工具名集合，这些工具的调用
-    会还原成 custom_tool_call 条目，Codex 等客户端才能识别。
-
-    request_meta 把请求级能力 tools、tool_choice、parallel_tool_calls 原样
-    回显到响应上，客户端请求什么就回报什么。
-    """
+    """custom_names 是客户端声明为自由格式 custom 的工具名集合，这些工具的调用会还原成
+    custom_tool_call 条目，Codex 等客户端才能识别。request_meta 把请求级能力 tools、tool_choice、
+    parallel_tool_calls 原样回显到响应上，客户端请求什么就回报什么。"""
     custom_names = custom_names or set()
     choice = (chat_obj.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
@@ -2001,7 +1908,6 @@ def chat_to_response(chat_obj, model, custom_names=None, request_meta=None, name
         obj["incomplete_details"] = {"reason": "max_output_tokens"}
     return obj
 def stream_responses_events(upstream, model, holder):
-    """把 chat-completions SSE 流翻译成 Responses API 事件帧。"""
     # 多轮 web 工具共用一则 Responses 响应：id / created_at / sequence_number
     # 必须跨轮稳定，否则客户端会把最后一轮的 completed 当成另一条响应。
     resp_id = holder.setdefault("resp_id", wb_ids.new_id("resp_"))
@@ -2059,11 +1965,8 @@ def stream_responses_events(upstream, model, holder):
         body = json.dumps(data, ensure_ascii=False)
         return ("event: " + etype + chr(10) + "data: " + body + chr(10) + chr(10)).encode("utf-8")
     def fail_frame(message):
-        """结束被上游截断的流的唯一事件。
-
-        带着已产生的输出、状态写 failed，客户端会把这条响应当失败处理，不会把
-        半段正文当成完整回答；已经发出去的内容不再重发。
-        """
+        """带着已产生的输出、状态写 failed，客户端会把这条响应当失败处理，不会把半段正文当成完整
+        回答；已经发出去的内容不再重发。"""
         final = resp_obj("failed")
         final["error"] = {"code": "upstream_stream_error", "message": message}
         return ev("response.failed", {"response": final})
@@ -2105,7 +2008,6 @@ def stream_responses_events(upstream, model, holder):
         yield ev("response.output_item.done",
                  {"output_index": reason_index, "item": outputs[reason_index]})
     def open_message():
-        """开 message 项目：占一个输出槽并送出 added 与空 content_part。"""
         nonlocal msg_index
         msg_index = len(outputs)
         outputs.append(None)
@@ -2379,9 +2281,8 @@ def stream_responses_events(upstream, model, holder):
                     else:
                         item["type"] = "function_call"
                         item["arguments"] = ""
-                    # namespace 必须在 output_item.added 就带上（照 CiderCC-UwU
-                    # proxy.mjs openItem 的做法）。事后才补只会改到 done，
-                    # 客户端早就从 added 事件派发过了。
+                    # namespace 必须在 output_item.added 就带上（照 CiderCC-UwU proxy.mjs openItem 的做法），
+                    # 事后才补只会改到 done，客户端早就从 added 事件派发过了。
                     stamp_namespace(item, ns_map)
                     yield ev("response.output_item.added", {
                         "output_index": out_idx,
@@ -2473,9 +2374,8 @@ def stream_responses_events(upstream, model, holder):
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
                 saw_done = True
-    # 截断的流（max_tokens、连接中断）会留下半截 JSON 的参数。这些调用不能
-    # 当完成收尾：在 finalize 前丢掉，客户端才不会收到参数无法解析的
-    # function_call_arguments.done 与 output_item.done。同批次的完整调用保留。
+    # 截断的流（max_tokens、连接中断）会留下半截 JSON 的参数，不能当完成收尾：finalize 前丢掉，
+    # 客户端才不会收到参数无法解析的 done 事件；同批次的完整调用保留。
     dropped_truncated = 0
     for idx in sorted(tool_calls_map.keys()):
         entry = tool_calls_map[idx]
@@ -2491,4 +2391,3 @@ def stream_responses_events(upstream, model, holder):
         return
     yield from _finalize()
     holder["seq"] = seq
-

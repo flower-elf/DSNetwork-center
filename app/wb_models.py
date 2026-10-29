@@ -1,10 +1,9 @@
 """模型目录：内置快照、桌面缓存、远端 /v3/config 与定时刷新。
 
-网关对客户端展示的模型清单由这里拼出：远端目录优先，取不到时回退桌面客户端
-缓存、网关存档与内置快照。筛选规则把虚拟别名与不可对话的模型排除在清单外，
-但保留它们的名称供面板展示。刷新线程每天至少拉一次，请求路径只读缓存。
+网关对客户端展示的模型清单由这里拼出：远端目录优先，取不到时回退桌面客户端缓存、网关存档与内置
+快照；筛选规则把虚拟别名与不可对话的模型排除在清单外，但保留名称供面板展示。刷新线程每天至少拉
+一次，请求路径只读缓存。
 """
-
 import json
 import os
 import threading
@@ -25,7 +24,6 @@ PROJECT_DIR = os.path.dirname(APP_DIR)
 
 
 def _gateway():
-    """网关模块：本模块运行期要用它的账号池、日志与目录。"""
     module = wb_host.loaded_gateway("log", "ACCOUNTS_DIR", "POOL")
     if module is None:
         import wb_proxy as module
@@ -37,11 +35,10 @@ UPSTREAM = "https://www.workbuddy.ai"
 MODELS_PATH = "/v2/enterprises/personal/models"
 
 _models_cache = {"intl": {"at": 0.0, "data": None}, "cn": {"at": 0.0, "data": None}}
-#: 目录来源追踪，与 _models_cache 同批更新，供面板展示：source 取值见
-#: catalog_meta；fetched_at 是网关拿到数据的时刻；file_mtime 是桌面缓存文件的
-#: 写入时刻，仅配置文件来源有，可能远早于 fetched_at，是清单新鲜度的证据。
+#: 目录来源追踪，与 _models_cache 同批更新；source 取值见 catalog_meta，fetched_at 是网关拿到
+#: 数据的时刻，file_mtime 是桌面缓存写入时刻（仅配置文件来源有，可能远早于 fetched_at）。
 _catalog_meta = {}
-# 每个 realm 被筛选规则丢弃的原始目录名称，面板把它们显示为关闭行。
+# 每个 realm 被筛选规则丢弃的原始目录名称。
 _catalog_excluded = {}
 _catalog_raw = {}
 _catalog_raw_meta = {}
@@ -115,13 +112,9 @@ INTL_UI_ORDER = [
     "kimi-k2.8-preview",
 ]
 def merge_reasoning(base, live):
-    """单个模型 reasoning 块的字段级合并。
-
-    live 目录是事实来源，但常不重述每个字段；顶层整体覆盖会丢 supportedEfforts，
-    而只带 effort、没有 supportedEfforts 会被读成锁定档位，模型在 /v1/models
-    显示为不可选，发给它的请求也被按错误档位上报。所以逐字段合并：结果块带
-    supportedEfforts 即可选，其中的 effort 只是默认值重述，不是锁定。
-    """
+    """live 目录是事实来源，但常不重述每个字段；顶层整体覆盖会丢 supportedEfforts，而只带 effort、
+    没有 supportedEfforts 会被读成锁定档位，模型在 /v1/models 显示为不可选。逐字段合并后结果块带
+    supportedEfforts 即可选，其中的 effort 只是默认值重述，不是锁定。"""
     out = dict(base) if isinstance(base, dict) else {}
     if isinstance(live, dict):
         out.update(live)
@@ -132,8 +125,7 @@ def merge_reasoning(base, live):
 def merge_catalog(primary, realm=None, extras=False):
     r = realm or _gateway().CURRENT_REALM
     merged = {}
-    # "all" 取两个 realm 的并集：分析面板列出网关服务过的全部模型，不能漏掉
-    # 只有一侧目录认识的模型。
+    # "all" 取两个 realm 的并集，不能漏掉只有一侧目录认识的模型。
     if r == "all":
         source_static = list(wb_catalog.STATIC_INTL_MODELS) + list(wb_catalog.STATIC_CN_MODELS)
     else:
@@ -186,12 +178,8 @@ _catalog_lock = threading.Lock()
 
 _catalog_fallback_log = {}
 def note_bundled_reasoning(realm, live, entries):
-    """模型的 reasoning 控件来自内置表时记一次日志。
-
-    live 目录是事实来源，快照只是兜底，快照独有值的新鲜度不会超过快照本身。
-    两种情况会走到这里：live 目录完全没给 reasoning 块；live 只给裸 effort，
-    而快照知道该档位可选。每次变化记一行即可。
-    """
+    """live 目录是事实来源，快照只是兜底。两种情况会走到这里：live 目录完全没给 reasoning 块；
+    live 只给裸 effort，而快照知道该档位可选。每次变化记一行即可。"""
     live_meta = dict(live or [])
 
     def from_snapshot(mid, meta):
@@ -215,8 +203,7 @@ def note_bundled_reasoning(realm, live, entries):
     _gateway().log("catalog    : bundled table fills in reasoning controls the live "
         "catalogue omits for %d model(s): %s" % (len(missing), shown))
 def catalog_meta(realm=None):
-    """该 realm 最近一次清单的来源信息，供面板展示。
-
+    """该 realm 最近一次清单的来源信息：
     {"source": "remote" | "endpoint" | "cache" | "legacy" | "bundled",
      "fetched_at": 网关拿到该批数据的 unix 秒,
      "file_mtime": 桌面缓存文件写入时刻的 unix 秒，仅配置文件来源有，否则 None}
@@ -273,12 +260,8 @@ def fetch_models(realm=None, force=False):
         seed_default_disabled(_catalog_excluded[r])
         return entries
 def model_entry(mid, meta):
-    """用桌面端目录元数据拼一条富 /v1/models 条目。
-
-    OpenAI 规范只定义 id/object/created/owned_by，能力字段没有标准，这里同时
-    输出 capabilities、supports_*、vision、abilities、modalities、architecture
-    等多种形状，供不同客户端各取所认的字段。
-    """
+    """OpenAI 规范只定义 id/object/created/owned_by，能力字段没有标准，这里同时输出 capabilities、
+    supports_*、vision、abilities、modalities、architecture 等多种形状，供不同客户端各取所认的字段。"""
     meta = meta or {}
     item = {
         "id": mid,
@@ -301,10 +284,8 @@ def model_entry(mid, meta):
     tools = bool(meta.get("supportsToolCall"))
     thinks = bool(meta.get("supportsReasoning"))
     inputs = ["text"] + (["image"] if vision else [])
-    # 能力字段无标准拼法，按常见客户端的读法各出一份：capabilities.vision 通用、
-    # supports_vision / supports_images 为 LobeChat 式扁平标志、vision 供
-    # Cherry Studio / NextChat、abilities.vision 供 LobeChat、multimodal 杂项、
-    # *_modalities 供 OpenRouter。
+    # 能力字段无标准拼法，按常见客户端的读法各出一份：capabilities.vision 通用、supports_vision /
+    # supports_images 为 LobeChat 式扁平标志、vision 供 Cherry Studio / NextChat、abilities.vision 供 LobeChat、*_modalities 供 OpenRouter。
     item["capabilities"] = {
         "vision": vision,
         "tool_calls": tools,
@@ -331,9 +312,8 @@ def model_entry(mid, meta):
         "output_modalities": ["text"],
         "modality": "+".join(inputs) + "->text",
     }
-    # 四级查找：远端 > 内建知识表 > 本地 model.json 缓存 > models.dev 异步预热、
-    # 不阻塞。context_length 总有值，未知取 1M，宁高勿低；max_output_tokens 未知
-    # 则省略。
+    # 四级查找：远端 > 内建知识表 > 本地 model.json 缓存 > models.dev（异步预热、不阻塞）。
+    # context_length 总有值，未知取 1M，宁高勿低；max_output_tokens 未知则省略。
     ctx_value, out_value, _limit_source = wb_modelsdev.lookup(
         mid, meta.get("maxInputTokens"), meta.get("maxOutputTokens"),
         directory=_gateway().ACCOUNTS_DIR)
@@ -342,8 +322,7 @@ def model_entry(mid, meta):
     if out_value:
         item["max_output_tokens"] = out_value
         item["max_completion_tokens"] = out_value
-    # 附上 output_probes.json 实测的上游钳制值，只标注、不覆盖规格值，面板在
-    # 旁边显示「钳制 N×」。
+    # 附上 output_probes.json 实测的上游钳制值，只标注、不覆盖规格值。
     clamp = wb_probes.clamp_for(_gateway().ACCOUNTS_DIR, mid)
     if clamp:
         item["output_clamp"] = clamp
@@ -378,10 +357,8 @@ def model_entry(mid, meta):
         item["tags"] = tags
     return item
 def read_product_config_models(realm=None):
-    """读桌面端的目录缓存：[(id, meta), ...]。
-
-    "all" 时两个应用都装了就都读，合并视图才能拿到两侧各自的元数据，不只国内那份。
-    """
+    """读桌面端的目录缓存 [(id, meta), ...]；"all" 时两个应用都装了就都读，合并视图才能拿到两侧各自
+    的元数据，不只国内那份。"""
     r = realm or _gateway().CURRENT_REALM
     if r == "all":
         out = _read_product_config_dir(".workbuddy-ai")
@@ -417,9 +394,8 @@ def _read_product_config_dir(cache_dir):
         if isinstance(mid, str) and mid:
             out.append((mid, m))
     return out
-#: 桌面端自己的 product-config 端点。read_product_config_models 读的缓存文件
-#: 就是它的响应落盘。没有桌面端的机器，如 Docker、NAS、无头服务器，直接调它
-#: 才能公布含实时倍率的活目录，而不是窄口径端点或内置快照。
+#: 桌面端的 product-config 端点，read_product_config_models 读的缓存就是它的响应落盘。没有桌面端
+#: 的机器（Docker、NAS、无头服务器）直接调它，才能拿到含实时倍率的活目录，而不是窄口径端点或内置快照。
 REMOTE_CONFIG_PATH = "/v3/config"
 
 #: 目录已有的名字加这些后缀就是变体：区域版如 deepseek-v4.1-flash-sg，实验版
@@ -427,11 +403,8 @@ REMOTE_CONFIG_PATH = "/v3/config"
 VARIANT_SUFFIXES = ("-sg", "-x")
 
 def remote_config_headers(account, realm, ua=None):
-    """product-config 请求的头。
-
-    UA 决定返回哪份目录，只有桌面端 UA 拿到完整列表，未知 UA 直接 400 / code
-    12403，因此 UA 用 realm 固定的桌面 UA，不用账号当前的身份。
-    """
+    """UA 决定返回哪份目录，只有桌面端 UA 拿到完整列表，未知 UA 直接 400 / code 12403；因此 UA 用
+    realm 固定的桌面 UA，不用账号当前的身份。"""
     cfg = wb_accounts.get_realm_config(realm)
     headers = {
         "Accept": "application/json, text/plain, */*",
@@ -444,11 +417,8 @@ def remote_config_headers(account, realm, ua=None):
     return headers
 
 def _agent_model_lists(payload):
-    """各 Agent 的裸字符串模型列表，命令行命名的 Agent 排在前面。
-
-    选择器展示的目录挂在 agents[].models 下。接口返回时套了一层 "data"，桌面缓存
-    文件则是同一份文档直接落盘、没有信封，两种都要读。
-    """
+    """选择器展示的目录挂在 agents[].models 下。接口返回时套了一层 "data" 信封，桌面缓存文件则是
+    同一份文档直接落盘、没有信封，两种都要读；命令行命名的 Agent 排在前面。"""
     roots = [payload]
     data = payload.get("data")
     if isinstance(data, dict):
@@ -478,12 +448,9 @@ def _agent_model_lists(payload):
     return cli, other
 
 def parse_remote_catalog(payload):
-    """从 /v3/config 响应取 (ids, meta)，没有目录时返回 None。
-
-    列表挂在 agents[].models 下，元素是裸 id；逐模型元数据在另一个 models 数组
-    里。凭据无效时上游仍回 HTTP 200 但列表为空，空目录报 None 由调用方回退，
-    避免发布出「这个出口没有模型」。
-    """
+    """取 (ids, meta)，没有目录时返回 None。列表挂在 agents[].models 下（元素是裸 id），逐模型元数据
+    在另一个 models 数组里。凭据无效时上游仍回 HTTP 200 但列表为空，空目录报 None 由调用方回退，
+    避免发布出「这个出口没有模型」。"""
     if not isinstance(payload, dict):
         return None
     cli_lists, other_lists = _agent_model_lists(payload)
@@ -518,11 +485,8 @@ def parse_remote_catalog(payload):
     return ids, meta
 
 def seed_default_disabled(ids):
-    """把筛选规则丢掉的模型默认加入停止名单，每个模型只做一次。
-
-    默认拒绝这些模型的路由；操作者在模型页重新勾选后，excluded_seen 保证
-    下一次加载不会再关掉它。
-    """
+    """默认拒绝这些模型的路由；操作者在模型页重新勾选后，excluded_seen 保证每个模型只默认关一次，
+    下一次加载不会再关掉它。"""
     seen = {str(m).strip().lower() for m in wb_settings.excluded_seen(_gateway().ACCOUNTS_DIR)}
     fresh = [m for m in ids if str(m).strip().lower() not in seen]
     if not fresh:
@@ -535,12 +499,8 @@ def seed_default_disabled(ids):
                                   if str(m).strip().lower() not in known])
 
 def curate_remote_catalog(realm, ids, meta=None):
-    """把远程目录裁剪成选择器该展示的模型。
-
-    剔除虚拟别名 default-model、auto 等非模型项，剔除 "-sg" / "-x" 付费变体，
-    其余保持上游顺序。上游没列的名字仍可经 curated 顺序表与内置快照取到，
-    merge_catalog 会保留它们。
-    """
+    """剔除虚拟别名 default-model、auto 等非模型项，剔除 "-sg" / "-x" 付费变体，其余保持上游顺序。
+    上游没列的名字仍可经 curated 顺序表与内置快照取到，merge_catalog 会保留它们。"""
     out = []
     for mid in ids:
         if not is_chat_model(mid):
@@ -551,11 +511,8 @@ def curate_remote_catalog(realm, ids, meta=None):
     return out
 
 def fetch_remote_product_config(realm):
-    """从该 realm 自己的 product-config 端点取 (ids, meta)，取不到返回 None。
-
-    最多两次 10 秒尝试，每个桌面 UA 一次。端点躲在 WAF 后面，连接被断是常态，
-    而每个调用方都有回退：桌面缓存文件、窄口径模型端点、内置快照。
-    """
+    """取 (ids, meta)，取不到返回 None。最多两次 10 秒尝试，每个桌面 UA 一次；端点躲在 WAF 后面，
+    连接被断是常态，每个调用方都有回退（桌面缓存文件、窄口径模型端点、内置快照）。"""
     if realm not in ("intl", "cn") or _gateway().POOL is None:
         return None
     if _gateway().stand_down_active():
@@ -591,25 +548,17 @@ def fetch_remote_product_config(realm):
     _gateway().log("remote catalog: %s fetch failed (%s)" % (realm, last))
     return None
 
-#: 面板「刷新模型清单」按钮的服务端冷却：同一 realm 两次手动强拉的最短间隔。
-#: 自动链已有 300s 缓存与桌面 UA 双尝试，这层再拦误连点，防止把 /v3/config 点成
-#: 高频请求。上游有 WAF，连接被丢是常态，节制本身就是不触发风控的一部分。
+#: 手动刷新的服务端冷却：同一 realm 两次强拉的最短间隔。自动链已有 300s 缓存与桌面 UA 双尝试，
+#: 这层再拦误连点；上游有 WAF，节制本身就是不触发风控的一部分。
 CATALOG_REFRESH_COOLDOWN = 30.0
 _catalog_refresh_at = {}
 
 def refresh_catalog(realm):
-    """手动刷新：立即向上游拉一次该 realm 的目录并发布到 /v1/models。
-
-    与自动链共用取数管线：fetch_remote_product_config 只挑该 realm 的代表账号、
-    只打该 realm 的端点，realm 隔离由 POOL.representative(realm=realm) 保证，
-    绝无跨区取数；_catalog_lock 与自动链互斥，不会并发打到上游；失败不清旧缓存，
-    清单保持可用。与自动链的差别：这里不读桌面缓存文件，拉不到就说拉不到，
-    手动按钮要的是「这次真的从上游 API 取到了」的如实反馈。
-
-    返回面板可直接展示的 dict，任何情况都不抛异常：
-      {"ok": bool, "realm": str|None, "source": "remote"|None,
-       "count": int, "cooldown": bool?, "retry_after": float?, "msg": str}
-    """
+    """手动刷新：立即向上游拉一次该 realm 的目录并发布到 /v1/models。与自动链共用取数管线（只挑该
+    realm 的代表账号与端点，POOL.representative(realm=realm) 保证 realm 隔离，绝无跨区取数）；
+    _catalog_lock 与自动链互斥，不会并发打到上游；失败不清旧缓存。不读桌面缓存文件，拉不到就说拉不到
+    ——这条路径要的是「这次真的从上游 API 取到了」。任何情况都不抛异常，返回可直接展示的 dict：
+    {"ok", "realm", "source", "count", "cooldown"?, "retry_after"?, "msg"}。"""
     if realm not in ("intl", "cn"):
         return {"ok": False, "realm": None, "source": None, "count": 0,
                 "msg": "realm 必须是 intl 或 cn"}
@@ -653,15 +602,13 @@ def refresh_catalog(realm):
     return {"ok": True, "realm": realm, "source": "remote", "count": len(entries),
             "msg": "已从上游 API 更新清单，共 %d 个模型" % len(entries)}
 
-#: 目录的「每天至少从上游 API 取一次」兜底。活跃部署里 fetch_models 的 300s
-#: 缓存把数据刷得更勤；这个后台循环只兜长时间没人访问、或自动链一直回退到缓存
-#: 文件/内置快照两种情况。上游有 WAF，频率上限是每 realm 每天一次：成功即打点，
-#: 距上次成功满 24h 才再触发；失败不动成功记录，随循环每小时再试。
+#: 「每天至少从上游 API 取一次」的兜底。fetch_models 的 300s 缓存在活跃部署里刷得更勤，这个循环
+#: 只兜长时间无人访问、或一直回退到缓存文件/内置快照的情况。上游有 WAF，频率上限每 realm 每天
+#: 一次：成功即打点，距上次成功满 24h 才再触发；失败不动成功记录，随循环每小时再试。
 CATALOG_DAILY_INTERVAL = 24 * 3600
 _catalog_last_remote = {}
 
 def note_remote_catalog(realm, when=None):
-    """记下该 realm 最近一次成功从上游 API 拿到目录的时刻。"""
     if realm not in ("intl", "cn"):
         return
     with _lock:
@@ -675,12 +622,8 @@ def catalog_daily_due(now=None):
                 if now - _catalog_last_remote.get(r, 0.0) >= CATALOG_DAILY_INTERVAL]
 
 def catalog_daily_pass(now=None):
-    """每日兜底的一轮：只为到期的 realm 触发一次刷新。
-
-    与手动刷新共用 refresh_catalog，同一把 _catalog_lock、同一个 30s 冷却、
-    同样的 realm 隔离，失败保留旧数据。没有可用账号的 realm 静默跳过，等有账号
-    了下一轮再看，不留日志噪声。
-    """
+    """只为到期的 realm 触发一次刷新。与手动刷新共用 refresh_catalog（同一把 _catalog_lock、同一个
+    30s 冷却、同样的 realm 隔离），失败保留旧数据；没有可用账号的 realm 静默跳过，不留日志噪声。"""
     done = []
     for realm in catalog_daily_due(now):
         if _gateway().POOL is None or _gateway().POOL.representative(realm=realm) is None:
@@ -711,16 +654,12 @@ def product_config_path(realm):
     return os.path.join(home, cache_dir, "cache", "acc-product-config-v3.json")
 
 def catalog_cache_path(realm=None):
-    """网关自己的落盘副本：最近一次成功拉取的 /v3/config 响应体。"""
     return os.path.join(CATALOG_CACHE_DIR,
                         "product-config-%s.json" % (realm or _gateway().CURRENT_REALM))
 
 def persist_remote_catalog(realm, payload):
-    """把刚成功拉取的 /v3/config 响应体原样落盘一份，原子写、失败静默。
-
-    落盘副本同时是兜底来源：快照不可用且远程拉取失败时 read_gateway_catalog
-    会读它。写盘失败不是取数失败，绝不能影响本次结果。
-    """
+    """原子写、失败静默。落盘副本同时是兜底来源（read_gateway_catalog 会读它）。写盘失败不是取数
+    失败，绝不能影响本次结果。"""
     try:
         os.makedirs(CATALOG_CACHE_DIR, exist_ok=True)
         path = catalog_cache_path(realm)
@@ -766,7 +705,6 @@ def persist_catalog_snapshot(realm, ids, meta):
         _gateway().log("catalog snapshot: %s persist failed (%s)" % (realm, exc))
 
 def read_gateway_catalog(realm):
-    """读网关自己最近一次成功的 /v3/config 副本，得 (ids, meta)。"""
     try:
         with open(catalog_snapshot_path(realm), encoding="utf-8") as fh:
             snapshot = json.load(fh)
@@ -805,7 +743,6 @@ def read_catalog_cache():
     return out
 
 def write_catalog_cache(data):
-    """套用补丁后的存档视图，测试用它把副本做旧。"""
     realms = (data or {}).get("realms") or {}
     for realm, item in realms.items():
         path = catalog_snapshot_path(realm)
@@ -820,14 +757,10 @@ def write_catalog_cache(data):
             continue
 
 def curated_live_sources(realm, force=False):
-    """该 realm 活目录的 (entries, extras, source)，已按选择器规则裁剪。
-
-    先远端后桌面缓存文件，缓存就是同一份响应落盘，两者走同一解析与规则。
-    extras 表示条目来自桌面目录，其成员可能带裁剪表没见过的模型；legacy 读取
-    保持旧白名单语义。source 标明批次出处：remote 为上游 /v3/config，cache 为
-    同机桌面缓存文件，legacy 为同一文件的宽松解析，面板据此把「通过 API 获取」
-    与「读取配置文件」分开说；None 表示哪里都没拿到。
-    """
+    """先远端后桌面缓存文件（缓存就是同一份响应落盘，两者走同一解析与规则）；extras 表示条目来自
+    桌面目录，其成员可能带裁剪表没见过的模型；legacy 读取保持旧白名单语义。source 标明批次出处：
+    remote 为上游 /v3/config，cache 为同机桌面缓存文件，legacy 为同一文件的宽松解析，面板据此把
+    「通过 API 获取」与「读取配置文件」分开说；None 表示哪里都没拿到。"""
     gateway = read_gateway_catalog(realm)
     age = gateway_catalog_age(realm)
     if gateway and not force and age is not None and age < CATALOG_CACHE_TTL:

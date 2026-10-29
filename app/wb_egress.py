@@ -31,8 +31,7 @@ def _jitter(wait):
 def note_transient(key, now=None):
     """记录一次出口级瞬时失败，返回本次应退避的秒数。
 
-    计数器在出口上，同一出口的多个账号一起抖动只会拉长这段退避，不会各自进入
-    熔断。
+    计数器在出口上：同一出口的多个账号一起抖动只拉长这段退避，不各自熔断。
     """
     now = time.time() if now is None else now
     with _lock:
@@ -46,10 +45,7 @@ def note_transient(key, now=None):
 
 
 def note_success(key):
-    """该出口成功一次后清零连续计数。
-
-    与账号级 note_success 同一规则：成功即清零，不让上一次的阶梯继续生效。
-    """
+    """清零该出口的连续计数；与账号级 note_success 同一规则：成功即清零。"""
     with _lock:
         _state.pop(key, None)
 

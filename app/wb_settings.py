@@ -120,11 +120,8 @@ _load_cache = {}
 
 
 class SettingsError(Exception):
-    """accounts/settings.json 读不出来时抛出，消息里带文件路径。
-
-    解析失败绝不能退回空字典：那会让面板密码回到默认的 "admin"，紧随其后的
-    save() 会把空字典写回磁盘，整份设置就此消失。
-    """
+    """accounts/settings.json 读不出来时抛出，消息里带文件路径。解析失败绝不能退回空字典：
+    那会让面板密码回到默认的 "admin"，紧随其后的 save() 会把空字典写回磁盘。"""
 
 
 def settings_path(accounts_dir):
@@ -147,12 +144,9 @@ def _digest(password, salt_hex, rounds=PBKDF2_ROUNDS):
 
 
 def load(accounts_dir):
-    """读取持久化的设置，新安装返回空字典。
-
-    文件缺失视为新安装；其他情况一律抛出 SettingsError 并带上文件名，包括
-    JSON 无法解析与顶层不是对象。读取与写入持有同一把锁：在 Windows 上，
-    读方保持文件打开会让写方的 os.replace() 以 WinError 5 失败。
-    """
+    """读取持久化的设置，新安装返回空字典。文件缺失视为新安装，其他情况一律抛
+    SettingsError。读取与写入持有同一把锁：Windows 上读方保持文件打开会让写方的
+    os.replace() 以 WinError 5 失败。"""
     path = settings_path(accounts_dir)
     with _lock:
         try:
@@ -204,11 +198,8 @@ def _write_atomic(accounts_dir, path, tmp, data):
 
 
 def save(accounts_dir, data):
-    """原子写入，进程崩溃不会留下写了一半的设置文件。
-
-    临时文件名带上 pid 与线程 id，两个写方不会共用同一个临时文件。目录只建
-    一次：os.makedirs 每次都会 stat 整条路径，在慢盘上是明显的固定开销。
-    """
+    """原子写入，进程崩溃不会留下写了一半的设置文件。临时文件名带上 pid 与线程 id，
+    两个写方不会共用同一个临时文件；目录只建一次，os.makedirs 每次都会 stat 整条路径。"""
     with _lock:
         if accounts_dir not in _SAVED_DIRS:
             os.makedirs(accounts_dir, exist_ok=True)
@@ -233,11 +224,8 @@ def save(accounts_dir, data):
 
 
 def _secure_equals(left, right):
-    """常数时间比较两个凭据。
-
-    hmac.compare_digest() 遇到含非 ASCII 字符的 str 会抛 TypeError，因此改为
-    比较 UTF-8 字节；不是字符串的值永远不匹配。
-    """
+    """常数时间比较两个凭据。hmac.compare_digest() 遇到含非 ASCII 字符的 str 会抛
+    TypeError，因此改为比较 UTF-8 字节；不是字符串的值永远不匹配。"""
     if not isinstance(left, str) or not isinstance(right, str):
         return False
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
@@ -262,11 +250,8 @@ def _password_rounds(data, path):
 
 
 def deep_merge(base, patch):
-    """把 patch 递归合并进 base，未知的同级键保留。
-
-    面板表单只提交自己管理的键。整组替换会静默丢掉手写或后续新增的键，因此
-    嵌套对象按键合并。返回新字典，不修改入参。
-    """
+    """把 patch 递归合并进 base，未知的同级键保留。面板表单只提交自己管理的键，整组替换会
+    静默丢掉手写或后续新增的键。返回新字典，不修改入参。"""
     if not isinstance(base, dict) or not isinstance(patch, dict):
         return patch
     out = dict(base)
@@ -286,7 +271,6 @@ def panel_password_is_default(accounts_dir):
 
 
 def verify_panel_password(accounts_dir, password):
-    """密码能打开网页面板时返回 True。"""
     password = password or ""
     data = load(accounts_dir)
     stored = data.get("panel_password_hash")
@@ -340,12 +324,8 @@ def set_api_key(accounts_dir, key):
 
 
 def ensure_launcher_key(accounts_dir):
-    """返回持久化的局域网 Key，首次使用时生成。
-
-    局域网模式绝不能自带众所周知默认值：网关消耗的是账号自己的上游额度，
-    同一网络中的任何人都能把它耗光。返回 key 与是否新建，调用方据此告知
-    用户本次运行是否生成了新凭据。
-    """
+    """返回持久化的局域网 Key，首次使用时生成。局域网模式绝不能自带众所周知默认值：网关
+    消耗的是账号自己的上游额度，同一网络中的任何人都能把它耗光。返回 key 与是否新建。"""
     with _lock:
         data = load(accounts_dir)
         existing = str(data.get("launcher_key") or "").strip()
@@ -365,11 +345,8 @@ REALMS = ("", "intl", "cn")
 
 
 def clean_model_patterns(value):
-    """把一份模型白名单归一化为小写模式列表。
-
-    接受提交的列表或逗号分隔字符串，匹配使用 fnmatch，精确名与通配符行为
-    一致。结果为空表示“不限制”，没有该字段的历史条目也读回这种行为。
-    """
+    """把一份模型白名单归一化为小写模式列表。接受列表或逗号分隔字符串，匹配使用 fnmatch，
+    精确名与通配符行为一致；结果为空表示不限制。"""
     if isinstance(value, str):
         raw = [part for part in re.split(r"[,;\n]", value)]
     elif isinstance(value, (list, tuple, set)):
@@ -385,12 +362,8 @@ def clean_model_patterns(value):
 
 
 def patterns_allow_model(patterns, model):
-    """patterns 不构成限制，或 model 命中其中一条时返回 True。
-
-    空列表的 Key 保持不限制，从未使用该字段的安装行为不变。受限 Key 未带
-    模型名时直接拒绝而非放行：请求没有说明它要用的模型在 Key 允许范围内，
-    转发只会带着空模型名到达上游，白白消耗一次必然失败的尝试。
-    """
+    """patterns 不构成限制，或 model 命中其中一条时返回 True。受限 Key 未带模型名时直接
+    拒绝：转发只会带着空模型名到达上游，白白消耗一次必然失败的尝试。"""
     cleaned = clean_model_patterns(patterns)
     if not cleaned:
         return True
@@ -401,7 +374,6 @@ def patterns_allow_model(patterns, model):
 
 
 def key_allows_model(entry, model):
-    """entry 不构成模型限制，或 model 命中时返回 True。"""
     return patterns_allow_model((entry or {}).get("models"), model)
 
 
@@ -436,11 +408,8 @@ def _ip_entry_source(value):
 
 
 def clean_ip_allowlist(value):
-    """校验面板提交的白名单，返回条目与问题描述。
-
-    每个条目必须是地址或 CIDR 块，否则一个笔误会在文件里看起来像规则，
-    实际匹配不到任何地址。空条目丢弃；结果为空表示允许所有地址。
-    """
+    """校验面板提交的白名单，返回条目与问题描述。每个条目必须是地址或 CIDR 块，否则一个
+    笔误会在文件里看起来像规则，实际匹配不到任何地址；空条目丢弃，结果为空表示允许所有。"""
     raw = _ip_entry_source(value)
     if value not in (None, "", []) and not isinstance(value, (str, list, tuple, set)):
         return [], "ip_allowlist must be a list of IPs or CIDR blocks"
@@ -458,11 +427,8 @@ def clean_ip_allowlist(value):
 
 
 def stored_ip_allowlist(value):
-    """从磁盘读取白名单，只保留能解析的条目。
-
-    读取不得抛出异常：手改文件里有一行坏值，其余能解析的行仍应继续限制
-    流量。完全解析不出条目的列表由 ip_allowed 视为不限制。
-    """
+    """从磁盘读取白名单，只保留能解析的条目。读取不得抛出异常：手改文件里有一行坏值，
+    其余能解析的行仍应继续限制流量；完全解析不出条目的列表由 ip_allowed 视为不限制。"""
     entries = []
     for item in _ip_entry_source(value):
         canonical = _ip_entry_text(item)
@@ -472,10 +438,8 @@ def stored_ip_allowlist(value):
 
 
 def ip_allowed(allowlist, client_ip):
-    """client_ip 在白名单内时返回 True；空列表允许所有地址。
-
-    配置了列表后，无法解析的地址一律拒绝。
-    """
+    """client_ip 在白名单内时返回 True；空列表允许所有地址，配置了列表后无法解析的地址
+    一律拒绝。"""
     entries = stored_ip_allowlist(allowlist)
     if not entries:
         return True
@@ -493,10 +457,7 @@ def ip_allowed(allowlist, client_ip):
 
 
 def clean_epoch_field(value, label):
-    """校验面板提交的 epoch 秒，返回秒数与问题描述。
-
-    空值或 0 表示不限制或永不过期，没有该字段的历史条目也读回 0。
-    """
+    """校验面板提交的 epoch 秒，返回秒数与问题描述。空值或 0 表示不限制或永不过期。"""
     if value in (None, "", False):
         return 0, ""
     if isinstance(value, bool):
@@ -541,7 +502,6 @@ def clean_quota_credit(value):
 
 
 def key_expired(entry, now=None):
-    """Key 带有已过去的过期时间时返回 True。"""
     expires_at = (entry or {}).get("expires_at") or 0
     if not expires_at:
         return False
@@ -582,12 +542,8 @@ def key_status(entry, usage, now=None):
 
 
 def _clean_key_entry(entry):
-    """归一化一条存储的 Key，无法使用时返回 None。
-
-    已删除的条目保留行，但密钥已清空：用量日志按 id 记录，丢掉该行会让这个
-    Key 过去的每条请求都无法归属。删除是单向的，密钥不会再存回，条目也只
-    可读，无法重新启用。
-    """
+    """归一化一条存储的 Key，无法使用时返回 None。已删除的条目保留行，但密钥已清空：
+    用量日志按 id 记录，丢掉该行会让这个 Key 过去的每条请求都无法归属。"""
     if not isinstance(entry, dict):
         return None
     key = str(entry.get("key") or "").strip()
@@ -623,11 +579,8 @@ def _clean_key_entry(entry):
 
 
 def _unique_key_id(candidate, used):
-    """返回 candidate，或一个不在 used 中的变体。
-
-    设置文件可能有两行同 id；后出现的重复项加数字后缀，后缀是确定的，因此
-    /settings 读到的 id 在随后的 reveal 中仍能解析。
-    """
+    """返回 candidate，或一个不在 used 中的变体。设置文件可能有两行同 id；后出现的
+    重复项加数字后缀，后缀是确定的，/settings 读到的 id 在随后的 reveal 中仍能解析。"""
     candidate = str(candidate or "").strip()
     if candidate and candidate not in used:
         return candidate
@@ -645,16 +598,10 @@ def _unique_key_id(candidate, used):
 
 
 def api_keys(accounts_dir, include_deleted=False):
-    """所有已配置的 Key，按当前条目形状返回。
-
-    只带 api_key 与 api_key_set 的设置文件会呈现为一个未绑定出口的条目，
-    升级无需迁移步骤。id 在读与写时都会去重，文件里已有重复 id 时无需先保存
-    才能得到可区分的行。
-
-    已删除的条目默认隐藏：它们不再是凭据，match_api_key 绝不能看到。行仍留
-    在磁盘上，include_deleted 时返回，因为用量日志按 id 指代 Key，没有名字的
-    id 无法阅读。
-    """
+    """所有已配置的 Key，按当前条目形状返回。只带 api_key 与 api_key_set 的设置文件呈现为
+    一个未绑定出口的条目，升级无需迁移；id 在读与写时都去重。已删除的条目默认隐藏：它们
+    不再是凭据，match_api_key 绝不能看到；行仍留在磁盘上，include_deleted 时返回，
+    因为用量日志按 id 指代 Key。"""
     data = load(accounts_dir)
     stored = data.get("api_keys")
     if isinstance(stored, list):
@@ -714,28 +661,18 @@ def _retired_key_entry(old):
 
 
 def set_api_keys(accounts_dir, keys, delete_ids=None):
-    """保存 Key 列表，返回保存后的存活列表。
-
-    删除采用软删除：用量日志按 id 归属花费，丢掉 id 会把该 Key 的整段历史
-    倒进“(未知 key)”，因此删除时同步清空密钥，已删除的 Key 永远无法再通过
-    认证。
-
-    两种模式决定哪些已存 Key 被软删除：
-
-    - delete_ids 为 None：替换语义。keys 中缺席的已存 Key 全部退役，省略某
-      行即删除是该模式的既有用法，所以保持为默认。
-    - delete_ids 为列表：upsert 语义。只有列表中的 id 被退役，提交中未提及
-      的已存 Key 保持不变。面板使用该模式，因为它的提交内容就是内存中的行，
-      列表可能过期或不完整，例如第二个浏览器标签、保存与保存后重载竞争、
-      重载失败，这些情况不能退役用户从未删除的 Key。
-    """
+    """保存 Key 列表，返回保存后的存活列表。删除采用软删除：用量日志按 id 归属花费，
+    丢掉 id 会把该 Key 的整段历史倒进“(未知 key)”，删除时同步清空密钥，已删除的 Key
+    永远无法再通过认证。两种模式决定哪些已存 Key 被软删除：delete_ids 为 None 是替换
+    语义，keys 中缺席的已存 Key 全部退役（省略某行即删除是既有用法）；delete_ids 为
+    列表是 upsert 语义，只有列表中的 id 被退役，面板使用该模式，因为提交内容可能过期
+    或不完整（第二个浏览器标签、保存与重载竞争），不能退役用户从未删除的 Key。"""
     with _lock:
         previous = api_keys(accounts_dir, include_deleted=True)
         upsert = delete_ids is not None
         drop = {str(entry_id) for entry_id in (delete_ids or [])}
-        # upsert 模式：记录已存存活密钥，提交行丢失 id 时，例如过期面板重发
-        # 已保存的 Key，可沿用已存 id 原地更新，不必新建一条把用量历史拆成
-        # 两段。
+        # upsert 模式：提交行丢失 id 时（例如过期面板重发已保存的 Key）可沿用已存 id 原地
+        # 更新，不必新建一条把用量历史拆成两段。
         live_secret_id = {}
         if upsert:
             for old in previous:
@@ -786,10 +723,8 @@ def set_api_keys(accounts_dir, keys, delete_ids=None):
 
 
 def match_api_key(accounts_dir, supplied, extra_keys=()):
-    """找出请求出示的是哪个已配置 Key，没有匹配时返回 None。
-
-    返回值是条目副本，并带上 source 字段。
-    """
+    """找出请求出示的是哪个已配置 Key，没有匹配时返回 None。返回值是条目副本，带上
+    source 字段。"""
     supplied = (supplied or "").strip()
     if not supplied:
         return None
@@ -822,7 +757,6 @@ def match_api_key(accounts_dir, supplied, extra_keys=()):
 
 
 def auth_disabled(accounts_dir):
-    """操作者完全关闭 API Key 校验时返回 True。"""
     return _bool_setting(accounts_dir, "auth_disabled", False)
 
 
@@ -847,7 +781,6 @@ LIMIT_DEFAULTS = {"expiring_window_days": 7}
 
 
 def _default_global(key):
-    """安装尚未保存过任何值时读取的全局默认值。"""
     try:
         return max(0, int(LIMIT_DEFAULTS.get(key, 0)))
     except (TypeError, ValueError):
@@ -882,11 +815,8 @@ def _coerce_override(value):
 
 
 def _fold_legacy_limits(data):
-    """把四个平铺的顶层守卫移进 limits。
-
-    返回是否改动与分组后的 map。折叠时删除原键，回滚后也不会从分组副本旁
-    复活过期阈值。
-    """
+    """把四个平铺的顶层守卫移进 limits，返回是否改动与分组后的 map。折叠时删除原键，
+    回滚后也不会从分组副本复活过期阈值。"""
     limits = {}
     changed = False
     for key in LIMIT_KEYS:
@@ -920,11 +850,8 @@ def _normalize_limits(raw):
 
 
 def limits_data(accounts_dir):
-    """分组后的守卫 map，首次读取时迁移平铺格式的文件。
-
-    读取即升级：第一次看到平铺的 settings.json 时把四个键折叠进 limits 并
-    改写文件，网关其余部分只会看到一种形状。
-    """
+    """分组后的守卫 map。读取即升级：第一次看到平铺的 settings.json 时把四个键折叠进
+    limits 并改写文件，网关其余部分只会看到一种形状。"""
     with _lock:
         data = load(accounts_dir)
         raw = data.get(LIMITS_KEY)
@@ -947,11 +874,8 @@ def limits_snapshot(accounts_dir):
 
 
 def limit_value(accounts_dir, key, realm=None):
-    """某个守卫在一个出口域的生效值。
-
-    realm 为 None 或空串时返回全局默认值；intl/cn 覆盖存在时优先。未知键
-    读作 0 即关闭，笔误不会卡住请求路径。
-    """
+    """某个守卫在一个出口域的生效值。realm 为空时返回全局默认值，intl/cn 覆盖存在时优先；
+    未知键读作 0 即关闭，笔误不会卡住请求路径。"""
     entry = limits_data(accounts_dir).get(key) or _empty_limit_entry()
     if realm in LIMIT_REALMS:
         override = entry.get(realm)
@@ -961,12 +885,8 @@ def limit_value(accounts_dir, key, realm=None):
 
 
 def limit_values_many(accounts_dir, keys):
-    """一次设置读取解析多个守卫在各出口域的取值。
-
-    逐个调用 limit_values 会重复读文件并重新归一化整份分组 map；请求路径上
-    的每日守卫需要同一份 map，因此在这里共享一次读取。实现只有一份，
-    limit_values 就是单键版本。
-    """
+    """一次设置读取解析多个守卫在各出口域的取值。逐个调用 limit_values 会重复读文件并
+    重新归一化整份分组 map，请求路径上的每日守卫需要同一份 map。"""
     grouped = limits_data(accounts_dir)
     out = {}
     for key in keys:
@@ -981,20 +901,14 @@ def limit_values_many(accounts_dir, keys):
 
 
 def limit_values(accounts_dir, key):
-    """某个守卫在每个出口域的取值，含继承的全局值。
-
-    返回 global、intl、cn 三个键。未设置覆盖时 intl 与 cn 已带全局值，
-    账号池可直接按账号所属出口取值，无需第二次读取设置。
-    """
+    """某个守卫在每个出口域的取值，含继承的全局值，返回 global、intl、cn 三个键。未设置
+    覆盖时 intl 与 cn 已带全局值，账号池可直接按账号所属出口取值。"""
     return limit_values_many(accounts_dir, (key,))[key]
 
 
 def set_limit(accounts_dir, key, scope, value):
-    """保存某个守卫在某个作用域的取值，返回存储的条目。
-
-    scope 为 global、intl 或 cn；None 或空值把 intl/cn 覆盖清回继承，
-    global 槽位始终存数字。
-    """
+    """保存某个守卫在某个作用域的取值，返回存储的条目。scope 为 global、intl 或 cn；
+    None 或空值把 intl/cn 覆盖清回继承，global 槽位始终存数字。"""
     if key not in LIMIT_KEYS:
         raise ValueError("unknown limit: %s" % key)
     if scope not in LIMIT_SCOPES:
@@ -1025,7 +939,6 @@ def reserve_credits(accounts_dir, realm=None):
 
 
 def set_reserve_credits(accounts_dir, value):
-    """保存守卫阈值，返回存储的值。"""
     return set_limit(accounts_dir, "reserve_credits", "global", value)["global"]
 
 
@@ -1038,59 +951,42 @@ def daily_token_limit(accounts_dir, realm=None):
 
 
 def set_daily_token_limit(accounts_dir, value):
-    """保存每日 token 阈值，返回存储的值。"""
     return set_limit(accounts_dir, "daily_token_limit", "global", value)["global"]
 
 
 def daily_credit_limit(accounts_dir, realm=None):
-    """每日积分守卫：今天已花掉该数量积分的账号在本地零点前只服务免费
-    模型，因此会继续使用付费模型的客户端会轮换到其他账号，避免耗尽整份余额。
-
-    0 关闭守卫，尚未设置该值的安装行为不变。
-    """
+    """每日积分守卫：今天已花掉该数量积分的账号在本地零点前只服务免费模型，会继续使用
+    付费模型的客户端会轮换到其他账号。0 关闭守卫。"""
     return limit_value(accounts_dir, "daily_credit_limit", realm)
 
 
 def set_daily_credit_limit(accounts_dir, value):
-    """保存每日积分阈值，返回存储的值。"""
     return set_limit(accounts_dir, "daily_credit_limit", "global", value)["global"]
 
 
 def model_daily_token_limit(accounts_dir, realm=None):
-    """按模型每日守卫：今天在单个模型上已消耗该数量 token 的账号，在本地
-    零点前不再被派发该模型，其他模型不受影响。
-
-    0 关闭守卫，尚未设置该值的安装行为不变。
-    """
+    """按模型每日守卫：今天在单个模型上已消耗该数量 token 的账号，在本地零点前不再被
+    派发该模型。0 关闭守卫。"""
     return limit_value(accounts_dir, "model_daily_token_limit", realm)
 
 
 def set_model_daily_token_limit(accounts_dir, value):
-    """保存按模型每日 token 阈值，返回存储的值。"""
     return set_limit(accounts_dir, "model_daily_token_limit", "global", value)["global"]
 
 
 def expiring_window_days(accounts_dir, realm=None):
-    """临期额度窗口，单位天：账号最快到期的额度包落在此窗口内时，账号池
-    优先派发该账号，让即将失效的额度先用掉。
-
-    0 关闭该偏好，派发退化为纯轮询；默认值为 7 天。
-    """
+    """临期额度窗口，单位天：账号最快到期的额度包落在此窗口内时，账号池优先派发该账号。
+    0 关闭该偏好，派发退化为纯轮询；默认值为 7 天。"""
     return limit_value(accounts_dir, "expiring_window_days", realm)
 
 
 def set_expiring_window_days(accounts_dir, value):
-    """保存窗口天数，返回存储的值。"""
     return set_limit(accounts_dir, "expiring_window_days", "global", value)["global"]
 
 
 def credits_refresh_hours(accounts_dir):
-    """信用余额允许的陈旧时长，单位小时，超过后由后台刷新器更新。
-
-    派发偏好读取余额，而余额只由登录与每日活跃任务刷新时，账号可能基于数天
-    前的余额或进程启动时磁盘上的值被判定。0 关闭刷新器。非数字值回落到默认
-    值，手改 settings.json 不会卡住循环。
-    """
+    """信用余额允许的陈旧时长，单位小时，超过后由后台刷新器更新，0 关闭刷新器。余额只由
+    登录与每日活跃任务刷新时，派发偏好可能基于数天前的值判定；非数字值回落到默认值。"""
     with _lock:
         data = load(accounts_dir)
         raw = data.get(CREDITS_REFRESH_HOURS_KEY)
@@ -1104,7 +1000,6 @@ def credits_refresh_hours(accounts_dir):
 
 
 def set_credits_refresh_hours(accounts_dir, value):
-    """保存刷新 TTL，返回存储的值。"""
     try:
         hours = float(value)
     except (TypeError, ValueError):
@@ -1114,12 +1009,9 @@ def set_credits_refresh_hours(accounts_dir, value):
 
 
 def section_max_height(accounts_dir):
-    """面板窗口高度上限，单位像素；0 表示不限制。
-
-    任何非整数都回落到默认值，手改 settings.json 不会把看板窗口压到一像素
-    高；超过 MAX_SECTION_MAX_HEIGHT 的值会被夹紧而非拒绝。bool 特意先检查：
-    它是 int 的子类，否则 True 会读成 1px 上限。
-    """
+    """面板窗口高度上限，单位像素；0 表示不限制。任何非整数都回落到默认值，超过
+    MAX_SECTION_MAX_HEIGHT 的值被夹紧而非拒绝。bool 特意先检查：它是 int 的子类，
+    否则 True 会读成 1px 上限。"""
     with _lock:
         raw = load(accounts_dir).get(SECTION_MAX_HEIGHT_KEY)
     if isinstance(raw, bool):
@@ -1136,7 +1028,6 @@ def section_max_height(accounts_dir):
 
 
 def set_section_max_height(accounts_dir, value):
-    """保存高度上限，返回存储的值。"""
     if isinstance(value, bool):
         number = DEFAULT_SECTION_MAX_HEIGHT
     else:
@@ -1155,12 +1046,9 @@ def _clamp_refresh_minutes(value):
 
 
 def _migrate_pricing_refresh(data, accounts_dir):
-    """返回是否找到与换算后的分钟数，原地迁移以小时为单位的设置文件。
-
-    pricing_refresh_hours 以小时存储，直接按分钟读取会把 6 小时当成 6 分钟，
-    因此这里乘以 60，写入分钟键并删除原键，只在首次读取时执行一次。非数字值
-    只删除该键并回落到默认值；0 仍表示关闭。
-    """
+    """返回是否找到与换算后的分钟数，原地迁移以小时为单位的设置文件。pricing_refresh_hours
+    直接按分钟读取会把 6 小时当成 6 分钟，因此乘以 60 写入分钟键并删除原键，只在首次
+    读取时执行一次；非数字值只删除该键并回落默认值，0 仍表示关闭。"""
     legacy = data.pop(LEGACY_PRICING_REFRESH_HOURS_KEY, None)
     if legacy is None:
         return False, None
@@ -1180,13 +1068,9 @@ def _migrate_pricing_refresh(data, accounts_dir):
 
 
 def pricing_refresh_minutes(accounts_dir):
-    """网关刷新 OpenRouter 价格历史的间隔，单位分钟。
-
-    0 关闭刷新，未设置该值的安装保持使用内置快照。以小时为单位写入的
-    settings.json 带 pricing_refresh_hours，首次读取时在此迁移，见
-    _migrate_pricing_refresh。非数字值回落到默认值，手改 settings.json 不会
-    卡住刷新循环。
-    """
+    """网关刷新 OpenRouter 价格历史的间隔，单位分钟。0 关闭刷新，未设置该值的安装使用
+    内置快照；以小时为单位写入的 settings.json 首次读取时迁移，见 _migrate_pricing_refresh。
+    非数字值回落到默认值。"""
     with _lock:
         data = load(accounts_dir)
         raw = data.get(PRICING_REFRESH_MINUTES_KEY)
@@ -1205,7 +1089,6 @@ def pricing_refresh_minutes(accounts_dir):
 
 
 def set_pricing_refresh_minutes(accounts_dir, value):
-    """保存刷新间隔，单位分钟，返回存储的值。"""
     try:
         value = float(value)
     except (TypeError, ValueError):
@@ -1221,34 +1104,23 @@ def set_pricing_refresh_minutes(accounts_dir, value):
 
 
 def pricing_variant_inherit(accounts_dir):
-    """模型名可否从去掉后缀的基名继承价格。
-
-    默认开启，除非操作者显式关闭：带渠道后缀的模型如
-    `deepseek-r1-0528-lkeap` 与上游基名是同一实体，关闭后网关会对本可精确
-    定价的模型显示“未定价”。关闭后只有覆盖表与精确名称匹配可以定价，需要
-    最严格规则的安装可保留该行为。没有该键的 settings.json 读作开启，这也是
-    默认值。
-    """
+    """模型名可否从去掉后缀的基名继承价格，默认开启。带渠道后缀的模型如
+    `deepseek-r1-0528-lkeap` 与上游基名是同一实体，关闭后网关会对本可精确定价的模型显示
+    “未定价”；关闭后只有覆盖表与精确名称匹配可以定价。没有该键的 settings.json 读作开启。"""
     return _bool_setting(accounts_dir, PRICING_VARIANT_INHERIT_KEY, True)
 
 
 def set_pricing_variant_inherit(accounts_dir, enabled):
-    """保存变体继承开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, PRICING_VARIANT_INHERIT_KEY, enabled)
 
 
 def pricing_enabled(accounts_dir):
-    """OpenRouter 价格估算总开关，默认开启，除非被关闭。
-
-    关闭后功能端到端停用：不拉取价格、不生成策略表、不计算每行成本，也不
-    显示成本列。没有该键的 settings.json 读作开启，这是所有安装的默认行为，
-    开关只用于让操作者整体关闭该功能。
-    """
+    """OpenRouter 价格估算总开关，默认开启。关闭后功能端到端停用：不拉取价格、不生成
+    策略表、不计算每行成本。没有该键的 settings.json 读作开启。"""
     return _bool_setting(accounts_dir, PRICING_ENABLED_KEY, True)
 
 
 def set_pricing_enabled(accounts_dir, enabled):
-    """保存总开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, PRICING_ENABLED_KEY, enabled)
 
 
@@ -1256,18 +1128,14 @@ COST_ESTIMATE_KEY = "cost_estimate"
 
 
 def cost_estimate(accounts_dir):
-    """费用估算使用的官方价格表与积分折算单价。
-
-    没有这个键的安装使用内置价格表，默认只有 deepseek-v4.1-flash 一项。
-    设置文件损坏时向上抛出 SettingsError，由调用方显示读取失败，避免用内置
-    价格掩盖损坏的配置。
-    """
+    """费用估算使用的官方价格表与积分折算单价。没有这个键的安装使用内置价格表，默认只有
+    deepseek-v4.1-flash 一项。设置文件损坏时向上抛出 SettingsError，由调用方显示读取失败，
+    避免用内置价格掩盖损坏的配置。"""
     stored = load(accounts_dir).get(COST_ESTIMATE_KEY)
     return wb_cost.normalise(stored)
 
 
 def set_cost_estimate(accounts_dir, raw):
-    """保存校验过的费用估算设置，返回存储的形状。"""
     return _store(accounts_dir, COST_ESTIMATE_KEY, wb_cost.clean(raw))
 
 
@@ -1280,40 +1148,29 @@ def ui_language(accounts_dir):
 
 
 def set_ui_language(accounts_dir, value):
-    """保存实例级默认界面语言。"""
     if not isinstance(value, str) or value not in UI_LANGUAGE_VALUES:
         raise ValueError("ui_language must be zh, zh-Hant or en")
     return _store(accounts_dir, UI_LANGUAGE_KEY, value)
 
 
 def smart_routing(accounts_dir):
-    """没有绑定的对话是否由评分选择放置账号。
-
-    默认开启，除非操作者关闭：评分选择把新对话交给额度即将到期且当前最空闲
-    的账号。只影响对话的第一次选择，已绑定的对话保持原账号，前缀缓存不受
-    影响。该开关用于恢复纯轮询。
-    """
+    """没有绑定的对话是否由评分选择放置账号，默认开启。评分选择把新对话交给额度即将到期
+    且当前最空闲的账号；只影响对话的第一次选择，已绑定的对话保持原账号，前缀缓存不受影响。"""
     return _bool_setting(accounts_dir, "smart_routing", True)
 
 
 def set_smart_routing(accounts_dir, enabled):
-    """保存放置开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "smart_routing", enabled)
 
 
 def session_affinity(accounts_dir):
-    """同一段对话是否固定使用同一个账号，默认打开。
-
-    上游的前缀缓存按账号保存，对话换了账号就要重新计算整段前缀。
-    """
+    """同一段对话是否固定使用同一个账号，默认打开。上游的前缀缓存按账号保存，对话换了
+    账号就要重新计算整段前缀。"""
     return _bool_setting(accounts_dir, "session_affinity", True)
 
 
 def set_session_affinity(accounts_dir, enabled):
-    """保存对话亲和开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "session_affinity", enabled)
-
-
 
 UPSTREAM_DEFAULTS = {
     "header_timeout_seconds": 120,
@@ -1324,7 +1181,6 @@ UPSTREAM_DEFAULTS = {
 
 
 def validate_upstream_patch(raw):
-    """严格校验面板保存的上游配置补丁。"""
     out = {}
     for key, value in (raw or {}).items():
         if key in ("header_timeout_seconds", "idle_timeout_seconds"):
@@ -1362,7 +1218,6 @@ def upstream_config(accounts_dir):
 
 
 def set_upstream_config(accounts_dir, cfg):
-    """保存上游配置，返回存储的配置。"""
     current = upstream_config(accounts_dir)
     if isinstance(cfg, dict):
         current.update({k: v for k, v in cfg.items() if k in UPSTREAM_DEFAULTS})
@@ -1388,7 +1243,6 @@ USAGE_LIMITS = {
 }
 
 def validate_usage_patch(raw):
-    """严格校验面板保存的聚合保留窗口补丁。"""
     out = {}
     for key, value in (raw or {}).items():
         if key not in USAGE_DEFAULTS:
@@ -1467,7 +1321,6 @@ def usage_effective(accounts_dir):
 
 
 def set_usage_config(accounts_dir, patch):
-    """保存校验过的聚合保留窗口补丁。"""
     clean = validate_usage_patch(patch)
     with _lock:
         data = load(accounts_dir)
@@ -1482,7 +1335,6 @@ PROMPT_DEFAULTS = {
 
 
 def validate_prompt_patch(raw):
-    """严格校验面板保存的提示词补丁。"""
     out = {}
     for key, value in (raw or {}).items():
         if key == "mode":
@@ -1518,7 +1370,6 @@ def prompt_config(accounts_dir):
 
 
 def set_prompt_config(accounts_dir, cfg):
-    """保存提示词设置，返回存储的配置。"""
     current = prompt_config(accounts_dir)
     if isinstance(cfg, dict):
         current.update({k: v for k, v in cfg.items() if k in PROMPT_DEFAULTS})
@@ -1531,13 +1382,11 @@ def set_prompt_config(accounts_dir, cfg):
 
 
 def enable_anthropic_messages(accounts_dir):
-    """面板设置是否启用了 Anthropic Messages 兼容层。"""
     return _flag(accounts_dir, "enable_anthropic_messages", False,
                  "WB_ENABLE_ANTHROPIC_MESSAGES")
 
 
 def set_enable_anthropic_messages(accounts_dir, enabled):
-    """保存 Anthropic Messages 开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "enable_anthropic_messages", enabled)
 
 
@@ -1548,16 +1397,12 @@ def dsh_tool_neutralization(accounts_dir):
 
 
 def set_dsh_tool_neutralization(accounts_dir, enabled):
-    """保存 DSH 工具调用通用化开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "dsh_tool_neutralization", enabled)
 
 
 def _env_flag_value(name):
-    """环境变量的布尔值：返回 (是否设置, 值)。
-
-    只认 1/true/yes/on 与 0/false/no/off；空串、拼错的值与未知值都不算设置，
-    避免把 WB_ENABLE_ANTHROPIC_MESSAGES=maybe 当成开启高风险入口。
-    """
+    """环境变量的布尔值，返回 (是否设置, 值)。只认 1/true/yes/on 与 0/false/no/off；空串、
+    拼错的值与未知值都不算设置，避免把 WB_ENABLE_ANTHROPIC_MESSAGES=maybe 当成开启。"""
     raw = os.environ.get(name)
     if raw is None or not str(raw).strip():
         return False, False
@@ -1756,60 +1601,42 @@ def free_model_credit_fallback(accounts_dir):
 
 
 def set_free_model_credit_fallback(accounts_dir, enabled):
-    """保存免费模型付费回退开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "free_model_credit_fallback", enabled)
 
 
 def auto_switch_product(accounts_dir):
-    """上游返回 429 时是否轮换账号的出口身份。
-
-    默认关闭，除非操作者打开：轮换身份会消耗请求的重试预算，并把账号留在
-    没人选择的通道上。
-    """
+    """上游返回 429 时是否轮换账号的出口身份，默认关闭。轮换身份会消耗请求的重试预算，
+    并把账号留在没人选择的通道上。"""
     return _bool_setting(accounts_dir, "auto_switch_product", False)
 
 
 def set_auto_switch_product(accounts_dir, enabled):
-    """保存自动切换开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "auto_switch_product", enabled)
 
 
 def egress_backoff_enabled(accounts_dir):
-    """瞬时失败是否记在出口上而非账号上。
-
-    默认关闭，除非操作者打开。打开后传输失败或 502/503/504 不再记入账号
-    熔断，改为在请求实际使用的出口上累积秒级退避，见 wb_egress。未设置该
-    开关的安装保持原有归账方式。
-    """
+    """瞬时失败是否记在出口上而非账号上，默认关闭。打开后传输失败或 502/503/504 不再记入
+    账号熔断，改为在请求实际使用的出口上累积秒级退避，见 wb_egress。"""
     return _bool_setting(accounts_dir, EGRESS_BACKOFF_ENABLED_KEY, False)
 
 
 def set_egress_backoff_enabled(accounts_dir, enabled):
-    """保存出口级退避开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, EGRESS_BACKOFF_ENABLED_KEY, enabled)
 
 
 def log_db_enabled(accounts_dir):
-    """运行日志是否同时追加写入 usage/logs.sqlite3。
-
-    默认关闭，除非操作者打开：关闭时日志只留在内存环形缓冲里，与上游一致，
-    不创建数据库文件。打开后开始持久副本，崩溃、重启或处理缓慢的故障事后
-    仍可回看。
-    """
+    """运行日志是否同时追加写入 usage/logs.sqlite3，默认关闭。关闭时日志只留在内存环形
+    缓冲里，不创建数据库文件；打开后开始持久副本，崩溃、重启后仍可回看。"""
     return _bool_setting(accounts_dir, LOG_DB_ENABLED_KEY, False)
 
 
 def set_log_db_enabled(accounts_dir, enabled):
-    """保存日志库开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, LOG_DB_ENABLED_KEY, enabled)
 
 
 def _positive_cap(raw, fallback, hard_max):
-    """读取一条保留上限：正整数并按硬上限夹紧。
-
-    不是可用正整数的值一律回落到 fallback，包括 bool、文本、0、负数与手改
-    的 1e400，坏掉的 settings.json 不应拖垮日志路径。
-    """
+    """读取一条保留上限：正整数并按硬上限夹紧。bool、文本、0、负数与手改的 1e400 一律
+    回落到 fallback，坏掉的 settings.json 不应拖垮日志路径。"""
     if isinstance(raw, bool):
         return fallback
     try:
@@ -1822,11 +1649,8 @@ def _positive_cap(raw, fallback, hard_max):
 
 
 def _clearable_cap(value, hard_max):
-    """写入磁盘前的一条保留上限：空白或无意义值表示不设上限。
-
-    操作者清空字段时面板提交空字符串，输入 0 表达同一意图。两者都存为
-    None，即 JSON null，读取端据此视为该维度不限。
-    """
+    """写入磁盘前的一条保留上限：空白或无意义值表示不设上限。操作者清空字段时面板提交
+    空字符串，输入 0 表达同一意图，两者都存为 None，读取端据此视为该维度不限。"""
     if value is None or value == "":
         return None
     if isinstance(value, bool):
@@ -1841,11 +1665,8 @@ def _clearable_cap(value, hard_max):
 
 
 def log_db_max_rows(accounts_dir):
-    """日志库只保留最新 N 行的上限；None 表示不限行数。
-
-    缺失键读作 None：新安装保留每一行，直到天数上限裁剪，这正是行数留空
-    的含义。
-    """
+    """日志库只保留最新 N 行的上限；None 表示不限行数。缺失键读作 None：新安装保留每一行，
+    直到天数上限裁剪，这正是行数留空的含义。"""
     raw = load(accounts_dir).get(LOG_DB_MAX_ROWS_KEY)
     return _positive_cap(raw, None, MAX_LOG_DB_MAX_ROWS)
 
@@ -1857,11 +1678,8 @@ def set_log_db_max_rows(accounts_dir, value):
 
 
 def log_db_max_days(accounts_dir):
-    """日志库的天数上限；None 表示不限天数。
-
-    与另外两条不同，缺失键读作 7 天默认值：从未设置过的安装也能得到有界的
-    数据库。主动清空字段会存 None 并关闭该上限。
-    """
+    """日志库的天数上限；None 表示不限天数。与另外两条不同，缺失键读作 7 天默认值：
+    从未设置过的安装也能得到有界的数据库；主动清空字段会存 None 并关闭该上限。"""
     data = load(accounts_dir)
     if LOG_DB_MAX_DAYS_KEY not in data:
         return DEFAULT_LOG_DB_MAX_DAYS
@@ -1878,11 +1696,8 @@ def set_log_db_max_days(accounts_dir, value):
 
 
 def log_db_max_bytes(accounts_dir):
-    """日志库文件大小上限，单位字节；None 表示不限大小。
-
-    与行数上限一样，缺失键读作 None：新安装由天数默认值保持有界，大小上限
-    留给需要对文件本身设硬顶的部署。
-    """
+    """日志库文件大小上限，单位字节；None 表示不限大小。与行数上限一样，缺失键读作 None：
+    新安装由天数默认值保持有界，大小上限留给需要对文件本身设硬顶的部署。"""
     raw = load(accounts_dir).get(LOG_DB_MAX_BYTES_KEY)
     return _positive_cap(raw, None, MAX_LOG_DB_MAX_BYTES)
 
@@ -1894,34 +1709,24 @@ def set_log_db_max_bytes(accounts_dir, value):
 
 
 def daily_chat_web(accounts_dir):
-    """intl 每日签到是否同时发起一次网页通道对话。
-
-    默认开启，除非操作者关闭：该自动化发送的桌面端身份补全不会登记每日
-    活跃，网页对话才会，见 issue #75 与 #59。该开关用于让部署恢复为单请求
-    签到。
-    """
+    """intl 每日签到是否同时发起一次网页通道对话，默认开启。该自动化发送的桌面端身份补全
+    不会登记每日活跃，网页对话才会，见 issue #75 与 #59。"""
     return _bool_setting(accounts_dir, "daily_chat_web", True)
 
 
 def set_daily_chat_web(accounts_dir, enabled):
-    """保存网页通道开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "daily_chat_web", enabled)
 
 
 def daily_chat_model(accounts_dir):
-    """intl 每日活跃使用的模型；空串表示使用内置模型。
-
-    该活动是两段只负责登记当天的临时对话，没有理由消耗积分。内置默认值已是
-    免费目录模型，这里可把活动换到另一个免费模型：当默认模型正是真实流量
-    集中的模型时，每日任务就不会占用它的窗口额度。空值表示未设置，调用方
-    回落到内置 id。
-    """
+    """intl 每日活跃使用的模型；空串表示使用内置模型。该活动是两段只负责登记当天的临时
+    对话，没有理由消耗积分；可把活动换到另一个免费模型，避免每日任务占用真实流量集中的
+    模型的窗口额度。"""
     value = load(accounts_dir).get("daily_chat_model")
     return str(value or "").strip()
 
 
 def set_daily_chat_model(accounts_dir, model):
-    """保存每日活跃模型 id，返回存储的字符串。"""
     model = str(model or "").strip()
     return _store(accounts_dir, "daily_chat_model", model)
 
@@ -1941,26 +1746,19 @@ DAILY_CHAT_WEB_ATTEMPTS_MAX = 5
 
 
 def daily_chat_web_retry(accounts_dir):
-    """失败的网页通道轮次是否重试。
-
-    默认开启，除非操作者关闭。常见失败是首次等待结束时会话仍处于
-    ``working``，属于慢而非坏，而每日活跃是唯一能拿到 30/50 积分的任务，
-    首次超时就放弃会静默损失当天奖励。关闭后只尝试一次。
-    """
+    """失败的网页通道轮次是否重试，默认开启。常见失败是首次等待结束时会话仍处于
+    ``working``，属于慢而非坏，而每日活跃是唯一能拿到 30/50 积分的任务，首次超时就放弃
+    会静默损失当天奖励。"""
     return _bool_setting(accounts_dir, "daily_chat_web_retry", True)
 
 
 def set_daily_chat_web_retry(accounts_dir, enabled):
-    """保存网页通道重试开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "daily_chat_web_retry", enabled)
 
 
 def daily_chat_web_attempts(accounts_dir, default=None):
-    """网页通道总尝试次数，含第一轮。
-
-    default 是未设置时的返回值，持有自己内置默认值的调用方可保留它。越界或
-    非整数值同样回落到 default，手改 settings.json 不会让扫描停在一个账号上。
-    """
+    """网页通道总尝试次数，含第一轮。default 是未设置时的返回值，持有自己内置默认值的
+    调用方可保留它；越界或非整数值同样回落到 default。"""
     if default is None:
         default = DAILY_CHAT_WEB_ATTEMPTS_DEFAULT
     return _bounded_int(accounts_dir, "daily_chat_web_attempts", default,
@@ -1968,7 +1766,6 @@ def daily_chat_web_attempts(accounts_dir, default=None):
 
 
 def set_daily_chat_web_attempts(accounts_dir, attempts):
-    """保存总尝试次数，返回存储的整数。"""
     if isinstance(attempts, bool) or not isinstance(attempts, int):
         raise ValueError("daily_chat_web_attempts must be a whole number")
     if attempts < 1:
@@ -1980,13 +1777,9 @@ def set_daily_chat_web_attempts(accounts_dir, attempts):
 
 
 def daily_chat_web_timeout(accounts_dir, default=None):
-    """网页通道首轮等待秒数，后续轮次翻倍。
-
-    default 是未设置时的返回值，持有自己内置默认值的调用方，例如可由环境
-    变量 WB_WEB_TURN_TIMEOUT 覆盖的一方，可保留自己的值，不会因为该设置存在
-    而被静默重置为 120。非整数或越界值同样回落到 default，手改
-    settings.json 不会让调度器卡在巨大值上或因字符串出错。
-    """
+    """网页通道首轮等待秒数，后续轮次翻倍。default 是未设置时的返回值，持有自己内置
+    默认值的调用方（例如可由 WB_WEB_TURN_TIMEOUT 覆盖的一方）不会因为该设置存在而被
+    静默重置为 120；非整数或越界值同样回落到 default。"""
     if default is None:
         default = DAILY_CHAT_WEB_TIMEOUT_DEFAULT
     return _bounded_int(accounts_dir, "daily_chat_web_timeout", default,
@@ -1994,7 +1787,6 @@ def daily_chat_web_timeout(accounts_dir, default=None):
 
 
 def set_daily_chat_web_timeout(accounts_dir, seconds):
-    """保存单轮等待秒数，返回存储的整数秒。"""
     if isinstance(seconds, bool) or not isinstance(seconds, int):
         raise ValueError("daily_chat_web_timeout must be a whole number of seconds")
     if seconds < 1:
@@ -2006,17 +1798,13 @@ def set_daily_chat_web_timeout(accounts_dir, seconds):
 
 
 def local_web_tools(accounts_dir):
-    """网关是否自己执行 web_search 与 web_fetch 调用。
-
-    默认关闭，除非操作者打开：关闭时声明服务端搜索工具的客户端在自己的进程
-    里执行。打开后网关把自己的函数声明换给模型并在本地执行调用，见
-    wb_webtools，网关会亲自抓取模型请求的 URL，因此只做显式开启。
-    """
+    """网关是否自己执行 web_search 与 web_fetch 调用，默认关闭。打开后网关把自己的函数
+    声明换给模型并在本地执行调用，见 wb_webtools；网关会亲自抓取模型请求的 URL，
+    因此只做显式开启。"""
     return _bool_setting(accounts_dir, "local_web_tools", False)
 
 
 def set_local_web_tools(accounts_dir, enabled):
-    """保存本地 web 工具开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, "local_web_tools", enabled)
 
 
@@ -2030,12 +1818,8 @@ def _test_model_key(realm):
 
 
 def test_model(accounts_dir, realm=None):
-    """面板账号测试按出口发送的模型。
-
-    测试会用账号自己的额度执行一次真实补全，因此必须使用该账号可调用的
-    模型。只带一个共用值的设置文件，在面板写入某个出口的选择之前，该值继续
-    生效。
-    """
+    """面板账号测试按出口发送的模型。测试会用账号自己的额度执行一次真实补全，必须使用
+    该账号可调用的模型；只带一个共用值的设置文件，在面板写入某个出口的选择之前继续生效。"""
     data = load(accounts_dir)
     key = _test_model_key(realm)
     value = str(data.get(key) or "").strip() if key else ""
@@ -2079,11 +1863,9 @@ TEST_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def parse_test_model(value):
-    """校验 /settings/save 的 test model；返回 (model, error)。
-
-    空串表示清除设置、恢复默认。id 会原样发到账号的上游，非上游风格模型名的值
-    在这里就拒绝，免得烧掉账号额度去换一个必然 400 的调用。
-    """
+    """校验 /settings/save 的 test model，返回 (model, error)。空串表示清除设置、恢复默认。
+    id 会原样发到账号的上游，非上游风格模型名的值在这里就拒绝，免得烧掉账号额度去换一个
+    必然 400 的调用。"""
     if isinstance(value, bool) or not isinstance(value, str):
         return None, "test_model must be a model id string"
     model = value.strip()
@@ -2126,11 +1908,8 @@ def model_served(accounts_dir, model):
 
 
 def excluded_seen(accounts_dir):
-    """默认排除已经应用过的模型 id。
-
-    目录里被筛选规则丢掉的模型默认加入停止名单；这份记录保证操作者把它们
-    重新勾选之后，下一次加载不会又关掉。
-    """
+    """默认排除已经应用过的模型 id。目录里被筛选规则丢掉的模型默认加入停止名单；这份
+    记录保证操作者把它们重新勾选之后，下一次加载不会又关掉。"""
     return _clean_model_ids(load(accounts_dir).get("excluded_seen"))
 
 
@@ -2152,11 +1931,8 @@ MESSAGES_FORMATS = ("openai-completions", "openai-responses")
 
 
 def messages_format(accounts_dir):
-    """/v1/messages 翻译后的请求所走的管线。
-
-    openai-completions 直接翻译成 Chat Completions，openai-responses 先翻译
-    成 Responses。无法识别的值一律读回默认值。
-    """
+    """/v1/messages 翻译后的请求所走的管线。openai-completions 直接翻译成 Chat Completions，
+    openai-responses 先翻译成 Responses；无法识别的值一律读回默认值。"""
     value = str(load(accounts_dir).get("messages_format") or "").strip()
     return value if value in MESSAGES_FORMATS else DEFAULT_MESSAGES_FORMAT
 
@@ -2170,41 +1946,29 @@ def set_messages_format(accounts_dir, value):
 
 
 def accounts_collapsed(accounts_dir):
-    """面板账号区是否折叠。
-
-    只有存储值为布尔 true 时才折叠。`is True` 就是全部归一化：手改的
-    "false"、1、对象或缺失键都读作展开，任何一个都不会意外隐藏账号区。面板
-    只通过 set_accounts_collapsed 写入真正的布尔值。
-    """
+    """面板账号区是否折叠。只有存储值为布尔 true 时才折叠：手改的 "false"、1、对象或
+    缺失键都读作展开，任何一个都不会意外隐藏账号区。"""
     return _bool_setting(accounts_dir, ACCOUNTS_COLLAPSED_KEY, False)
 
 
 def set_accounts_collapsed(accounts_dir, collapsed):
-    """保存账号区折叠状态，返回存储的布尔值。"""
     return _set_flag(accounts_dir, ACCOUNTS_COLLAPSED_KEY, collapsed)
 
 
 def key_before_hidden(accounts_dir):
-    """按 Key 用量表是否折叠 `(切换前)` 行。
-
-    只有存储值为布尔 true 时才隐藏，归一化与 accounts_collapsed 相同：该行
-    是有价值的历史，手改的 "false"、1、对象或缺失键都必须让它保持可见。
-    """
+    """按 Key 用量表是否折叠 `(切换前)` 行。只有存储值为布尔 true 时才隐藏，归一化与
+    accounts_collapsed 相同：该行是有价值的历史，手改的 "false"、1、对象或缺失键都必须
+    让它保持可见。"""
     return _bool_setting(accounts_dir, KEY_BEFORE_HIDDEN_KEY, False)
 
 
 def set_key_before_hidden(accounts_dir, hidden):
-    """保存 `(切换前)` 行折叠状态，返回存储的布尔值。"""
     return _set_flag(accounts_dir, KEY_BEFORE_HIDDEN_KEY, hidden)
 
 
 def _clean_page_keys(value):
-    """把存储或提交的页面列表归一化为干净的键列表。
-
-    不是合法键列表的值直接丢弃而非拒绝，理由与上面的布尔开关相同：文件可
-    手改，显示偏好的安全方向是“不隐藏任何页面”。重复项与超长列表会被压缩，
-    手改无法把面板导航变成同一个条目的重复。
-    """
+    """把存储或提交的页面列表归一化为干净的键列表。不是合法键列表的值直接丢弃而非拒绝，
+    显示偏好的安全方向是“不隐藏任何页面”；重复项与超长列表会被压缩。"""
     if not isinstance(value, (list, tuple)):
         return []
     out = []
@@ -2221,16 +1985,12 @@ def _clean_page_keys(value):
 
 
 def hidden_pages(accounts_dir):
-    """面板顶栏隐藏的页面，新安装为空。
-
-    每次读取都归一化，手改文件写入字符串、未知键或重复项时，页面不会被
-    重复隐藏，也不会隐藏面板之后无法恢复的页面。
-    """
+    """面板顶栏隐藏的页面，新安装为空。每次读取都归一化，手改文件写入字符串、未知键或
+    重复项时，页面不会被重复隐藏，也不会隐藏面板之后无法恢复的页面。"""
     return _clean_page_keys(load(accounts_dir).get(HIDDEN_PAGES_KEY))
 
 
 def set_hidden_pages(accounts_dir, pages):
-    """保存隐藏页面列表，返回归一化后的存储列表。"""
     return _store(accounts_dir, HIDDEN_PAGES_KEY, _clean_page_keys(pages))
 
 
@@ -2241,10 +2001,8 @@ TASK_JITTER_DEFAULT = 5
 
 
 def task_jitter_max(accounts_dir):
-    """定时任务账号间隔的随机上限（秒）。
-
-    每个账号开始处理前等待 uniform(2, 上限) 秒。越界或非法值按默认值处理。
-    """
+    """定时任务账号间隔的随机上限（秒）：每个账号开始处理前等待 uniform(2, 上限) 秒；
+    越界或非法值按默认值处理。"""
     raw = load(accounts_dir).get("task_jitter_max")
     try:
         value = int(raw)
@@ -2254,7 +2012,6 @@ def task_jitter_max(accounts_dir):
 
 
 def set_task_jitter_max(accounts_dir, value):
-    """保存随机间隔上限，返回合法化后的秒数。"""
     try:
         value = int(value)
     except (TypeError, ValueError):
@@ -2319,12 +2076,8 @@ def _read_hours(raw, default):
 
 
 def scheduler_hours(accounts_dir):
-    """后台排程各组的整点时段。
-
-    缺失或写坏的组回到默认值（09:00/21:00、22:00、01:00）；显式留空表示
-    该组不运行，但四组全空按未设置处理，回落到默认值；关闭调度器使用
-    总开关。读取不改文件，下一次面板保存才会写回。
-    """
+    """后台排程各组的整点时段。缺失或写坏的组回到默认值（09:00/21:00、22:00、01:00）；
+    显式留空表示该组不运行，但四组全空按未设置处理，回落到默认值。读取不改文件。"""
     raw = load(accounts_dir).get("scheduler_hours")
     if not isinstance(raw, dict):
         return {group: list(DEFAULT_SCHEDULER_HOURS[group])
@@ -2352,27 +2105,19 @@ def set_scheduler_hours(accounts_dir, hours):
 
 
 def accounts_separate_tab(accounts_dir):
-    """面板账号区是否独占一个主标签页。
-
-    只有存储值为布尔 true 时才拆分，归一化与上面的显示开关相同：合并的
-    “网关与账号”标签是默认界面，手改的 "false"、1、对象或缺失键都必须保持
-    它，不会意外拆分导航。
-    """
+    """面板账号区是否独占一个主标签页。只有存储值为布尔 true 时才拆分，归一化与上面的
+    显示开关相同：合并的“网关与账号”标签是默认界面，手改值都不会意外拆分导航。"""
     return _bool_setting(accounts_dir, ACCOUNTS_SEPARATE_TAB_KEY, False)
 
 
 def set_accounts_separate_tab(accounts_dir, separate):
-    """保存账号标签页开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, ACCOUNTS_SEPARATE_TAB_KEY, separate)
 
 
 def update_check_enabled(accounts_dir):
-    """网关是否按间隔自动检查新版本；环境变量优先于面板设置。
-
-    默认关闭，除非操作者打开；没有该键的安装也读作关闭。这是这里唯一缺失值
-    表示“否”的设置，因为开启后网关会按自己的计划访问 GitHub。面板的手动
-    检查完全不受该开关影响。
-    """
+    """网关是否按间隔自动检查新版本；环境变量优先于面板设置，默认关闭。这是这里唯一
+    缺失值表示“否”的设置，因为开启后网关会按自己的计划访问 GitHub；面板的手动检查完全
+    不受该开关影响。"""
     present, value = _env_flag_value("WB_UPDATE_CHECK_ENABLED")
     if present:
         return value
@@ -2380,7 +2125,6 @@ def update_check_enabled(accounts_dir):
 
 
 def set_update_check_enabled(accounts_dir, enabled):
-    """保存自动检查开关，返回存储的布尔值。"""
     return _set_flag(accounts_dir, UPDATE_CHECK_ENABLED_KEY, enabled)
 
 
@@ -2409,7 +2153,6 @@ def panel_update_check_interval_hours(accounts_dir):
 
 
 def set_update_check_interval_hours(accounts_dir, hours):
-    """保存自动检查间隔（小时），返回存储的整数值。"""
     hours = int(hours)
     if hours < 1 or hours > UPDATE_CHECK_INTERVAL_MAX:
         raise ValueError("interval must be between 1 and %d hours"
@@ -2418,14 +2161,9 @@ def set_update_check_interval_hours(accounts_dir, hours):
 
 
 def update_check_state(accounts_dir):
-    """上次检查的记账数据：来源仓库、运行时间、看到的版本与发布页链接。
-
-    24 小时节奏需要 last_attempt 跨重启保留，latest_version 让面板能在检查
-    后直接回答；repo 标明这些版本号来自哪个仓库——换了检查目标后，旧记录的
-    版本号不能继续当成新目标的结果。发布页链接与发布时间一起保留，重启后没
-    重新检查时弹窗仍然有可点的链接。这里只放发布页地址，HTTP 交换中的请求
-    地址、请求头与正文都不会存到这里。
-    """
+    """上次检查的记账数据：来源仓库、运行时间、看到的版本与发布页链接。24 小时节奏需要
+    last_attempt 跨重启保留；repo 标明版本号来自哪个仓库，换目标后旧记录不能当成新目标的
+    结果。这里只放发布页地址，HTTP 交换中的请求地址、请求头与正文都不会存到这里。"""
     stored = load(accounts_dir).get(UPDATE_CHECK_STATE_KEY)
     stored = stored if isinstance(stored, dict) else {}
     out = {"repo": "", "last_attempt": 0.0, "last_success": 0.0,
@@ -2451,11 +2189,8 @@ def update_check_state(accounts_dir):
 
 def record_update_check(accounts_dir, at=None, success=False, latest_version="",
                         latest_url="", published_at="", repo=""):
-    """写入一次检查的结果，返回存储的状态。
-
-    只有这一条窄写入路径：能写任意键的检查器会把 settings.json 变成更新
-    状态数据库，而它明确不承担这个职责。
-    """
+    """写入一次检查的结果，返回存储的状态。只有这一条窄写入路径：能写任意键的检查器会把
+    settings.json 变成更新状态数据库，而它明确不承担这个职责。"""
     stamp = float(at if at is not None else time.time())
     with _lock:
         data = load(accounts_dir)
@@ -2463,9 +2198,8 @@ def record_update_check(accounts_dir, at=None, success=False, latest_version="",
         state = dict(state) if isinstance(state, dict) else {}
         repo_name = str(repo or "").strip()[:80]
         if repo_name and state.get("repo") != repo_name:
-            # 换了检查目标：旧目标的版本号、链接与成功时间立刻作废。失败的那次
-            # 也要写，否则旧记录会一直触发「来源不匹配 → 重启即查」，面板还会
-            # 把旧仓库的成功时间当成本仓库的。
+            # 换了检查目标：旧目标的版本号、链接与成功时间立刻作废。失败的那次也要写，
+            # 否则旧记录会一直触发「来源不匹配 → 重启即查」。
             state.pop("latest_version", None)
             state.pop("latest_url", None)
             state.pop("published_at", None)
@@ -2492,12 +2226,9 @@ _SLOT_ID_RE = re.compile(r"^slot-(\d+)$")
 
 
 def _clean_slot_entry(entry, fallback_id=None):
-    """归一化一条存储的出口槽，无法使用时返回 None。
-
-    出口信息由探测写入，探测运行前保持为空。名称为空表示按出口标注该槽，
-    这是面板的显示方式；这里不会用 id 静默替换，否则操作者无法区分自动命名
-    与手工改名的槽。
-    """
+    """归一化一条存储的出口槽，无法使用时返回 None。出口信息由探测写入，探测运行前保持
+    为空；名称为空表示按出口标注该槽，这里不会用 id 静默替换，否则操作者无法区分自动
+    命名与手工改名的槽。"""
     if not isinstance(entry, dict):
         return None
     url = str(entry.get("url") or "").strip()
@@ -2544,11 +2275,8 @@ def _slot_seq(data):
 
 
 def proxy_slots(accounts_dir):
-    """所有已配置的出口槽，按存储顺序。
-
-    id 在第二遍补齐：缺少 id 的条目不能占用同一文件中后续条目已用的编号，
-    否则两个槽会共用 id。
-    """
+    """所有已配置的出口槽，按存储顺序。id 在第二遍补齐：缺少 id 的条目不能占用同一文件中
+    后续条目已用的编号，否则两个槽会共用 id。"""
     data = load(accounts_dir)
     stored = data.get("proxy_slots")
     if not isinstance(stored, list):
@@ -2569,11 +2297,8 @@ def proxy_slots(accounts_dir):
 
 
 def set_proxy_slots(accounts_dir, slots):
-    """替换整个槽列表，返回存储的列表。
-
-    id 取自只增不减的计数器：账号会持久化自己绑定的 id，回收已释放的编号会
-    让现有账号指向新槽的出口 IP。
-    """
+    """替换整个槽列表，返回存储的列表。id 取自只增不减的计数器：账号会持久化自己绑定的
+    id，回收已释放的编号会让现有账号指向新槽的出口 IP。"""
     with _lock:
         data = load(accounts_dir)
         stored = data.get("proxy_slots")
@@ -2609,14 +2334,9 @@ def set_proxy_slots(accounts_dir, slots):
 
 
 def update_proxy_slot(accounts_dir, slot_id, fields, defaults=None):
-    """把 fields 合并进一个已存槽，返回合并后的副本，槽不存在时返回 None。
-
-    读取与写入都在存储锁内完成。调用方自行读改写会与面板保存竞争，写回一份
-    已与磁盘不一致的列表，静默覆盖另一个写方的改动。
-
-    defaults 只应用于写入时仍为空的字段，调用方工作期间操作者输入的值不会被
-    派生值覆盖。
-    """
+    """把 fields 合并进一个已存槽，返回合并后的副本，槽不存在时返回 None。读取与写入都在
+    存储锁内完成：调用方自行读改写会与面板保存竞争，写回一份已与磁盘不一致的列表。
+    defaults 只应用于写入时仍为空的字段，调用方工作期间操作者输入的值不会被派生值覆盖。"""
     slot_id = str(slot_id or "").strip()
     if not slot_id:
         return None
@@ -2640,10 +2360,8 @@ def update_proxy_slot(accounts_dir, slot_id, fields, defaults=None):
 
 
 def drop_missing_bindings(pool, slots):
-    """清除指向已不存在槽的绑定。
-
-    否则过期 id 会留在账号上，之后拿到该 id 的槽会接管这个账号。
-    """
+    """清除指向已不存在槽的绑定。否则过期 id 会留在账号上，之后拿到该 id 的槽会接管这个
+    账号。"""
     valid = {entry["id"] for entry in slots}
     changed = 0
     for account in list(getattr(pool, "accounts", []) or []):
@@ -2670,11 +2388,8 @@ def find_proxy_slot(accounts_dir, slot_id):
 
 
 class PanelSessions(object):
-    """面板登录成功后发放的内存 bearer token。
-
-    有意不持久化：重启网关会让浏览器退出登录，这对暴露在端口映射后的局域网
-    工具是更安全的默认行为。
-    """
+    """面板登录成功后发放的内存 bearer token。有意不持久化：重启网关会让浏览器退出登录，
+    这对暴露在端口映射后的局域网工具是更安全的默认行为。"""
 
     def __init__(self, ttl=SESSION_TTL):
         self.ttl = ttl

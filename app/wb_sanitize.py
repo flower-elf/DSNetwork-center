@@ -1,9 +1,8 @@
 """请求内容的净化与工具调用修复。
 
-客户端（Codex、Claude Code、DSH 等）的提示词与工具定义带着各自的指纹，上游按
-指纹拦截；这里在出站前抹掉这些标记，并把打印成文本的工具调用还原成结构化调用。
+客户端（Codex、Claude Code、DSH 等）的提示词与工具定义带着各自的指纹，上游按指纹拦截；这里在
+出站前抹掉这些标记，并把打印成文本的工具调用还原成结构化调用。
 """
-
 import json
 import re
 import time
@@ -39,23 +38,18 @@ SANITIZE_REWRITES = (
 SANITIZE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header:[^;\r\n]*;?\s*")
 SANITIZE_BARE_HDR_RE = re.compile(r"(?i)x-anthropic-billing-header")
 SANITIZE_KV_RE = re.compile(r"(?i)\bcc_[a-z0-9_]+=[^;\r\n]*;?\s*")
-# 这条 OmO 身份指纹以连续子串出现在 system 消息里时，上游返回 11-128
-# （Illegal API invocation from an unapproved channel）。匹配不区分大小写，前后
-# 可有其他文本；只重写这一处确认过的指纹，保留代理身份与行为。
+# 这条 OmO 身份指纹以连续子串出现在 system 消息里时，上游返回 11-128（Illegal API invocation from
+# an unapproved channel）。匹配不区分大小写，前后可有其他文本；只重写这一处确认过的指纹。
 SANITIZE_OMO_JUNIOR_RE = re.compile(
     r"Sisyphus-Junior - Focused executor from OhMyOpenCode", re.IGNORECASE
 )
-# 指纹判定的字面量快路径（见 has_fingerprint）：每个文本段都过一遍正则太贵，
-# 两个模式又都是纯字面量，改在小写副本上做 `in`，是纯 C 的单遍扫描。
-#
-# 等价性：re.IGNORECASE 与 str.lower() 只在三个码点上不同——'İ'(U+0130)、
-# 'ı'(U+0131) 能匹配字面量 i，'ſ'(U+017F) 能匹配 s，而它们的 lower() 不落到
-# i/s。先按 SANITIZE_REI_FOLD 归一化成基字母再小写，副本上的 `in` 与 (?i)
-# search 完全等价；对拍见 tests/_test_hotpath_savings.py。
+# 指纹判定的字面量快路径：每个文本段过一遍正则太贵，两个模式都是纯字面量，改在小写副本上做
+# `in`。等价性：re.IGNORECASE 与 str.lower() 只在 'İ'(U+0130)、'ı'(U+0131)、'ſ'(U+017F) 三个码点
+# 上不同，先按 SANITIZE_REI_FOLD 归一化成基字母再小写，与 (?i) search 完全等价；对拍见
+# tests/_test_hotpath_savings.py。
 SANITIZE_REI_FOLD = str.maketrans({0x130: "i", 0x131: "i", 0x17F: "s"})
-# 两个小写字面量直接从正则派生，保证与正则永远同源：手抄第二份迟早漂移，
-# 派生出来的值不存在这个问题。pattern 里的 (?i) 是内联旗标，剥掉后就是
-# 字面量本体。
+# 两个小写字面量直接从正则派生，保证与正则永远同源（手抄第二份迟早漂移）；pattern 里的 (?i) 是
+# 内联旗标，剥掉后就是字面量本体。
 SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_RE.pattern
 if SANITIZE_BARE_HDR_LOWER.startswith("(?i)"):
     SANITIZE_BARE_HDR_LOWER = SANITIZE_BARE_HDR_LOWER[4:]
@@ -132,17 +126,15 @@ def sanitize_tool_calls(tool_calls):
         else:
             out.append(tc)
     return out
-# 官方 file-reference 插件注入的 @ 路径说明段里，前两句连续出现即命中 11-128，
-# 判据与 GUI 描述段相同：单发首句或次句都放行，两句连排就拒绝。
-# 首句补一个 that 即可破坏这段连续原文，语义不变，负向前瞻保证重复执行不再改写。
+# 官方 file-reference 插件注入的 @ 路径说明段里，前两句连续出现即命中 11-128（单发首句或次句都
+# 放行）；首句补一个 that 破坏这段连续原文，语义不变，负向前瞻保证重复执行不再改写。
 SANITIZE_DSH_FILEREF_RE = re.compile(
     r"Tokens prefixed with @ are paths (?!that )the user explicitly referenced\.",
     re.IGNORECASE)
 SANITIZE_DSH_FILEREF_REPLACEMENT = (
     "Tokens prefixed with @ are paths that the user explicitly referenced.")
-# DSH 客户端独有标识：品牌全名、DSH 缩写、Web 启动命令与 boot 全局名。
-# 这些字符串会出现在 system 提示和运行时上下文里，统一换成中性表述，
-# 保留原有语义，同时缩小上游后续收紧客户端特征时的命中面。
+# DSH 客户端独有标识（品牌全名、DSH 缩写、Web 启动命令与 boot 全局名）出现在 system 提示和运行时
+# 上下文里，统一换成中性表述，保留原有语义，缩小上游后续收紧客户端特征时的命中面。
 SANITIZE_DSH_BRAND_RE = re.compile(r"DeepSeek Harness", re.IGNORECASE)
 SANITIZE_DSH_BRAND_REPLACEMENT = "Harness"
 SANITIZE_DSH_ABBREV_RE = re.compile(r"\bDSH\b")
@@ -172,12 +164,8 @@ SANITIZE_DSH_USER_IDENTIFIER_REWRITES = (
     (SANITIZE_DSH_ABBREV_RE, SANITIZE_DSH_ABBREV_REPLACEMENT),
 )
 SANITIZE_DSH_SKILL_LINE_RE = re.compile(r"(?m)^(- `[^`]+`: )(.*)$")
-# DSH 的 system prompt 里有自我介绍、GUI 描述和 @ 路径说明。上游把其中已确认的
-# 连续文本当成非官方渠道的判定依据，命中即返回 HTTP 400，错误消息为 Illegal API
-# invocation from an unapproved channel，与请求规模、tools、stream 无关。
-# 这里只改已确认的片段，其余提示词逐字保留：第一句自我介绍换成中性身份句，
-# 第二句保留模型名；GUI 描述去掉品牌词并改写 URL 从句；文件引用说明只补一个
-# that。其余客户端标识统一换成中性表述，避免后续特征收紧时再次命中。
+# 上游把 DSH system prompt 里已确认的连续文本当成非官方渠道判定依据，命中即 HTTP 400（Illegal
+# API invocation from an unapproved channel）；只改已确认的片段，其余提示词逐字保留。
 SANITIZE_DSH_SYSTEM_REWRITES = (
     (re.compile(r"You are an AI agent powered by DeepSeek Harness\b", re.IGNORECASE),
      "You are a helpful AI assistant"),
@@ -272,11 +260,8 @@ def _canonical_schema(value):
 
 
 def _dsh_tool_neutralization_enabled():
-    """面板开关：关闭时保留客户端的原始工具定义。
-
-    目录取正在运行的网关：脚本入口下它是 __main__，测试与 --accounts-dir 都会
-    替换它，本模块不保存副本。
-    """
+    """关闭时保留客户端的原始工具定义。目录取正在运行的网关：脚本入口下它是 __main__，测试与
+    --accounts-dir 都会替换它，本模块不保存副本。"""
     try:
         module = wb_host.loaded_gateway("ACCOUNTS_DIR", "build_upstream_body")
         if module is None:
@@ -308,10 +293,8 @@ def _neutralized_tool(tool):
 
 
 def neutralize_dsh_tool_defs(body):
-    """无损处理工具定义：描述里的 DSH 标识改写，schema 键顺序规范化。
-
-    工具名、参数名、类型、枚举与必填项一律不动，保证调用契约不变。
-    """
+    """描述里的 DSH 标识改写，schema 键顺序规范化；工具名、参数名、类型、枚举与必填项一律不动，
+    保证调用契约不变。"""
     tools = body.get("tools")
     if not isinstance(tools, list):
         return
@@ -420,11 +403,9 @@ def is_dsh_payload(payload):
 
 
 def apply_dsh_tool_aliases(payload):
-    """按本请求实际提供的工具生成别名，返回 别名 -> 原名 的映射。
-
-    Chat、Responses 与 Anthropic Messages 路由收到 chat 请求后调用本函数；
-    返回时由各自的转换器解析 chat 对象或 SSE 块，还原原始工具名。
-    """
+    """按本请求实际提供的工具生成别名，返回 别名 -> 原名 的映射。Chat、Responses 与 Anthropic
+    Messages 路由收到 chat 请求后调用本函数；返回时由各自的转换器解析 chat 对象或 SSE 块，还原
+    原始工具名。"""
     tools = payload.get("tools")
     if not isinstance(tools, list):
         return {}
@@ -505,7 +486,6 @@ def prepare_dsh_tool_aliases(payload):
 
 
 def restore_dsh_tool_names(obj, reverse):
-    """把响应里的工具别名还原成客户端原始工具名。"""
     if not reverse:
         return
     if isinstance(obj, dict):
@@ -550,11 +530,8 @@ def sanitize_messages(messages):
 # 工具调用配对修复
 # ---------------------------------------------------------------------------
 def _empty_content(value):
-    """assistant 消息完全没有 content 时为 True。
-
-    None / "" / [] 都算「没有内容」：客户端发出的空值形状各不相同，而拆成相邻
-    assistant 消息的一批调用对哪种形状都要合并，漏判 [] 就会触发 11148。
-    """
+    """None / "" / [] 都算「没有内容」：客户端发出的空值形状各不相同，而拆成相邻 assistant 消息的
+    一批调用对哪种形状都要合并，漏判 [] 就会触发 11148。"""
     if value is None:
         return True
     if isinstance(value, str):
@@ -565,7 +542,6 @@ def _empty_content(value):
 
 
 def _merge_reasoning_content(dst, src):
-    """把 src 的 reasoning_content 并进 dst，两段都有时换行拼接。"""
     rc = src.get("reasoning_content")
     if not isinstance(rc, str) or not rc:
         return
@@ -577,20 +553,12 @@ def _merge_reasoning_content(dst, src):
 
 
 def merge_adjacent_tool_calls(messages):
-    """把前后相邻的 assistant tool_calls 消息合并成一条。
-
-    有些兼容 OpenAI 的 Agent 客户端把一批并行调用重放成几条相邻的 assistant 消息，
-    每条只带一个 tool_call。DeepSeek 系上游对这种形状回 400 / code 11148
-    （tool_call_sequence_broken）并终止会话：每次重试都重放同一段历史，换账号也
-    救不回来。合并声明即可恢复成上游接受的形状。
-
-    条件从严，不凭空造语义：消息必须相邻；后一条的 content 必须为空（None/""/[]）；
-    前一条必须已经是带 tool_calls 的 assistant。
-
-    第二种形式把普通 assistant 的字符串 content 并入前面那条没有 content 的
-    tool_calls assistant（同一批历史被拆开、顺序相反）。两种情况都保留
-    reasoning_content，DeepSeek 多轮思考要求带回去。
-    """
+    """有些兼容 OpenAI 的 Agent 客户端把一批并行调用重放成几条相邻的 assistant 消息，每条只带一个
+    tool_call。DeepSeek 系上游对这种形状回 400 / code 11148（tool_call_sequence_broken）并终止会话，
+    每次重试都重放同一段历史，换账号也救不回来。条件从严，不凭空造语义：消息必须相邻；后一条的
+    content 必须为空（None/""/[]）；前一条必须已经是带 tool_calls 的 assistant。第二种形式把普通
+    assistant 的字符串 content 并入前面那条没有 content 的 tool_calls assistant（同一批历史被拆开、
+    顺序相反）。两种情况都保留 reasoning_content，DeepSeek 多轮思考要求带回去。"""
     if not isinstance(messages, list) or len(messages) < 2:
         return messages, False
     out = []
@@ -626,14 +594,10 @@ def merge_adjacent_tool_calls(messages):
 
 
 def repack_tool_result_blocks(messages):
-    """让一批 tool_calls 与其结果保持相邻。
-
-    上游要求 role:"tool" 的结果紧跟发起它们的 assistant 消息，中间不能插东西。
-    例如 Codex 的 image_resize_notice 会作为 developer 消息紧跟在某条工具输出之后；
-    有并行调用时它正好落在两个结果中间，配对看起来就断了，上游据此拒掉整个请求
-    （code 11148）并终止会话。这里只重排：结果不变、相对顺序不变，插进来的消息挪到
-    这批结果之后。
-    """
+    """上游要求 role:"tool" 的结果紧跟发起它们的 assistant 消息，中间不能插东西。例如 Codex 的
+    image_resize_notice 会作为 developer 消息紧跟在某条工具输出之后；有并行调用时它正好落在两个
+    结果中间，配对看起来就断了，上游据此拒掉整个请求（code 11148）并终止会话。这里只重排：结果
+    不变、相对顺序不变，插进来的消息挪到这批结果之后。"""
     if not isinstance(messages, list) or len(messages) < 3:
         return messages, False
     out = []
@@ -693,13 +657,9 @@ def repack_tool_result_blocks(messages):
 
 
 def cleanup_orphan_tool_calls(messages):
-    """丢掉没有结果的工具调用，以及没有调用的结果。
-
-    工具调用失败（参数错、超时、未知工具）时，客户端会留下一条永远无法回应的
-    assistant tool_calls：结果消息不会写出来，这条记录却跟着历史进入之后的每一轮，
-    上游逐轮拒绝（code 11148），一次失败的调用就能废掉整个会话。两侧按同一组 id
-    裁剪，修完不会留下半配对。
-    """
+    """工具调用失败（参数错、超时、未知工具）时，客户端会留下一条永远无法回应的 assistant
+    tool_calls：结果消息不会写出来，这条记录却跟着历史进入之后的每一轮，上游逐轮拒绝（code 11148），
+    一次失败的调用就能废掉整个会话。两侧按同一组 id 裁剪，修完不会留下半配对。"""
     if not isinstance(messages, list) or not messages:
         return messages, False
     call_ids = set()
@@ -754,12 +714,8 @@ def cleanup_orphan_tool_calls(messages):
 
 
 def is_truncated_arguments(raw):
-    """非空且不是合法 JSON 的工具参数字符串才算截断。
-
-    被 max_tokens 或断连截断的流，最后一条工具调用的 JSON 只写了一半。空串或纯空白
-    是合法的无参工具；任何能解析的 JSON（含 null、标量、数组）都是模型自己的输出，
-    交给客户端校验——只有非空且解析不了的字符串算截断。
-    """
+    """被 max_tokens 或断连截断的流，最后一条工具调用的 JSON 只写了一半。空串或纯空白是合法的无参
+    工具；任何能解析的 JSON（含 null、标量、数组）都是模型自己的输出，交给客户端校验。"""
     if not isinstance(raw, str):
         return False
     trimmed = raw.strip()
@@ -773,7 +729,6 @@ def is_truncated_arguments(raw):
 
 
 def drop_truncated_tool_calls(calls):
-    """返回参数不是半截 JSON 的工具调用。"""
     if not isinstance(calls, list):
         return calls
     kept = []
@@ -791,12 +746,9 @@ def drop_truncated_tool_calls(calls):
 # ---------------------------------------------------------------------------
 # DeepSeek 多轮一致性：reasoning_content 回填
 # ---------------------------------------------------------------------------
-# 上游（code 11155）要求思考模式开启时每条 assistant 消息都带 reasoning_content，
-# 两个条件各管一半：
-#   - thinkingEnabled：deepseek 且思考开启 -> 一律回填，第三方客户端把 reasoning
-#     整段丢掉时也要补，否则零轨迹的历史原样转发会被拒；
-#   - hasTrace：已有 reasoning 轨迹 -> 不看思考开关，一律回填。
-# 上游还校验 len(reasoning) > 0，空占位不够，`reasoning` 要给非空值。
+# 上游（code 11155）要求思考模式开启时每条 assistant 消息都带 reasoning_content：thinkingEnabled
+# （deepseek 且思考开启）与 hasTrace（已有 reasoning 轨迹）各管一半，命中即回填。上游还校验
+# len(reasoning) > 0，空占位不够，`reasoning` 要给非空值。
 def backfill_reasoning_content(messages, model, thinking_enabled=None):
     if not model or not str(model).lower().startswith("deepseek"):
         return messages
@@ -844,15 +796,8 @@ def normalize_tool_choice(obj):
     if isinstance(tc, str):
         val = tc.strip().lower()
         if val == "none":
-            # 保留 tools 声明。删掉工具声明会让 Agent 进入死循环：模型拿不到
-            # 函数签名又没有工具通道，仍被要求完成任务，于是把调用打印成
-            # DSML 或伪 JSON 塞进 content，tool_calls 为空、finish_reason 为
-            # stop，客户端解析不到只能追问，上下文每轮加两条消息直到撑爆窗口。
-            # tool_choice="none" 的语义是本轮不许调用工具，由该字段表达即可，
-            # 不必抹掉能力声明。上游把 tool_choice 定为 string，发对象会 11101，
-            # 故字符串原样透传。本上游不遵守 "none"，保留 tools 时仍返回
-            # tool_calls，调用走 tool_calls 通道，客户端能执行与回填；要禁止
-            # 调用就不要传 tools。
+            # 保留 tools 声明：删掉会让 Agent 死循环（模型拿不到签名就把调用打印成 DSML/伪 JSON 塞进
+            # content）。tool_choice="none" 由该字段表达；上游定 string（对象 11101）且不遵守 "none"，要禁止调用就不要传 tools。
             obj["tool_choice"] = "none"
         return
     if isinstance(tc, dict):
@@ -883,11 +828,8 @@ _SCHEMA_VALID_TYPES = {"string", "number", "integer", "boolean", "array", "objec
 
 
 def _deep_normalize_schema(schema):
-    """递归规整工具参数 JSON Schema，避免上游 Go 校验器回 11129。
-
-    处理嵌套对象、数组、definitions、anyOf/oneOf/allOf，以及客户端常见的
-    Python 类型别名与 null 元数据。
-    """
+    """避免上游 Go 校验器回 11129。处理嵌套对象、数组、definitions、anyOf/oneOf/allOf，以及客户端
+    常见的 Python 类型别名与 null 元数据。"""
     if not isinstance(schema, dict):
         return schema
     for key in list(schema.keys()):
@@ -959,7 +901,6 @@ def _deep_normalize_schema(schema):
 
 
 def _normalize_tool_parameters(fn):
-    """把函数参数规整成上游要求的对象 schema；函数参数不是对象时重置为对象。"""
     params = fn.get("parameters")
     if not isinstance(params, dict):
         params = {}
@@ -988,9 +929,8 @@ def normalize_tools(obj):
     for tool in tools:
         if not isinstance(tool, dict):
             continue
-        # 顶层 name 定义的简化工具：补成 Chat Completions 的 function schema。
-        # 只处理没有类型或明确是 function 的条目；web_search、custom 等服务端
-        # 工具必须原样保留，否则会改变客户端自己的工具声明。
+        # 顶层 name 定义的简化工具补成 Chat Completions 的 function schema；只处理没有类型或明确
+        # 是 function 的条目，web_search、custom 等服务端工具必须原样保留。
         if ("name" in tool and "function" not in tool
                 and tool.get("type") in (None, "", "function")):
             fn = {
@@ -1018,11 +958,8 @@ def normalize_tools(obj):
 
 
 def normalize_roles(messages):
-    """把上游不认的 role 名映射成它认的。
-
-    WorkBuddy 只认 system / user / assistant / tool。OpenAI 新增的 "developer"
-    role（Codex CLI 与新版 SDK 在用）等同 "system"，原样发过去会报 code 11-128。
-    """
+    """WorkBuddy 只认 system / user / assistant / tool。OpenAI 新增的 "developer" role（Codex CLI 与
+    新版 SDK 在用）等同 "system"，原样发过去会报 code 11-128。"""
     out = []
     for m in messages or []:
         if not isinstance(m, dict):
@@ -1040,16 +977,9 @@ def normalize_roles(messages):
 # stop 归一化：字符串 stop 触发 11101
 # ---------------------------------------------------------------------------
 def normalize_stop(obj):
-    # OpenAI 把 stop 声明成 string | array，客户端传单个字符串完全合法；本上游的
-    # Go 端却把该字段定死为 []string，收到字符串直接 400：
-    #   Unmarshal chat params failed with error: json: cannot unmarshal string
-    #   into Go struct field Request.stop of type []string   (code 11101)
-    # 实测（deepseek-v4.1-flash，同一条 prompt，同一个上游账号）：
-    #   "stop": "END"     -> 400 / code 11101
-    #   "stop": ["END"]   -> 200
-    # 归一化成数组后语义完全等价：OpenAI 里单字符串就是单元素数组，模型侧看到的
-    # 停止序列一模一样。空字符串 / 空数组 / null / 非法类型一律删字段——它们的实际
-    # 含义都是「没有停止序列」，而空值本身在上游同样会被判参数不合法。
+    # 本上游 Go 端把 stop 定死为 []string，字符串直接 400 / code 11101（实测 deepseek-v4.1-flash："stop":
+    # "END" -> 400，["END"] -> 200）；OpenAI 里单字符串即单元素数组，归一化等价。空串 / 空数组 / null /
+    # 非法类型一律删字段（含义都是「没有停止序列」，空值同样被判参数不合法）。
     if "stop" not in obj:
         return
     val = obj["stop"]
@@ -1095,16 +1025,10 @@ def parse_dsml_tool_calls(text):
     return tool_calls, clean
 # ---- Chat Completions 路径上的「打印出来的工具调用」 -------------------------
 #
-# 模型把调用打印成文本而不是发结构化 tool_calls 时，客户端只看到纯文本、找不到调用，
-# 这一轮就此结束：标记留在记录里，什么也没执行。线上有两种拼法：
-#   1. 全角 DSML 形式：<||DSML|| calls><||DSML|| invoke name="run_code"> ... </||DSML|| invoke>
-#   2. 混合体：普通开标签配 DSML 闭标签，第一个参数的闭标签整个被吞掉，形如
-#      <run_code><parameter name="code">...</parameter>
-#      <parameter name="description">...</|DSML| parameter>
-#      </run_code></invoke></|DSML| parameter></|DSML| invoke></|DSML| calls>
-#
-# 上面的 parse_dsml_tool_calls() 只认 (1)：它要求 calls 块有 DSML 开标签，(2) 没有。
-# 下面的解析器改由 <parameter> 元素驱动：两种拼法里写法相同，参数名又是一次调用不能缺的东西。
+# 模型把调用打印成文本而不是发结构化 tool_calls 时，客户端只看到纯文本、找不到调用，这一轮就此
+# 结束。线上有两种拼法：1) 全角 DSML：<||DSML|| calls><||DSML|| invoke name="run_code"> ...；
+# 2) 混合体：普通开标签配 DSML 闭标签，第一个参数的闭标签整个被吞掉。parse_dsml_tool_calls() 只认
+# (1)；下面的解析器改由 <parameter> 元素驱动——两种拼法里写法相同，参数名又是一次调用不能缺的东西。
 LEAK_PARAM_RE = re.compile(
     r"<\s*(?:\|\s*DSML\s*\|\s*)?(?P<tag>parameter|param|arg|argument)\b"
     r"(?P<attrs>[^>]*)>"
@@ -1138,7 +1062,6 @@ def _normalize_dsml_bars(text):
 
 
 def _strip_spans(text, spans):
-    """删掉每个 [start, end) 区间，再收掉留下的空白。"""
     if not spans:
         return text
     kept = []
@@ -1153,11 +1076,8 @@ def _strip_spans(text, spans):
 
 
 def parse_leaked_tool_calls(text):
-    """把模型打印出来的工具调用还原出来。
-
-    返回 (calls, clean_text)，calls 的形状与 parse_dsml_tool_calls() 一致；什么都没
-    认出来时返回 (None, text)。
-    """
+    """返回 (calls, clean_text)，calls 的形状与 parse_dsml_tool_calls() 一致；什么都没认出来时返回
+    (None, text)。"""
     if not text or "<" not in text:
         return None, text
     # 先折全角写法，两种拼法共用同一趟扫描。
@@ -1233,11 +1153,8 @@ def parse_leaked_tool_calls(text):
 
 
 def repair_leaked_tool_calls(message):
-    """把打印出来的调用从 `content` 挪进 `tool_calls`。
-
-    只在消息没有结构化调用时动手：真的 tool_calls 永远优先，模型两样都发时保持原样。
-    消息被改过时返回 True。
-    """
+    """只在消息没有结构化调用时动手：真的 tool_calls 永远优先，模型两样都发时保持原样。消息被改过
+    时返回 True。"""
     if not isinstance(message, dict):
         return False
     existing = message.get("tool_calls")
@@ -1261,7 +1178,6 @@ def repair_leaked_tool_calls(message):
 
 
 def could_be_leaked_call(tail):
-    """tail 以 "<" 开头、还可能长成打印出来的工具标记时返回 True。"""
     low = _normalize_dsml_bars(tail).lower()
     m = LEAK_TAG_RE.match(low)
     if m and any(m.group(0).startswith(p) for p in LEAK_TAG_PREFIXES):
@@ -1272,14 +1188,9 @@ def could_be_leaked_call(tail):
 
 
 class LeakedToolCallStreamFilter:
-    """扣住可能是「打印出来的工具调用」的 assistant 文本。
-
-    /v1/chat/completions 收到文本就转发，模型打印的调用会在流结束、还来不及解析时
-    就已经发出去。因此先缓存文本：一旦明显是散文就放行，流结束时把剩下的部分转换。
-
-    feed(text) 返回由 ("text", str) 与 ("calls", [call, ...]) 组成的列表。
-    """
-
+    """/v1/chat/completions 收到文本就转发，模型打印的调用会在流结束、还来不及解析时就已经发出去。
+    因此先缓存文本：一旦明显是散文就放行，流结束时把剩下的部分转换。feed(text) 返回由
+    ("text", str) 与 ("calls", [call, ...]) 组成的列表。"""
     MAX_HOLD = 262144
 
     def __init__(self):
@@ -1325,7 +1236,6 @@ class LeakedToolCallStreamFilter:
 
 
 def chat_chunk(model, delta, finish=None, chunk_id="chatcmpl-wb"):
-    """一条 Chat Completions 流式分块。"""
     return json.dumps({
         "id": chunk_id,
         "object": "chat.completion.chunk",
@@ -1340,7 +1250,6 @@ def chat_text_chunk(model, text, chunk_id="chatcmpl-wb"):
 
 
 def chat_tool_call_chunks(model, calls, chunk_id="chatcmpl-wb"):
-    """把恢复出的调用以结构化 tool_calls 分块交出去。"""
     out = []
     for i, call in enumerate(calls):
         out.append(chat_chunk(model, {"tool_calls": [{

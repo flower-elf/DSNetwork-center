@@ -153,9 +153,6 @@ class SchedulerActivityReportTests(unittest.TestCase):
             self.assertTrue(any("活跃上报 0 个" in log for log in scheduler.logs))
 
 
-
-
-
 class StreakBonusTests(unittest.TestCase):
     def test_skips_intl_account(self):
         acc = make_account(uid="intl-bonus", realm="intl")
@@ -185,4 +182,3 @@ class StreakBonusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

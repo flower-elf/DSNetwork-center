@@ -3,8 +3,7 @@ import json
 import urllib.parse
 import urllib.request
 
-# 请求 message 字段，让私有地址、保留地址与限流等拒绝原因出现在响应里，
-# 避免只剩一个失败状态。
+# 请求 message 字段：私有地址、保留地址与限流等拒绝原因要出现在响应里。
 GEO_ENDPOINT = ("http://ip-api.com/json/%s?lang=zh-CN"
                 "&fields=status,message,country,countryCode,isp,org,as,"
                 "hosting,proxy,mobile")
@@ -29,10 +28,7 @@ def empty():
 
 
 def classify(payload):
-    """把一条 ip-api.com 响应转换成槽位字段。
-
-    失败状态、缺少正文或 hosting 既非真也非假时返回空字段，不做猜测。
-    """
+    """把一条 ip-api.com 响应转换成槽位字段；失败、缺正文或 hosting 不明时返回空字段，不猜。"""
     if not isinstance(payload, dict) or payload.get("status") != "success":
         return empty()
     hosting = payload.get("hosting")
@@ -57,11 +53,8 @@ def _open(request, timeout):
 
 
 def lookup(ip, timeout=LOOKUP_TIMEOUT):
-    """查询一个出口 IP 的国家与地址类型，未知时字段为空。
-
-    请求直接发出，不经账号配置的代理：代理只放行上游时查询仍要可用，也不能
-    由待查出口回答这次查询。
-    """
+    """查询一个出口 IP 的国家与地址类型，未知时字段为空。请求不经账号配置的代理：
+    代理只放行上游时查询仍要可用，也不能由待查出口回答这次查询。"""
     address = str(ip or "").strip()
     if not address:
         return empty()
@@ -76,9 +69,9 @@ def lookup(ip, timeout=LOOKUP_TIMEOUT):
 
 
 def slot_name(country, ip_type):
-    """返回默认槽位名，由出口国家与类型组成，例如「美国 住宅」。
+    """返回默认槽位名（国家 + 类型，例如「美国 住宅」）；没有国家就没有名字。
 
-    没有国家就没有名字。只有「住宅」无法区分两个槽位，调用方应回退到槽位 id。
+    只有「住宅」无法区分两个槽位，调用方应回退到槽位 id。
     """
     where = str(country or "").strip()
     if not where:

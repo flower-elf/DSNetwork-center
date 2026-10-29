@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
-# Anthropic Messages 的 Responses 管线。
-#
-# 设置页的 messages_format=openai-responses 时，请求先翻译成 Responses 形状，
-# 再由网关现有的 Responses 管线调用上游；回复再翻译回 Anthropic 的 message /
-# SSE 事件。openai-completions 仍然走 wb_proxy 里的 Chat 管线。
+# Anthropic Messages 的 Responses 管线：messages_format=openai-responses 时请求先翻译
+# 成 Responses 形状，经网关现有 Responses 管线上游，回复再翻译回 Anthropic 的
+# message / SSE 事件；openai-completions 仍走 wb_proxy 里的 Chat 管线。
 
 import json
 import time
@@ -36,11 +34,8 @@ def bind(module):
 
 
 def _text(content, dump_unknown=False):
-    """把消息内容摊平成字符串。
-
-    dump_unknown 为真时（tool_result 的 content），非文本块按 JSON 展开，
-    非字符串非列表的顶层值也整体序列化；否则这些输入都返回空串。
-    """
+    """把消息内容摊平成字符串。dump_unknown 为真时（tool_result 的 content），非文本
+    块按 JSON 展开、非字符串非列表的顶层值整体序列化；否则这些输入都返回空串。"""
     if isinstance(content, str):
         return content
     if isinstance(content, list):

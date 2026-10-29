@@ -32,11 +32,9 @@ RANGE_DAYS = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "all": None}
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 
-# 保留策略取 90 天与 5000 行的交集。整理不随每次追加执行，触发条件有两个：
-#   * 文件超过 COMPACT_TRIGGER_BYTES 立即压缩；阈值高于上限行数本身的大小，
-#     因此整理一定能把文件缩回去，不会在阈值边缘反复重写；
-#   * 距上次整理超过 COMPACT_INTERVAL_SECONDS；低流量历史跨不过大小阈值，
-#     按时间节奏保证上限最终被执行。
+# 保留策略取 90 天与 5000 行的交集。整理不随每次追加执行：文件超过
+# COMPACT_TRIGGER_BYTES 立即压缩（阈值高于上限行数本身的大小，一定缩得回去），
+# 或距上次整理超过 COMPACT_INTERVAL_SECONDS（低流量按时间节奏保证上限生效）。
 MAX_RECORDS = 5000
 MAX_AGE_DAYS = 90
 COMPACT_TRIGGER_BYTES = 2000000
@@ -52,7 +50,6 @@ _last_compact = 0.0
 
 
 def set_data_dir(path):
-    """把历史文件指到 wb_proxy 的数据目录。"""
     global _data_dir_override
     with _lock:
         _data_dir_override = path
@@ -71,7 +68,6 @@ def history_path():
 
 
 def _gateway():
-    """返回正在运行的网关模块。容器入口是 __main__。"""
     return wb_host.loaded_gateway("log") or sys.modules.get("wb_proxy")
 
 
@@ -101,7 +97,6 @@ _REDACTED = "[redacted]"
 
 
 def safe_message(text):
-    """把上游原文压成一行安全的短说明。"""
     line = " ".join(str(text or "").split())
     for pattern in _SECRET_PATTERNS:
         line = pattern.sub(_REDACTED, line)
@@ -121,10 +116,9 @@ def _as_bool(value):
 
 
 def project(row):
-    """把一行投影到固定字段。
+    """把一行投影到固定字段；文件可能被别的写入方、手工编辑或夹带凭证的旧行改过。
 
-    文件可能被其他写入方、手工编辑或夹带凭证的旧行改动过，直接返回解析字典会
-    泄露多余键。这里同时归一字段类型与长度，message 再脱敏一次。
+    直接返回解析字典会泄露多余键；这里同时归一字段类型与长度，message 再脱敏一次。
     """
     return {
         "ts": str(row.get("ts") or "")[:40],
@@ -153,8 +147,8 @@ def _parse_ts(value):
 def record(uid, nickname, realm, task, trigger, ok, message, usage_dir=None):
     """追加一次尝试，返回写入的行；写不进去时返回 None。
 
-    磁盘满或文件被占用都不应把一次成功的签到变成失败。整理到点，即大小超过阈值
-    或时间节奏到达时，顺带执行一次；整理失败时原文件保持不变。
+    磁盘满或文件被占用都不能把一次成功的签到变成失败。到点（超阈值或时间节奏）
+    顺带整理一次，整理失败时原文件保持不变。
     """
     row = {
         "ts": _timestamp(),
@@ -181,10 +175,8 @@ def record(uid, nickname, realm, task, trigger, ok, message, usage_dir=None):
 
 
 def record_attempt(account, task, trigger, result):
-    """把一次账号尝试的结果记成一行；trigger 为 None 表示不单独记录。
-
-    嵌套步骤由外层统一记录，例如 daily_chat 内部的网页通道，避免历史多出一行。
-    """
+    """把一次账号尝试的结果记成一行；trigger 为 None 表示不单独记录。嵌套步骤
+    由外层统一记录（例如 daily_chat 内部的网页通道），避免历史多出一行。"""
     if trigger is None:
         return None
     result = result if isinstance(result, dict) else {}
@@ -219,19 +211,15 @@ def _read_rows(path):
 
 
 def load(usage_dir=None):
-    """按写入顺序读出全部原始行，供整理使用；对外返回一律走 query。
-
-    读取结果只有经过 project 才保证不带多余键。
-    """
+    """按写入顺序读出全部原始行，供整理使用；对外返回一律走 query（只有 project
+    保证不带多余键）。"""
     path = os.path.join(usage_dir, HISTORY_NAME) if usage_dir else history_path()
     return _read_rows(path)
 
 
 def local_midnight(now=None):
-    """返回本地日历零点的 epoch 秒。
-
-    零点必须按该时刻自身的本地时间规则推导，不能拿此刻生效的 UTC 偏移替换字段。
-    time.mktime 按给定本地时刻判断是否处于夏令时，tm_isdst 传 -1 交给平台处理。
+    """返回本地日历零点的 epoch 秒。零点必须按该时刻自身的本地时间规则推导，
+    不能拿此刻生效的 UTC 偏移替换字段；tm_isdst 传 -1 交给平台判夏令时。
     """
     moment = time.localtime(now) if now is not None else time.localtime()
     return time.mktime((moment.tm_year, moment.tm_mon, moment.tm_mday,
@@ -239,10 +227,9 @@ def local_midnight(now=None):
 
 
 def range_cutoff(value):
-    """返回 range 参数对应的下界 epoch 秒；None 表示不设下界。
+    """返回 range 参数对应的下界 epoch 秒；None 表示不设下界，认不出时抛 ValueError。
 
-    today 是本地日历日，从本地零点到现在，面板上的「今日」不应混入昨天深夜的
-    记录；1d 保持滚动 24 小时。认不出来时抛出 ValueError。
+    today 是本地日历日（本地零点到现在），1d 保持滚动 24 小时。
     """
     key = str(value or DEFAULT_RANGE).strip().lower()
     if key == "today":
@@ -255,12 +242,10 @@ def range_cutoff(value):
 
 def query(range_key=None, uid=None, task=None, result=None, limit=None,
           usage_dir=None):
-    """读取历史，最新在前；筛选在服务端完成，limit 有默认值与上限。
+    """读取历史，最新在前；每行先投影到固定字段再筛选，多余键与凭证不会从 API 漏出。
 
-    每行先投影到固定字段再筛选与返回，多余键与凭证字段不会从 API 漏出。
-
-    认不出来的筛选值抛出 ValueError，由路由转换成 400。静默忽略写错的筛选条件
-    会让调用方误以为这几天没有失败，实际却拿到了全部结果。
+    认不出来的筛选值抛 ValueError（静默忽略会让调用方误以为这几天没失败，实际
+    拿到全部结果），由路由转成 400。limit 有默认值与上限。
     """
     key = str(range_key or DEFAULT_RANGE).strip().lower()
     cutoff = range_cutoff(key)
@@ -309,7 +294,6 @@ def compact(usage_dir=None, max_records=None, max_age_days=None):
 
 
 def _compaction_due(path):
-    """判断整理是否到点：时间节奏到达或文件超过大小阈值。"""
     if time.time() - _last_compact >= COMPACT_INTERVAL_SECONDS:
         return True
     try:
@@ -319,11 +303,9 @@ def _compaction_due(path):
 
 
 def _compact_locked(path, max_records=None, max_age_days=None):
-    """执行整理；调用方必须已持有 _lock。
-
-    先写临时文件再 os.replace，任何时刻读到的都是完整文件，中途失败也不碰原文件。
-    _last_compact 在入口推进，失败后等到下个节奏再试，避免每条记录重试。
-    """
+    """执行整理；调用方必须已持有 _lock。先写临时文件再 os.replace，任何时刻读到
+    的都是完整文件，中途失败也不碰原文件。_last_compact 在入口推进，失败后等到
+    下个节奏再试，避免每条记录重试。"""
     global _last_compact
     _last_compact = time.time()
     max_records = MAX_RECORDS if max_records is None else max_records

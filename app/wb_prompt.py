@@ -1,20 +1,11 @@
 # -*- coding: utf-8 -*-
-"""网关自有系统提示词模式，语义对应 panel 的 prompt.go 与 degrade.go。
+"""按设置改写出站 system/developer 消息，避开上游对固定模板句的逐字误杀。
 
-客户端在 system prompt 里注入固定模板句时，上游审核可能按逐字匹配误杀合法流量。
-本模块在出站前改写 system/developer 消息，从源头消除 system 来源的指纹误报；
-user/assistant/tool 消息不动，sanitize 的指纹清洗照旧，两层互不替代。
-
-模式取自 settings.json 的 prompt.mode，默认 passthrough：
-  - passthrough：透传客户端 system/developer；
-  - custom：删除所有 system/developer，换成一条网关提示词；
-  - append：在开头连续 system/developer 区块之后插入一条网关提示词，客户端
-    既有消息逐字保留。
-
-降级只作用于 passthrough 与 append：403 多半是 system 来源的指纹误杀，此时切到
-最小中性提示词，直到次日 00:00 CST 重置，并把同一个请求重试一次；custom 不走降级。
+user/assistant/tool 不动，sanitize 的指纹清洗照旧，两层互不替代。模式取自
+settings.json 的 prompt.mode：passthrough 透传；custom 换成一条网关提示词；
+append 在开头 system/developer 区块之后插入。降级只作用于 passthrough 与
+append：403 时切到最小中性提示词直到次日 00:00 CST 并重试一次。
 """
-
 import threading
 import time
 
@@ -52,7 +43,6 @@ def load_prompt(mode, file_path=""):
 
 
 def rewrite(messages, system_prompt):
-    """删除所有 system/developer，头部插入一条网关 system 消息。"""
     if not system_prompt:
         return messages
     kept = [m for m in (messages or [])
@@ -91,10 +81,9 @@ def apply_mode(messages, mode, text, degraded=False):
 
 
 def next_midnight_cst(now=None):
-    """now 之后最近的 Asia/Shanghai 00:00，epoch 秒。
+    """now 之后最近的 Asia/Shanghai 00:00，epoch 秒；00:00 整点返回次日 00:00。
 
-    用固定 +08:00 计算，不依赖宿主机时区，容器与宿主时区都不可信。
-    00:00 整点返回次日 00:00，23:59 返回数秒后的次日 00:00。
+    用固定 +08:00 计算，不依赖宿主机时区（容器与宿主时区都不可信）。
     """
     now = time.time() if now is None else float(now)
     offset = 8 * 3600

@@ -1,6 +1,5 @@
-# 模型 context/output 四级查找，每个字段独立：上游动态值 > 内建知识表 >
-# 本地 model.json 缓存 > models.dev 异步拉取。未知 context 用 1000000，
-# 未知 output 返回 None。
+# 模型 context/output 四级查找，每个字段独立：上游动态值 > 内建知识表 > 本地
+# model.json 缓存 > models.dev 异步拉取。未知 context 用 1000000，未知 output 返回 None。
 
 import json
 import os
@@ -22,19 +21,16 @@ VENDOR_SOURCES = ("zai", "moonshotai", "moonshotai-cn", "openai", "google",
 
 # 内建知识表，移植自 panel 的 context_catalog.go，值为实测与 models.dev 共识。
 CONTEXT_FALLBACK = {
-    # GLM / z-ai
     "glm-5.2": (1000000, 131072),
     "glm-5.1": (200000, 131072),
     "glm-5.3": (1000000, 131072),
     "glm-5.3-flash": (1000000, 131072),
     "glm-5v-turbo": (200000, 131072),
-    # Kimi / moonshot
     "kimi-k2.7": (256000, 65536),
     "kimi-k2.6": (256000, 262144),
     "kimi-k2.5": (164000, 262144),
     "kimi-k3": (1048576, 131072),
     "kimi-k2.8-preview": (1048576, 0),
-    # MiniMax / Hunyuan
     "minimax-m3": (512000, 512000),
     "hy3": (192000, 64000),
     "hy3-preview": (262144, 64000),
@@ -43,7 +39,6 @@ CONTEXT_FALLBACK = {
     "deepseek-v4-pro": (1000000, 384000),
     "deepseek-v4-flash": (1000000, 384000),
     "deepseek-v4.1-flash": (1000000, 384000),
-    # OpenAI / Google
     "gpt-6-astra": (1050000, 128000),
     "gpt-5.6-sol": (1050000, 128000),
     "gpt-5.6-terra": (1050000, 128000),
@@ -52,7 +47,6 @@ CONTEXT_FALLBACK = {
     "gpt-5.4": (1050000, 128000),
     "gpt-5.3-codex": (400000, 128000),
     "gemini-3.5-flash": (1048576, 65536),
-    # 全局路由别名
     "auto": (168000, 0),
 }
 
@@ -122,11 +116,8 @@ def save_index(directory, index):
 
 
 def build_index(doc):
-    """把 models.dev 的 api.json 建成裸 id 到 context/output 二元组的索引。
-
-    厂商官方 provider 的取值优先，否则取出现次数最多的一对，平票取较小值；
-    无效或过大的数值丢弃。
-    """
+    """把 models.dev 的 api.json 建成裸 id 到 context/output 二元组的索引；厂商官方
+    provider 的取值优先，否则取出现次数最多的一对，平票取较小值，无效或过大的丢弃。"""
     votes = {}
     for provider, pdata in (doc or {}).items():
         if not isinstance(pdata, dict):
@@ -198,12 +189,9 @@ def refresh_async(directory, log=None):
 
 def lookup(model_id, remote_context=0, remote_output=0, directory=None,
            index=None):
-    """解析单个模型的 context 与 output。
-
-    每个字段按 上游动态值 > 内建知识表 > 本地缓存 > 默认值 的顺序取值，
-    context 默认 1000000，output 默认省略。models.dev 的拉取是异步的，
-    只负责预热缓存，这里不会阻塞在网络请求上。
-    """
+    """解析单个模型的 context 与 output；每个字段按 上游动态值 > 内建知识表 >
+    本地缓存 > 默认值 取值，context 默认 1000000，output 默认省略。models.dev 的
+    拉取是异步的，只负责预热缓存，这里不会阻塞在网络请求上。"""
     key = bare_id(model_id)
     try:
         remote_context = int(remote_context or 0)

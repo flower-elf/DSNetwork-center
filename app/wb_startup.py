@@ -1,9 +1,6 @@
-"""启动装配：命令行、实例探测、运行态初始化与监听。
-
-网关模块对象由入口以 gateway 参数显式传入，运行态全局都写在它上面；本模块
-不反向查找网关。
+"""启动装配：命令行、实例探测、运行态初始化与监听。网关模块对象由入口以 gateway
+参数显式传入，运行态全局都写在它上面；本模块不反向查找网关。
 """
-
 import argparse
 import json
 import os
@@ -74,13 +71,12 @@ def _apply_cli_overrides(gateway, args):
     if args.usage_dir:
         gateway.USAGE_DIR = os.path.abspath(args.usage_dir)
         gateway.USAGE_LOG = os.path.join(gateway.USAGE_DIR, "usage.jsonl")
-        # 事件日志（remaining 预算样本的来源）必须跟着 --usage-dir 走：这个
-        # 常量在 import 时按默认目录算过，漏掉它就会一直写默认目录，报 ENOENT。
+        # 事件日志（remaining 预算样本的来源）必须跟着 --usage-dir 走：常量在 import
+        # 时按默认目录算过，漏掉它就一直写默认目录、报 ENOENT。
         gateway.LIMIT_EVENTS_FILE = os.path.join(gateway.USAGE_DIR, "limit-events.jsonl")
         # 按天归档的估算数据同理（少了它，跨天归档会一直写默认目录或报 ENOENT）。
         gateway.ESTIMATE_DAILY_FILE = os.path.join(gateway.USAGE_DIR, "estimate-daily.json")
-        # recent 的行偏移索引同理（漏掉它，换目录后索引写到旧目录，
-        # 新目录每次冷启动都要重扫一遍日志）。
+        # recent 的行偏移索引同理：漏掉它换目录后索引写到旧目录，新目录每次冷启动都要重扫。
         gateway.RECENT_INDEX_FILE = os.path.join(gateway.USAGE_DIR, "usage-recent-index.json")
     # 账号活动历史与用量日志同目录，并且要在任何后台线程起来之前定下来：调度器
     # 的第一轮巡检不能落在 --usage-dir 生效之前，否则记录会写进默认目录。
@@ -99,8 +95,8 @@ def _probe_running_instance(gateway, args):
         existing = None  # /health 无人应答，交给下面的绑定判定
     if isinstance(existing, dict):
         # 只有自己的 /health 带账号池字段 "accounts"。同端口的其他服务（开发代理、
-        # 另一个网关）也会用 JSON 应答 /health；把它们当作已启动，本程序会静默
-        # 退出，看板显示的是对方的界面，API 调用全部 401/404。
+        # 另一个网关）也会用 JSON 应答 /health；当作已启动会静默退出，看板显示的是
+        # 对方的界面，API 调用全部 401/404。
         foreign = existing.get("service") or "accounts" not in existing
         if foreign:
             who = existing.get("service") or "an unknown HTTP service"
@@ -146,8 +142,7 @@ def _bootstrap_runtime(gateway, args):
     if args.accounts_dir:
         gateway.ACCOUNTS_DIR = os.path.abspath(args.accounts_dir)
     # 日志写入数据库（默认关闭）：在账号池之前初始化，好让「池加载失败」这类最需要
-    # 事后留档的启动日志也能进库。关闭时这里只造一个 enabled=False 的空壳，
-    # 不建文件、不改日志路径。
+    # 事后留档的启动日志也能进库。关闭时只造一个 enabled=False 的空壳。
     gateway.LOG_STORE = wb_logstore.LogStore(os.path.join(gateway.USAGE_DIR, "logs.sqlite3"))
     gateway.apply_log_db_settings()
     # 面板 Key 列表存在时，列表是唯一凭据：启动参数与局域网自动生成都不参与。
@@ -323,12 +318,9 @@ def _log_startup_summary(gateway, args, api_key_generated):
 
 class GatewayServer(ThreadingHTTPServer):
     """主服务的 HTTP 服务类：只为把 listen backlog 从 stdlib 默认的 5 提到 128。
-
-    backlog=5 在突发并发下（面板打开一页就是 ~7 个并发请求，多标签更糟）会让
-    内核来不及 accept 的 SYN 被丢弃，客户端按 1s 粒度重传，表现为一部分请求整整
-    慢 1 秒。listen() 在 TCPServer.__init__ 里就被调用，所以 backlog 必须是类
-    属性——实例化之后再改就晚了。
-    """
+    backlog=5 在突发并发下（面板一页约 7 个并发请求）会让内核丢 SYN、客户端按 1 s
+    粒度重传，部分请求慢 1 秒；listen() 在 TCPServer.__init__ 里就被调用，backlog
+    必须是类属性。"""
     request_queue_size = 128
 
 def _serve_forever(gateway, args):
@@ -347,10 +339,9 @@ def _serve_forever(gateway, args):
         print("          %s" % gateway.launcher_hint(args.port + 1))
         print()
         raise SystemExit(1)
-    # 只有 socket 真正建立后才宣称在监听，绑定失败时不会打出与下面错误矛盾的
-    # listening 行。
-    # 日志报告的是请求路径实际执行的状态：面板可在启动后开启 Key 校验，只读
-    # API_KEY 会打出 "off"，而 /v1 全部被 401 拒绝。
+    # 只有 socket 真正建立后才宣称在监听，绑定失败时不会打出与下面错误矛盾的行。
+    # 日志报告请求路径实际执行的状态：面板可在启动后开启 Key 校验，只读 API_KEY
+    # 会打出 "off"，而 /v1 全部被 401 拒绝。
     if gateway.auth_required():
         _panel_keys = [k for k in gateway.configured_keys() if k.get("enabled")]
         _key_state = ("on (%d key(s) from the panel)" % len(_panel_keys)) if _panel_keys else "on (--api-key)"
@@ -370,4 +361,3 @@ def _serve_forever(gateway, args):
             server.server_close()
         except Exception:
             pass
-

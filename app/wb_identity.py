@@ -6,19 +6,14 @@ import re
 import secrets
 import uuid
 
-# 国际版 5.8.4 桌面客户端抓包：对话请求的版本号与 UA。
-# UA 末段 CLI/2.161.0 是客户端内置 CLI 的版本，与桌面端版本无关。
+# 国际版 5.8.4 桌面客户端抓包。UA 末段 CLI/2.161.0 是内置 CLI 的版本，与桌面端版本无关。
 DESKTOP_VERSION_INTL = "5.8.4"
-# 对话请求由客户端内置 CLI 子进程发出，该进程固定 CLIENT_INFO_IDE_TYPE=WorkBuddy，
-# 见 sidecar-manager.js。buildUserAgent 的 platform 段取该值，application 段取
-# product.json 的 applicationName，国际版为 workbuddy-ai，因此首段是大写
-# WorkBuddy，次段是小写 workbuddy-ai。
-# Electron 主进程的旁路请求 msg-center / conversations 使用
-# workbuddy-ai/⋯⋯ workbuddy-ai/⋯⋯，属于另一条链路，不能照抄。
+# 对话请求由客户端内置 CLI 子进程发出（sidecar-manager.js）：UA 的 platform 段取固定值
+# CLIENT_INFO_IDE_TYPE=WorkBuddy，application 段取 product.json 的 applicationName。
+# Electron 主进程的 msg-center / conversations 走另一条链路，UA 不同，不能照抄。
 DESKTOP_UA_INTL = "WorkBuddy/5.8.4 workbuddy-ai/5.8.4 CLI/2.161.0"
-# 国内版 5.9.3：product.json 的 productName 与 applicationName 都是 WorkBuddy，
-# sidecar 把 CLIENT_INFO_PLATFORM 固定成 WorkBuddy，UA 首两段因此同名。内置
-# CLI 2.165.0 由 cli/package.json 的 version 给出。
+# 国内版 5.9.3 的 productName 与 applicationName 都是 WorkBuddy，UA 首两段同名；
+# 内置 CLI 2.165.0 由 cli/package.json 的 version 给出。
 DESKTOP_VERSION_CN = "5.9.3"
 DESKTOP_UA_CN = "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/2.165.0"
 
@@ -62,10 +57,9 @@ def api_key_id(token):
 
 
 def auth_headers(token, api_key=None):
-    """OAuth 与静态 API Key 共用的鉴权头。
+    """鉴权头；静态 Key 必须同时发送 Authorization 与 X-API-Key。
 
-    静态 Key 同时发送 Authorization 与 X-API-Key：只发送前者时上游仍返回 200，
-    但模型清单会缺少几个模型，且没有任何提示。
+    只发送 Authorization 时上游仍返回 200，但模型清单会无声缺几个模型。
     """
     token = str(token or "")
     headers = {"Authorization": "Bearer " + token}
@@ -73,12 +67,8 @@ def auth_headers(token, api_key=None):
         headers["X-API-Key"] = token
     return headers
 
-# 各官方客户端 OAuth 登录时 auth/state 携带的 platform 参数，取自客户端产品配置
-# 的 authentication.attributes.platform，缺失时取顶层 platform：
-#   国内版桌面端 5.9.3 为 workbuddy，
-#   国际版桌面端 5.8.4（WorkBuddy-intl-win32-x64-user-5.8.4.41366630）为 workbuddy-ai，
-#   VS Code 插件 4.12.39997873 为 VSCode，
-#   CodeBuddy CLI 2.177.1 为 CLI。
+# OAuth 登录 auth/state 的 platform 参数，取自客户端产品配置的
+# authentication.attributes.platform，缺失时取顶层 platform；值与各官方客户端一致。
 _LOGIN_PLATFORMS = {
     ("cn", PRODUCT_DESKTOP): "workbuddy",
     ("intl", PRODUCT_DESKTOP): "workbuddy-ai",
@@ -90,14 +80,12 @@ _LOGIN_PLATFORMS_DEFAULT = {
 
 
 def login_platform(realm, product):
-    """auth/state 的 platform 参数，与所选官方客户端的登录请求一致。"""
     product = normalize_product(product)
     realm = "cn" if realm == "cn" else "intl"
     return _LOGIN_PLATFORMS.get((realm, product)) or _LOGIN_PLATFORMS_DEFAULT[product]
 
 
 def normalize_product(value):
-    """把各种写法收敛成 'workbuddy'、'vscode' 或 'cli'。"""
     v = str(value or "").strip().lower()
     if v in ("workbuddy", "wb", "desktop"):
         return PRODUCT_DESKTOP
@@ -110,10 +98,8 @@ def normalize_product(value):
 
 _ENDPOINTS = {
     ("intl", PRODUCT_DESKTOP): ("https://www.workbuddy.ai", "www.workbuddy.ai"),
-    # VS Code 插件的产品配置分内部与外部两套：内部 endpoint 是
-    # copilot.tencent.com，外部 endpoint 是 www.codebuddy.ai。
+    # VS Code 插件的内部 endpoint 是 copilot.tencent.com，外部是 www.codebuddy.ai。
     ("intl", PRODUCT_VSCODE): ("https://www.codebuddy.ai", "www.codebuddy.ai"),
-    # CLI 使用自己的官方域名，与桌面端、VS Code 插件分开。
     ("intl", PRODUCT_CLI): ("https://www.codebuddy.ai", "www.codebuddy.ai"),
     ("cn", PRODUCT_DESKTOP): ("https://www.workbuddy.cn", "www.workbuddy.cn"),
     ("cn", PRODUCT_VSCODE): ("https://copilot.tencent.com", "copilot.tencent.com"),
@@ -122,13 +108,11 @@ _ENDPOINTS = {
 
 
 def endpoint_for(realm, product):
-    """返回 chat base URL 与 X-Domain。身份换了，端点也要跟着换。"""
     key = ("cn" if realm == "cn" else "intl", normalize_product(product))
     return _ENDPOINTS[key]
 
 
 def domain_for_realm(realm):
-    """X-Domain 的值，默认为桌面端。"""
     return endpoint_for(realm, PRODUCT_DESKTOP)[1]
 
 
@@ -144,10 +128,9 @@ def new_message_id():
 
 
 def trace_headers():
-    """对话请求带的链路头族：traceparent / b3 / X-B3-* / X-Trace-ID。
+    """对话请求的链路头族：traceparent / b3 / X-B3-* / X-Trace-ID。
 
-    main 请求还带 X-B3-ParentSpanId，该值需要真实的父子调用关系，网关无法
-    提供，因此不伪造；辅助请求本来也不带这个头。
+    X-B3-ParentSpanId 需要真实的父子调用关系，网关无法提供，因此不伪造。
     """
     trace = new_message_id()
     span = secrets.token_hex(8)
@@ -162,11 +145,7 @@ def trace_headers():
 
 
 def identity_user_agent(realm, product):
-    """这个身份在对话与登录请求上使用的 User-Agent。
-
-    官方客户端由同一套 client info 拼出 UA，登录与对话因此是同一个值：
-    桌面端是三段式，VS Code 插件与 CLI 是两段式。
-    """
+    """对话与登录共用的 User-Agent：官方客户端两处由同一套 client info 拼出，值相同。"""
     product = normalize_product(product)
     is_cn = realm == "cn"
     if product == PRODUCT_DESKTOP:
@@ -180,8 +159,8 @@ def identity_user_agent(realm, product):
 def login_trace_headers():
     """auth/state 与 auth/token 的链路头，与官方客户端的 traceSpan 一致。
 
-    登录请求是 root span，`X-B3-ParentSpanId` 为空但仍然发送；b3 是四段式。
-    对话请求另有一套（见 trace_headers），两者不要混用。
+    登录请求是 root span：X-B3-ParentSpanId 为空但仍发送，b3 是四段式；与对话请求
+    的链路头（trace_headers）是两套，不能混用。
     """
     trace = new_message_id()
     span = secrets.token_hex(8)
@@ -198,20 +177,17 @@ def login_trace_headers():
 def build_identity_headers(product, realm, uid, token,
                            conversation_id=None, enterprise_id="",
                            tenant_id="", department="", domain=""):
-    """返回这一轮要用的身份标头。product 取 'workbuddy'、'vscode' 或 'cli'。
+    """这一轮的身份标头；product 取 'workbuddy'、'vscode' 或 'cli'。
 
-    conversation_id 留空时每次请求新生成一个 UUIDv4，这是网关的常态。
-    上游不按这个 id 保存历史：同一 id 连发两轮，第二轮只带 system 与 user
-    消息时，模型仍答不出上一轮；换新 id 结果相同，因此网关不需要在会话
-    维度维护映射。
+    conversation_id 留空时每次请求新生成 UUIDv4。上游不按该 id 保存历史：同一 id
+    连发两轮，第二轮模型仍答不出上一轮，因此网关不维护会话映射。
     """
     product = normalize_product(product)
     is_cn = (realm == "cn")
 
     conv = str(conversation_id or "").strip() or new_conversation_id()
     msg_id = new_message_id()
-    # main 请求里 X-Conversation-Request-ID 与 X-Root-Request-ID 取同一个值，
-    # 且早于消息 id。该值在每次 user send 开始时生成，这一轮的所有请求复用。
+    # X-Conversation-Request-ID 与 X-Root-Request-ID 同值且早于消息 id，一轮内复用。
     conv_req_id = new_message_id()
 
     if product == PRODUCT_DESKTOP:
@@ -237,8 +213,7 @@ def build_identity_headers(product, realm, uid, token,
         }
         headers.update(trace_headers())
     elif product == PRODUCT_VSCODE:
-        # 插件只发 X-Agent-Intent 与 X-Agent-Type；运行位置与用途两个头属于
-        # 桌面 CLI，插件从不发送。
+        # 插件只发 X-Agent-Intent 与 X-Agent-Type；另外两个 X-Agent 头属于桌面 CLI。
         headers = {
             "X-Agent-Intent": "craft",
             "X-Agent-Type": "main",

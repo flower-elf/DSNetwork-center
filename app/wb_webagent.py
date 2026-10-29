@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
-# 网页端会话的 ACP 驱动：GET 沙箱 link 拿到 SSE 流与 Acp-Connection-Id，
-# POST 同一 link 发 JSON-RPC 的 initialize / session/load / session/prompt，
-# 再从 SSE 流收 session/update 直到本轮结束。只建会话、不接沙箱时，上游会一直
-# 停在 CREATING，因此每日活跃必须由这里把这一轮真正跑完。
+# 网页端会话的 ACP 驱动：GET 沙箱 link 拿 SSE 流与 Acp-Connection-Id，POST 同一 link
+# 发 JSON-RPC 的 initialize / session/load / session/prompt，从 SSE 收 session/update
+# 直到本轮结束。只建会话不接沙箱时上游会停在 CREATING，每日活跃必须真正跑完这一轮。
 
 import base64
 import http.client
@@ -22,12 +21,9 @@ CLIENT_CAPABILITIES = {
 
 
 def _proxy_parts(proxy_url):
-    """解析代理 URL，返回 host、port 与 CONNECT 头组成的元组。
-
-    两种写法都要认：`http://user:pass@host:port`，以及无 scheme 的
-    `user:pass@host:port`。凭据取值与 urllib.request.ProxyHandler.proxy_open
-    一致，先 unquote 再 base64，同一个代理 URL 在桌面通道与网页通道生成同一份凭据。
-    """
+    """解析代理 URL，返回 host、port 与 CONNECT 头组成的元组；两种写法都要认
+    （`http://user:pass@host:port` 与无 scheme 的 `user:pass@host:port`）。凭据取值
+    与 urllib.request.ProxyHandler.proxy_open 一致（先 unquote 再 base64）。"""
     raw = str(proxy_url or "").strip()
     parsed = urllib.parse.urlparse(raw)
     host, port = parsed.hostname, parsed.port
@@ -37,7 +33,7 @@ def _proxy_parts(proxy_url):
         authority = raw.split("://")[-1].split("/")[0]
         userinfo, _, hostport = authority.rpartition("@")
         host, _, port_text = hostport.rpartition(":")
-        if not host:                       # 没有端口
+        if not host:
             host, port_text = hostport, ""
         try:
             port = int(port_text) if port_text else None
@@ -83,7 +79,6 @@ class AcpChannel(object):
         self._reader = None
         self._stop = threading.Event()
 
-    # ---- 连接 ----------------------------------------------------------
     def _target(self):
         parsed = urllib.parse.urlparse(self.link)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
@@ -96,10 +91,9 @@ class AcpChannel(object):
         cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
         conn = cls(parsed.hostname, port, timeout=self.timeout)
         if self.proxy:
-            # 账号配了代理时走 CONNECT，与 urlopen 那条路径保持一致。
-            # 凭据必须显式塞进 CONNECT：urllib 的 ProxyHandler 会替我们加
-            # Proxy-Authorization，裸 http.client + set_tunnel 不会；缺失时
-            # 认证代理一律回 407。
+            # 账号配了代理时走 CONNECT，与 urlopen 那条路径保持一致。凭据必须显式
+            # 塞进 CONNECT：裸 http.client + set_tunnel 不会自动加 Proxy-Authorization，
+            # 缺失时认证代理一律回 407。
             host, proxy_port, tunnel_headers = _proxy_parts(self.proxy)
             conn = cls(host, proxy_port or 80, timeout=self.timeout)
             conn.set_tunnel(parsed.hostname, port, headers=tunnel_headers)
@@ -129,7 +123,6 @@ class AcpChannel(object):
         return connection_id
 
     def _read_events(self, resp):
-        """把 SSE 流解析成 JSON-RPC 消息，塞进 self.events。"""
         try:
             while not self._stop.is_set():
                 # 走 HTTPResponse 自己的 readline：分块编码在行中间切分时也能正确拼回
@@ -154,10 +147,10 @@ class AcpChannel(object):
                     if update.get("sessionUpdate") == "agent_message_chunk":
                         self.chunks += 1
                 self.events.put(message)
-        except Exception as exc:      # 连接被关掉、超时等
+        except Exception as exc:
             self.events.put({"__stream_error__": "%s: %s" % (type(exc).__name__, exc)})
         finally:
-            self.events.put(None)     # 流结束的哨兵
+            self.events.put(None)
 
     def request(self, method, params, request_id):
         """发一个 JSON-RPC 请求；成功返回 HTTP 状态码，正常是 202。"""
@@ -197,13 +190,9 @@ class AcpChannel(object):
 def _set_model(channel, session_id, model, log):
     """把这一轮用的模型固定到会话上，与网页端的做法一致。
 
-    建会话请求体里的 model 只写进会话的 manifest，真正决定这一轮用哪个模型的
-    是这条 ACP 扩展请求：网页端在 session/load 之后、session/prompt 之前单独
-    发它，客户端 SDK 里就是 extMethod("session/set_model", {sessionId,
-    modelId})。少了它，会话跑的是账号的默认模型——网页端默认是 Auto，按付费
-    模型计费，于是每天的活跃都在扣积分。
-
-    失败不当致命错：这一轮还是要跑完，只是模型可能没切成，日志里留一句。
+    建会话请求体里的 model 只写进 manifest，真正决定模型的是这条 ACP 扩展请求
+    （session/load 之后、session/prompt 之前发 session/set_model）：少了它会话跑
+    账号默认模型（Auto，按付费模型计费）。失败不当致命错，只在日志留一句。
     """
     try:
         channel.request("session/set_model",
@@ -234,13 +223,9 @@ def _drain_stream_events(channel):
 def run_turn(link, token, session_id, cwd, prompt, user_agent, poll_status=None,
              wait_seconds=120, poll_interval=3, log=None, proxy="",
              channel_factory=AcpChannel, model=None):
-    """接上沙箱、把这一轮跑完。
-
-    poll_status 是调用方给的「这条会话现在什么状态」，状态来自调用方查询
-    console API；看到 completed 就算跑完，failed/error 直接停。返回结果里带
-    事件数与输出段数，方便在打卡结果里看出这一轮到底跑没跑。
-
-    model 非空时，在 session/load 之后补一条 session/set_model —— 见 _set_model。
+    """接上沙箱、把这一轮跑完。poll_status 是调用方给的会话状态（来自 console API），
+    看到 completed 就算跑完，failed/error 直接停；返回结果带事件数与输出段数。
+    model 非空时在 session/load 之后补一条 session/set_model（见 _set_model）。
     """
     log = log or (lambda *a, **k: None)
     started = time.time()

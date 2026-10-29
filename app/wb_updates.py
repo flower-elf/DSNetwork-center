@@ -1,20 +1,9 @@
 # -*- coding: utf-8 -*-
-"""更新发现（只发现，不安装）。
+"""更新发现（只发现，不安装）：拉 GitHub releases 元数据并比对版本号。
 
-这个模块回答一个问题：官方仓库有没有比当前运行版本更新的稳定版？它拉一次
-GitHub releases 元数据（API 拿不到就退回网页端点），比较版本号，把结论交给面板；
-不下载、不解包、不替换文件、不重启进程。
-
-1. 默认关闭。每日检查是 operator 显式打开的偏好；缺键、false 都是关闭，关闭时
-   后台一个请求都不发。
-2. 失败不致命。网络超时、HTTP 错误、JSON 坏了都只记一行短原因，网关照常服务；
-   后台检查永远不挡请求路径。
-3. 只留安全运维字段。落盘的只有上次尝试时间、上次成功时间、见过的版本号、
-   发布页链接与发布时间；请求地址、请求头、响应体一律不落。
-
-纯标准库，Python 3.9 兼容。
+默认关闭，缺键或 false 都算关闭，关闭时后台一个请求都不发。失败不致命，只记
+一行短原因。落盘只有时间、版本号和发布页链接；请求地址、请求头、响应体不落。
 """
-
 import json
 import os
 import re
@@ -25,39 +14,35 @@ import urllib.request
 
 import wb_settings
 
-# 本项目的 releases 接口——主路径。走 API 不抓 HTML：页面结构变了不该让检查失效。
-# 检查的是本仓库（来源仓库的上游是另一个项目，版本号互不相干）。
+# 主路径：走 API 不抓 HTML，页面改版不影响检查。查的是本仓库，版本号与来源仓库无关。
 REPO = "flower-elf/DSNetwork-center"
 RELEASES_URL = "https://api.github.com/repos/%s/releases" % REPO
-# 回退路径：网页端点的 302 Location 末尾就是最新稳定版 tag。它按网页计流量，
-# 不受 API 那 60 次/小时/出口 IP 的匿名配额限制，也不需要凭据。
+# 回退路径：302 Location 末尾是最新稳定版 tag；按网页计流量，不受 API 匿名配额
+# 60 次/小时/出口 IP 的限制，也不需要凭据。
 LATEST_RELEASE_URL = "https://github.com/%s/releases/latest" % REPO
 # 发布页总入口：面板的「打开发布页」在没有单条发布链接时用它，按钮始终可点。
 RELEASES_PAGE = "https://github.com/%s/releases" % REPO
 TAG_RE = re.compile(r"/releases/tag/([^/?#]+)")
-# 可选凭据：认证请求的配额是 5000 次/小时。只从环境变量读，绝不落盘
-# （模块头第 3 条）。
+# 可选凭据：认证配额 5000 次/小时。只从环境变量读，绝不落盘。
 TOKEN_ENV = "GITHUB_TOKEN"
 USER_AGENT = "wb2api-hub-update-check"
 REQUEST_TIMEOUT = 5
-# 一份 releases 文档几十 KB；给足余量但设上限，坏响应不能把内存拉满。
+# releases 文档几十 KB；设上限，坏响应不能把内存拉满。
 MAX_BODY = 2 * 1024 * 1024
 
-# 自动检查的默认节流窗口（24 小时），面板可改成 1 小时到 30 天。重启不会让
-# 检查变得频繁，也不会因为一次失败就整天不再试。
+# 自动检查的默认节流窗口（24 小时），面板可改成 1 小时到 30 天；重启不变频繁，
+# 一次失败也不整天不再试。
 SCHEDULED_INTERVAL_SECONDS = 24 * 3600
 # 启动后先等一会儿再花掉这个请求，让监听端口和账号池先就绪。
 FIRST_DELAY_SECONDS = 30
-# 后台线程醒来的间隔。真正的节流靠 due() 判断，这里只决定「多久看一眼」。
+# 后台线程醒来的间隔；真正的节流靠 due() 判断，这里只决定看一眼的频率。
 POLL_SECONDS = 300
 
-# 只认 vX.Y.Z 这种能排序的稳定版本号。带后缀的（-rc1）、日期 tag、移动分支名
-# 一律跳过：猜一个顺序比不报更糟。
+# 只认能排序的稳定版本号 vX.Y.Z；-rc1、日期 tag、分支名一律跳过，猜顺序比不报更糟。
 VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 
 def parse_version(text):
-    """vX.Y.Z / X.Y.Z -> (major, minor, patch)；其它一律 None。"""
     match = VERSION_RE.match(str(text or "").strip())
     if not match:
         return None
@@ -65,17 +50,12 @@ def parse_version(text):
 
 
 def is_newer(candidate, current):
-    """candidate 是否严格新于 current；任一边不可解析就是 False。"""
     left, right = parse_version(candidate), parse_version(current)
     return bool(left and right and left > right)
 
 
 def safe_url(value):
-    """发布页链接，或 ""。
-
-    这个值来自远端文档，会被面板原样显示：只放行 GitHub 的 https 发布页这一种
-    形状，别的一律丢掉。
-    """
+    """发布页链接，或 ""。远端值会被面板原样显示，只放行 GitHub 的 https 发布页这一种形状。"""
     text = str(value or "").strip()
     if not text.startswith("https://github.com/"):
         return ""
@@ -83,11 +63,8 @@ def safe_url(value):
 
 
 def pick_latest(releases, current_version):
-    """从一份 releases 文档里挑出最新的稳定版，没有就返回 None。
-
-    草稿与预发布跳过；tag 不是纯 vX.Y.Z 的跳过；取版本号最大的那个，列表顺序
-    不决定结果，重新发布的旧 tag 不能靠排序取胜。
-    """
+    """最新的稳定版条目，没有就 None。跳过草稿、预发布和非 vX.Y.Z tag；取版本号最大的，
+    列表顺序不决定结果，重新发布的旧 tag 不能靠排序取胜。"""
     best = None
     for entry in releases if isinstance(releases, list) else []:
         if not isinstance(entry, dict):
@@ -113,11 +90,7 @@ def pick_latest(releases, current_version):
 
 
 def describe_failure(exc):
-    """一行能安全外发的失败原因。
-
-    urllib 的异常消息里可能带着完整 URL 和响应体，两者都不该进 settings.json
-    或日志，所以这里只取异常类型和 HTTP 状态码。
-    """
+    """一行能安全外发的失败原因：异常消息可能带完整 URL 和响应体，只取异常类型和状态码。"""
     code = getattr(exc, "code", None)
     if isinstance(code, int):
         return "HTTP %d" % code
@@ -131,13 +104,10 @@ def describe_failure(exc):
 
 
 def fetch_releases(url=RELEASES_URL, timeout=REQUEST_TIMEOUT):
-    """releases 文档的原始 JSON 文本；任何失败都抛异常给调用方。
+    """releases 文档的原始 JSON 文本；失败抛异常。
 
-    API 那一跳走的是**匿名**配额：60 次/小时/出口 IP。国内用户普遍从共享代理
-    节点出网，这份配额是整个出口共用的，被邻居先耗光时这一跳**必然**失败。所以
-    API 那一跳只要没成——403 也好、连接被掐也好——就退回网页端点，把同一条结论
-    拿回来；那边也失败才抛异常，抛的是 API 的原因，它才是主路径。
-    """
+    API 走匿名配额 60 次/小时/出口 IP，共享代理出口可能被邻居耗光；API 一跳失败
+    就退回网页端点拿同一条结论，两边都失败抛 API 的原因，它才是主路径。"""
     try:
         return _fetch_api(url, timeout)
     except Exception as api_error:
@@ -161,12 +131,8 @@ def _fetch_api(url, timeout):
 
 
 def fetch_latest_release(timeout=REQUEST_TIMEOUT):
-    """网页端点上的最新稳定版，返回一条 releases 条目。
-
-    releases/latest 会 302 到 /releases/tag/<tag>；urlopen 跟完重定向后
-    geturl() 就是那条最终地址，tag 直接从 URL 里取——不解析 HTML，页面改版也
-    不会让检查失效。发布日期这一跳给不出来，留空。
-    """
+    """网页端点上的最新稳定版，返回一条 releases 条目。releases/latest 302 到
+    /releases/tag/<tag>，tag 从最终 URL 取，不解析 HTML；发布日期这一跳留空。"""
     request = urllib.request.Request(LATEST_RELEASE_URL,
                                      headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -190,11 +156,6 @@ def _stamp(value):
 
 
 class UpdateChecker(threading.Thread):
-    """后台的每日更新检查 + 面板要的状态。
-
-    daemon 线程：进程退出不需要等它，`stop()` 只是让循环尽快收工。
-    """
-
     def __init__(self, current_version, settings_dir, fetcher=None, log=None,
                  first_delay=FIRST_DELAY_SECONDS, poll_seconds=POLL_SECONDS):
         super().__init__(daemon=True, name="update-check")
@@ -217,15 +178,13 @@ class UpdateChecker(threading.Thread):
 
     # ---- 状态 -----------------------------------------------------------
     def _load_state(self):
-        """把上次的记账读回来，重启后面板立刻有东西可看。"""
         try:
             state = wb_settings.update_check_state(self.settings_dir)
         except Exception:
             return
         if (state.get("repo") or "") != REPO:
-            # 旧记录来自别的仓库（或旧版本没有来源标记）：版本号与链接不能
-            # 继续当成这个仓库的结果。清掉节奏时间，让启动检查立刻按新目标
-            # 查一次；之后照常按间隔节流。
+            # 旧记录来自别的仓库：版本号与链接作废，清掉节奏时间让启动检查
+            # 立刻按新目标查一次。
             return
         self._last_attempt = state.get("last_attempt") or 0.0
         self._last_success = state.get("last_success") or 0.0
@@ -233,8 +192,8 @@ class UpdateChecker(threading.Thread):
         if version:
             self._latest = {
                 "version": version, "tag": "",
-                # 发布页链接与发布时间跟着版本一起落盘：重启后还没重新检查时，
-                # 弹窗与状态行也能给出可点的发布页链接。
+                # 链接与发布时间跟着版本落盘：重启后未重新检查时弹窗也能给出
+                # 可点的发布页链接。
                 "url": state.get("latest_url") or "",
                 "published_at": state.get("published_at") or "",
                 "newer": is_newer(version, self.current_version),
@@ -251,14 +210,12 @@ class UpdateChecker(threading.Thread):
             pass
 
     def enabled(self):
-        """自动检查的偏好；缺键或 false 都是关闭。"""
         try:
             return wb_settings.update_check_enabled(self.settings_dir)
         except Exception:
             return False
 
     def interval_seconds(self):
-        """自动检查的节流窗口，来自面板设置；读取失败按每天一次。"""
         try:
             hours = wb_settings.update_check_interval_hours(self.settings_dir)
         except Exception:
@@ -266,7 +223,6 @@ class UpdateChecker(threading.Thread):
         return max(3600, int(hours) * 3600)
 
     def due(self, now=None):
-        """节流窗口是否已经放行。"""
         now = time.time() if now is None else float(now)
         if not self._last_attempt:
             return True
@@ -301,14 +257,8 @@ class UpdateChecker(threading.Thread):
 
     # ---- 检查 -----------------------------------------------------------
     def check(self, manual=False):
-        """跑一次发现，返回状态字典。
-
-        `manual=True` 绕过开关和 24 小时窗口：操作员点了「立即检查」就必须真的
-        去问一次。`manual=False` 是后台路径，关闭或没到点就直接返回，一个请求
-        都不发。
-
-        同步执行，耗时由 fetcher 的超时封顶；它不持有任何请求路径要等的锁。
-        """
+        """跑一次发现，返回状态字典。manual=True 绕过开关和节流窗口，必须真的去问
+        一次；后台路径关闭或没到点直接返回，一个请求都不发。不持有请求路径要等的锁。"""
         status = self.status()
         if not manual:
             if not self.enabled():
@@ -338,7 +288,6 @@ class UpdateChecker(threading.Thread):
                 raise ValueError("releases document is not a list")
             picked = pick_latest(document, self.current_version)
         except Exception as exc:
-            # 契约上失败不致命：保留上一次的结论，只把一行短原因报出去。
             self._last_error = describe_failure(exc)
             self._remember(success=False)
             self.log("更新检查失败：%s" % self._last_error)
@@ -356,11 +305,10 @@ class UpdateChecker(threading.Thread):
 
     # ---- 后台线程 -------------------------------------------------------
     def wake(self):
-        """叫醒停着的循环——偏好刚从关拨到开时用。"""
+        """偏好刚从关拨到开时叫醒停着的循环。"""
         self._wake.set()
 
     def stop(self):
-        """让循环尽快收工；daemon 线程本来也不会挡住进程退出。"""
         self._stop_event.set()
         self._wake.set()
 
@@ -369,14 +317,12 @@ class UpdateChecker(threading.Thread):
         self._wake.clear()
 
     def run(self):
-        # 开关打开时启动即查一次：面板登录后要能立刻提示新版本，不必等首个
-        # 延迟。节流窗口照旧生效——刚查过就跳过，不会因为重启而变频繁。
+        # 启动即查一次，面板登录后能立刻提示新版本；节流窗口照旧生效，重启不会变频繁。
         if self.enabled() and not self._stop_event.is_set():
             try:
                 self.check(manual=False)
             except Exception as exc:
                 self.log("更新检查异常：%s" % describe_failure(exc))
-        # 再让监听端口和账号池就绪，然后进入常规轮询。
         if self._stop_event.wait(self._first_delay):
             return
         while not self._stop_event.is_set():
