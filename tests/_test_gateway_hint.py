@@ -1,11 +1,6 @@
-"""Pin the gateway_hint contract: an additive note beside the upstream error.
+"""gateway_hint 的契约：提示只是上游错误旁的附加说明，客户端继续解析同一个信封。
 
-The hint must never replace or rewrite the upstream message (clients keep
-parsing the same envelope), must only appear when the gateway actually
-classified the failure, and unknown failures must stay hint-less rather than
-guess. Run with the bundled Python:
-
-    python tests/_test_gateway_hint.py
+提示只在网关完成失败分类时出现，未知失败保持无提示；用 python tests/_test_gateway_hint.py 运行。
 """
 import os
 import sys
@@ -42,7 +37,7 @@ class HintClassificationTests(unittest.TestCase):
                              (status, message))
 
     def test_hint_never_replaces_the_message(self):
-        # The hint is additive; the upstream wording stays verbatim.
+        # 提示只做附加，上游原文逐字保留。
         message = "rate limit reached for model deepseek-v4.1-flash"
         self.assertEqual(message, str(message))
         hint = proxy.gateway_hint(429, message)

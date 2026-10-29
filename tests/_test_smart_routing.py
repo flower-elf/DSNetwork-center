@@ -23,6 +23,7 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 import wb_accounts
 import wb_settings
 import wb_proxy as P
+import wb_usage as U
 
 MODEL = "deepseek-v4.1-flash"
 
@@ -45,7 +46,7 @@ def account(uid, realm="cn", remain=None, days=None, rate=None):
 
 
 def packages(*pairs):
-    """余额快照：每一项是（余额, 距今天数），天数为负表示已经过期。"""
+    """余额快照：每一项是（余额，距今天数），天数为负表示已经过期。"""
     now = time.time()
     return {"remain": sum(remain for remain, _days in pairs), "packages": [
         {"remain": remain, "name": "包", "days_left": days,
@@ -76,8 +77,8 @@ def write_log(rows, mode="w"):
 
 
 def reset_daily_cache():
-    with P._daily_usage_lock:
-        P._daily_usage.update({"day": "", "totals": None, "credits": None,
+    with U._daily_usage_lock:
+        U._daily_usage.update({"day": "", "totals": None, "credits": None,
                                "offset": 0, "at": 0.0})
 
 
@@ -365,7 +366,7 @@ class DailyCreditFoldTests(unittest.TestCase):
         reset_daily_cache()
 
     def test_credits_fold_with_tokens_and_skip_old_and_cancelled_rows(self):
-        midnight = P._local_midnight()
+        midnight = U._local_midnight()
         write_log([
             usage_row(midnight - 60, "acct-A", 5000, credit=9.9),      # 昨天
             usage_row(midnight + 60, "acct-A", 1200, credit=0.25),
@@ -374,27 +375,27 @@ class DailyCreditFoldTests(unittest.TestCase):
                       outcome="client_aborted"),                        # 客户端取消
             usage_row(midnight + 240, "acct-C", 100),                   # 没有积分字段
         ])
-        tokens, credits = P.daily_usage_by_account(ttl=0)
+        tokens, credits = U.daily_usage_by_account(ttl=0)
         self.assertEqual(tokens, {"acct-A": 1200, "acct-B": 300, "acct-C": 100})
         self.assertEqual(credits, {"acct-A": 0.25, "acct-B": 1.5})
-        self.assertEqual(P.daily_tokens_by_account(ttl=0), tokens)
+        self.assertEqual(U.daily_tokens_by_account(ttl=0), tokens)
 
         # 追加的行接着折叠，不重读整个文件
         write_log([usage_row(midnight + 300, "acct-B", 200, credit=0.5)], mode="a")
-        tokens, credits = P.daily_usage_by_account(ttl=0)
+        tokens, credits = U.daily_usage_by_account(ttl=0)
         self.assertEqual(tokens["acct-B"], 500)
         self.assertAlmostEqual(credits["acct-B"], 2.0, places=6)
 
     def test_a_missing_log_reads_as_none(self):
         if os.path.exists(P.USAGE_LOG):
             os.remove(P.USAGE_LOG)
-        self.assertEqual(P.daily_usage_by_account(ttl=0), (None, None))
+        self.assertEqual(U.daily_usage_by_account(ttl=0), (None, None))
 
     def test_the_scale_extrapolates_today_to_a_day(self):
         noon = time.struct_time((2026, 10, 6, 12, 0, 0, 1, 280, -1))
-        self.assertAlmostEqual(P.credit_rate_scale(noon), 2.0, places=6)
+        self.assertAlmostEqual(U.credit_rate_scale(noon), 2.0, places=6)
         just_after_midnight = time.struct_time((2026, 10, 6, 0, 30, 0, 1, 280, -1))
-        self.assertEqual(P.credit_rate_scale(just_after_midnight), 1.0)
+        self.assertEqual(U.credit_rate_scale(just_after_midnight), 1.0)
 
 
 class RoutingInputsTests(unittest.TestCase):
@@ -404,7 +405,7 @@ class RoutingInputsTests(unittest.TestCase):
         reset_daily_cache()
         self.pool = wb_accounts.AccountPool(os.environ["ACCOUNTS_DIR"])
         self.pool.accounts = [account("acct-A"), account("acct-B"), account("acct-C")]
-        midnight = P._local_midnight()
+        midnight = U._local_midnight()
         write_log([usage_row(midnight + 60, "acct-A", 1000, credit=2.0),
                    usage_row(midnight + 120, "acct-B", 500, credit=1.0)])
         self.old_pool = P.POOL
@@ -418,13 +419,13 @@ class RoutingInputsTests(unittest.TestCase):
     def test_rates_are_pushed_only_while_the_switch_is_on(self):
         self.pool.smart_routing = False
         self.pool.accounts[2].credit_rate_per_day = 99.0
-        self.assertIsNone(P.apply_routing_inputs(refresh=True))
+        self.assertIsNone(U.apply_routing_inputs(refresh=True))
         self.assertEqual(self.pool.accounts[2].credit_rate_per_day, 99.0,
                          "开关关掉时不该动账号上的速度")
 
         self.pool.smart_routing = True
-        P.apply_routing_inputs(refresh=True)
-        scale = P.credit_rate_scale()
+        U.apply_routing_inputs(refresh=True)
+        scale = U.credit_rate_scale()
         self.assertAlmostEqual(self.pool.accounts[0].credit_rate_per_day, 2.0 * scale,
                                places=6)
         self.assertAlmostEqual(self.pool.accounts[1].credit_rate_per_day, 1.0 * scale,

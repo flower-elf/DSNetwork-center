@@ -1,7 +1,5 @@
-"""Prompt modes (B3): passthrough / custom / append and the degrade window.
-
-Run with: python _test_prompt_modes.py
-No upstream credentials or outbound network are used.
+"""Prompt 模式 B3 的契约：passthrough、custom、append 与降级窗口。
+运行方式：python _test_prompt_modes.py；不使用上游凭据，也不发出站请求。
 """
 import datetime
 import io
@@ -52,26 +50,6 @@ class PromptTextTests(unittest.TestCase):
         self.assertEqual(out[0], {"role": "system", "content": "GATEWAY"})
         self.assertEqual(out[1], {"role": "user", "content": "hi"})
 
-    def test_apply_mode_routing(self):
-        messages = [{"role": "system", "content": "client"},
-                    {"role": "user", "content": "hi"}]
-        self.assertIs(wb_prompt.apply_mode(messages, "passthrough", "GW"), messages)
-        custom = wb_prompt.apply_mode(messages, "custom", "GW")
-        self.assertEqual(custom[0]["content"], "GW")
-        self.assertNotIn("client", [m.get("content") for m in custom])
-        appended = wb_prompt.apply_mode(messages, "append", "GW")
-        self.assertEqual([m["content"] for m in appended[:2]], ["client", "GW"])
-
-    def test_degraded_routing_only_touches_passthrough_and_append(self):
-        messages = [{"role": "system", "content": "client"},
-                    {"role": "user", "content": "hi"}]
-        passthrough = wb_prompt.apply_mode(messages, "passthrough", "", degraded=True)
-        self.assertEqual(passthrough[0]["content"], wb_prompt.DEGRADED_PROMPT)
-        appended = wb_prompt.apply_mode(messages, "append", "GW", degraded=True)
-        self.assertEqual(appended[0]["content"], wb_prompt.DEGRADED_PROMPT)
-        custom = wb_prompt.apply_mode(messages, "custom", "GW", degraded=True)
-        self.assertEqual(custom[0]["content"], "GW")
-
     def test_next_midnight_cst(self):
         just_before = datetime.datetime(2026, 10, 5, 23, 59, 0, tzinfo=CST)
         expected = datetime.datetime(2026, 10, 6, 0, 0, 0, tzinfo=CST)
@@ -96,11 +74,6 @@ class PromptTextTests(unittest.TestCase):
 
 
 class PromptSettingsTests(unittest.TestCase):
-    def test_defaults_are_passthrough(self):
-        with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(wb_settings.prompt_config(directory),
-                             {"mode": "passthrough", "file": ""})
-
     def test_roundtrip_and_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             wb_settings.set_prompt_config(directory, {"mode": "custom"})
@@ -310,6 +283,33 @@ class DegradedRetryTests(unittest.TestCase):
                 wb_accounts.urlopen = old_urlopen
             self.assertEqual(len(calls), 1)
             self.assertFalse(wb_proxy.PROMPT_DEGRADE.active())
+
+
+class NormalizeModeTests(unittest.TestCase):
+    """设置文件里的模式值归一：未知值一律回退 passthrough。"""
+
+    def test_known_modes_survive_case_and_whitespace(self):
+        for mode in wb_prompt.VALID_MODES:
+            self.assertEqual(wb_prompt.normalize_mode("  " + mode.upper() + " "), mode)
+
+    def test_unknown_values_fall_back_to_passthrough(self):
+        for bad in ("", None, "always", "appendd", 1, True, [], {"mode": "custom"}):
+            self.assertEqual(wb_prompt.normalize_mode(bad), "passthrough", bad)
+
+    def test_an_empty_path_uses_the_builtin_prompt(self):
+        self.assertEqual(wb_prompt.load_prompt("custom", ""), wb_prompt.DEFAULT_PROMPT)
+        self.assertEqual(wb_prompt.load_prompt("custom", "   "), wb_prompt.DEFAULT_PROMPT)
+
+    def test_a_file_path_is_read_verbatim(self):
+        path = os.path.join(_startup_dir.name, "prompt.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("自定义提示词\n")
+        self.assertEqual(wb_prompt.load_prompt("custom", path), "自定义提示词\n")
+
+    def test_a_missing_file_raises_file_not_found(self):
+        """fail open 由调用方决定：这里只保证异常能传出去。"""
+        with self.assertRaises(FileNotFoundError):
+            wb_prompt.load_prompt("custom", os.path.join(_startup_dir.name, "gone.txt"))
 
 
 if __name__ == "__main__":

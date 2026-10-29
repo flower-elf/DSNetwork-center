@@ -1,24 +1,18 @@
-"""One-click agent integration for local AI clients.
+"""本地 AI 客户端的一键接入：改写它们的配置，让请求指向本网关。
 
-Detects installed AI clients (Claude Code, Codex, OpenCode, DSH, Crush, ZCode),
-rewrites their configuration to point at this gateway, keeps a byte-exact
-backup of every file it touches, and can restore the original state with one
-call. Inspired by EasyCLIProxyAPI's agents mechanism.
+识别已安装的客户端（Claude Code、Codex、OpenCode、DSH、Crush、ZCode），改写其配置，
+并把每个动过的文件留一份逐字节备份，一次调用即可还原。
 
-The same module is runnable as a standalone configurator, for clients on a
-machine that does not run the gateway (the panel's one-click setup only works
-from the gateway host itself - a remote browser cannot write another
-machine's config files). Run it where the clients are and point it at the
-gateway over the network:
+本模块也能当独立配置器运行，用于客户端不在网关机器上的情况（面板的一键接入只能在
+网关主机本机生效，远程浏览器写不了另一台机器的配置文件）：
 
-    python wb_agents.py list                    # what is installed here
+    python wb_agents.py list
     python wb_agents.py apply --client codex \
         --base-url http://gateway:8788/v1 --key sk-...
     python wb_agents.py restore --client codex
 
-Only the Python standard library is required. The YAML/TOML editing is a
-small, deliberately conservative text-level upserter: it never reformats
-lines it does not own, so hand-written comments and ordering survive.
+只依赖 Python 标准库。YAML/TOML 的编辑是一个刻意保守的文本级写入器：不动不属于
+自己的行，手写注释与顺序因此得以保留。
 """
 
 import argparse
@@ -37,10 +31,9 @@ PROVIDER_ID = "wb-proxy"
 PROVIDER_NAME = "WB Proxy"
 CREDENTIAL_REF = "WB_PROXY_API_KEY"
 
-# A config file bigger than this is almost certainly not the hand-edited
-# settings file we expect, so refuse rather than risk corrupting user data.
+# 超过这个大小的文件基本不可能是手改的配置文件，直接拒绝，避免破坏用户数据。
 MAX_CONFIG_BYTES = 8 * 1024 * 1024
-# How many backups per file are kept; older ones are pruned after each apply.
+# 每个文件保留的 backup 数量，每次 apply 后清理更旧的。
 BACKUP_KEEP = 10
 
 STATE_FILE = "integration-state.json"
@@ -48,15 +41,15 @@ BACKUP_DIRNAME = "agent-backups"
 
 
 class AgentConfigError(Exception):
-    """Human-readable failure while probing, applying or restoring a client."""
+    """探测、接入或还原客户端时的可读错误。"""
 
 
 # ---------------------------------------------------------------------------
-# Small file helpers
+# 小型文件工具
 # ---------------------------------------------------------------------------
 
 def _resolve_home(home=None):
-    """Return the home directory base; injectable so tests stay hermetic."""
+    """返回 home 目录基路径；可注入，测试保持封闭。"""
     if home:
         return os.path.abspath(home)
     return os.path.expanduser("~")
@@ -77,7 +70,7 @@ def _read_bytes(path):
 
 
 def _read_text(path):
-    """UTF-8 text of an existing file, or "" when the file does not exist."""
+    """读出已有文件的 UTF-8 文本；文件不存在时返回 ""。"""
     try:
         data = _read_bytes(path)
     except FileNotFoundError:
@@ -88,22 +81,19 @@ def _read_text(path):
         raise AgentConfigError("%s is not valid UTF-8: %s" % (path, exc))
 
 
-# Every file this module writes carries the gateway API key (inline, or via the
-# env reference that the sibling credentials file resolves), so a fresh one is
-# created owner-only rather than with open()'s 0666 & ~umask - 0644 under the
-# usual umask 022. DSH refuses to start when its credentials file is readable
-# beyond its owner, and the same 0644 would expose every other client's key.
+# 本模块写出的每个文件都带网关 API key（内联，或经同目录 credentials 文件解析的
+# 环境变量引用），所以新文件一律按仅属主权限创建，不走 open() 的 0666 & ~umask
+# （常见 umask 022 下得到 0644）。DSH 在 credentials 文件可被属主以外读取时拒绝
+# 启动，0644 同样会暴露其他客户端的 key。
 WRITE_MODE = 0o600
 
 
 def _target_mode(path):
-    """The mode to give `path` on the next write.
+    """下次写入 `path` 时采用的权限。
 
-    `WRITE_MODE` for a new file, or for one whose current mode is wider than
-    owner-only (or does not even let its owner read it back); otherwise the
-    file's own mode, so a re-apply preserves a stricter permission the user set
-    by hand instead of widening it back - 0600 -> 0600 and 0400 -> 0400, but
-    0644 -> 0600.
+    新文件、当前权限比仅属主更宽（或属主自己都读不回）的文件用 `WRITE_MODE`；
+    其余保留文件自身权限，重复接入不会把用户手改的更严权限放宽回去：
+    0600 -> 0600、0400 -> 0400，0644 -> 0600。
     """
     try:
         current = os.stat(path).st_mode & 0o777
@@ -115,12 +105,11 @@ def _target_mode(path):
 
 
 def _atomic_write(path, data):
-    """tmp + os.replace so a crash cannot leave a half-written config.
+    """tmp + os.replace 原子写入，崩溃不会留下写了一半的配置。
 
-    The temp file is created owner-only (see `_target_mode`) rather than with
-    the umask's default, and settled on the resolved mode after writing. Any
-    failure on the way - including the chmod or the replace - removes the temp
-    file, so a retry never trips over a leftover it cannot write to.
+    临时文件按仅属主权限创建（见 `_target_mode`），写完后落到解析出的目标权限。
+    途中任何失败（含 chmod 与 replace）都会删掉临时文件，重试不会被写不进去的
+    残留文件卡住。
     """
     directory = os.path.dirname(path)
     if directory:
@@ -128,7 +117,7 @@ def _atomic_write(path, data):
     tmp = path + ".tmp"
     mode = _target_mode(path)
     try:
-        os.unlink(tmp)  # a stale temp from a killed run may not be writable
+        os.unlink(tmp)  # 被杀进程留下的残留 tmp 可能不可写
     except OSError:
         pass
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -155,11 +144,10 @@ def _atomic_write_bytes(path, data):
 
 
 def _prune_empty_parents(path, home=None):
-    """Remove now-empty directories left behind by our own config writes.
+    """清掉本模块写配置留下的空目录。
 
-    Only directories that are empty are removed, and the walk stops at the
-    home directory, so a user's own (even empty) tree above the home is never
-    touched and nothing that still holds files is ever deleted.
+    只删空目录，且上溯到 home 目录即停：home 之上用户自己的目录树（哪怕为空）
+    一律不动，仍有文件的目录绝不删除。
     """
     home = os.path.abspath(home or _resolve_home())
     directory = os.path.dirname(os.path.abspath(path))
@@ -169,14 +157,14 @@ def _prune_empty_parents(path, home=None):
         if not os.path.abspath(directory).startswith(home + os.sep):
             return
         try:
-            os.rmdir(directory)  # fails unless empty
+            os.rmdir(directory)  # 仅在目录为空时成功，保证只删空目录
         except OSError:
             return
         directory = os.path.dirname(directory)
 
 
 def _load_json(path, what):
-    """Parse a JSON config file; missing file means an empty document."""
+    """解析 JSON 配置文件；文件缺失视作空文档。"""
     text = _read_text(path)
     if not text.strip():
         return {}
@@ -194,9 +182,9 @@ def _dump_json(data):
 
 
 def deep_merge(base, patch):
-    """Recursively merge patch into base; sibling keys outside patch survive.
+    """递归合并 patch 到 base；patch 之外的同级键保留。
 
-    Returns a new dict; the inputs are not mutated.
+    返回新 dict，不改动入参。
     """
     if not isinstance(base, dict) or not isinstance(patch, dict):
         return patch
@@ -210,7 +198,7 @@ def deep_merge(base, patch):
 
 
 # ---------------------------------------------------------------------------
-# Text-level YAML editor (subset; standard library only)
+# 文本级 YAML 编辑器（仅支持子集，只用标准库）
 # ---------------------------------------------------------------------------
 
 def _yaml_indent(line):
@@ -218,11 +206,10 @@ def _yaml_indent(line):
 
 
 def _yaml_key(line):
-    """The mapping key of a block-style `key: ...` line, or None.
+    """块式 `key: ...` 行的映射键；不匹配时返回 None。
 
-    Inline values (anything after the colon) and comments are ignored. Lines
-    that are not plain `word: value` mappings (list items, quoted keys) are
-    outside the supported subset.
+    冒号后的 inline 值与注释忽略。非 `word: value` 形式的行（列表项、带引号的
+    键）不在支持范围内。
     """
     stripped = line.strip()
     if not stripped or stripped.startswith("#") or stripped.startswith("-"):
@@ -234,10 +221,9 @@ def _yaml_key(line):
 
 
 def _yaml_block_end(lines, start, indent):
-    """Index one past the block opened by the line at `start`.
+    """`start` 行所开块的结束下标（块后第一行）。
 
-    The block covers every following non-blank, non-comment line indented
-    deeper than `indent`.
+    块覆盖其后所有缩进深于 `indent` 的非空、非注释行。
     """
     idx = start + 1
     while idx < len(lines):
@@ -249,8 +235,8 @@ def _yaml_block_end(lines, start, indent):
 
 
 def _yaml_insert_point(lines, start, end, indent):
-    """Last content line inside [start, end), so blank/comment trailers that
-    belong to the *next* section stay attached to it."""
+    """[start, end) 内最后一个内容行的插入点，让属于*下一*节的空行与注释
+    尾随行留在原处。"""
     idx = end
     while idx > start and not lines[idx - 1].strip():
         idx -= 1
@@ -258,10 +244,9 @@ def _yaml_insert_point(lines, start, end, indent):
 
 
 def _yaml_inline_to_block(lines, idx, key, inline_value):
-    """Expand `key: <inline>` into `key:` plus one nested block line.
+    """把 `key: <inline>` 展开成 `key:` 加一层嵌套块行。
 
-    Only a plain single-line flow mapping `{k: v, ...}` can be nested under
-    the key; anything else is outside the supported subset.
+    只有单行 flow 映射 `{k: v, ...}` 能在该键下展开；其余结构不在支持范围内。
     """
     indent = _yaml_indent(lines[idx])
     value = inline_value.strip()
@@ -283,14 +268,11 @@ def _yaml_inline_to_block(lines, idx, key, inline_value):
 
 
 def yaml_upsert_inline(text, key_path, value):
-    """Upsert a nested mapping key with an inline-flow (JSON-compatible) value.
+    """写入嵌套映射键，值用 inline-flow（JSON 兼容）形式。
 
-    `key_path` is a dotted path (e.g. "llm-pi-ai.providers.wb-proxy"); the
-    leaf is written as `wb-proxy: <json value>` at the right indentation.
-    Lines outside the touched block are preserved byte for byte. When a key
-    of the path is missing it is created; when a parent key currently holds
-    an inline `{..}` mapping the mapping is expanded into a block first.
-    Structures outside the supported subset raise AgentConfigError.
+    `key_path` 是点分路径（如 "llm-pi-ai.providers.wb-proxy"），叶子按所在缩进写成
+    `wb-proxy: <json value>`。被碰到的那块之外的行逐字节保留；路径上缺失的键会新建，
+    父键当前是 inline `{..}` 映射时先展开成块。超出支持范围的结构抛 AgentConfigError。
     """
     keys = [part.strip() for part in str(key_path).split(".") if part.strip()]
     if not keys:
@@ -302,7 +284,7 @@ def yaml_upsert_inline(text, key_path, value):
 
 
 def _yaml_upsert_at(lines, start, end, indent, keys, value_json):
-    """Recursive block scanner for yaml_upsert_inline; returns new lines."""
+    """yaml_upsert_inline 的递归块扫描；返回新的行列表。"""
     key = keys[0]
     idx = start
     while idx < end:
@@ -312,12 +294,9 @@ def _yaml_upsert_at(lines, start, end, indent, keys, value_json):
             after = line.split(":", 1)[1].strip()
             child_end = _yaml_block_end(lines, idx, indent)
             if len(keys) == 1:
-                # Replace this leaf line, keeping its indentation.
                 lines[idx] = " " * indent + key + ": " + value_json
                 return lines
             if after:
-                # Parent currently holds an inline value: expand `{..}` into
-                # a block so the child has somewhere to live.
                 _yaml_inline_to_block(lines, idx, key, after)
                 child_end = _yaml_block_end(lines, idx, indent)
                 lines = _yaml_upsert_at(lines, idx + 1, child_end,
@@ -327,7 +306,6 @@ def _yaml_upsert_at(lines, start, end, indent, keys, value_json):
                                     indent + 2, keys[1:], value_json)
             return lines
         idx += 1
-    # Key not found in this block: append it at the block's end.
     insert = _yaml_insert_point(lines, start, end, indent)
     if len(keys) == 1:
         new_lines = [" " * indent + key + ": " + value_json]
@@ -340,12 +318,10 @@ def _yaml_upsert_at(lines, start, end, indent, keys, value_json):
 
 
 def yaml_refs_upsert(text, key, value):
-    """Upsert `key: value` inside the top-level `refs:` block.
+    """在顶层 `refs:` 块内新增或更新 `key: value`。
 
-    When the document has no `refs:` block yet, one is appended at the end.
-    A `refs:` line that already holds an inline value (e.g. `refs: {}`) is
-    outside the supported subset and raises AgentConfigError instead of
-    being silently mangled.
+    文档还没有 `refs:` 块时在末尾补一个。`refs:` 行已带 inline 值（如 `refs: {}`）
+    不在支持范围内，抛 AgentConfigError，避免静默写坏。
     """
     lines = text.split("\n")
     idx = 0
@@ -370,7 +346,6 @@ def yaml_refs_upsert(text, key, value):
             lines[insert:insert] = ["  %s: %s" % (key, value)]
             return "\n".join(lines)
         idx += 1
-    # No refs block yet.
     while lines and not lines[-1].strip():
         lines.pop()
     lines.append("refs:")
@@ -379,7 +354,7 @@ def yaml_refs_upsert(text, key, value):
 
 
 # ---------------------------------------------------------------------------
-# Text-level TOML editor (subset; standard library only)
+# 文本级 TOML 编辑器（仅支持子集，只用标准库）
 # ---------------------------------------------------------------------------
 
 _TOML_TABLE_RE = re.compile(r"^\s*\[([A-Za-z0-9_.-]+)\]\s*(?:#.*)?$")
@@ -397,11 +372,9 @@ def _toml_value(value):
 
 
 def toml_upsert_top_key(text, key, value):
-    """Upsert a top-level TOML key (it must live before the first [table]).
+    """新增或更新顶层 TOML 键（必须位于第一个 [table] 之前）。
 
-    An existing assignment is replaced in place; a missing one is inserted
-    after the last existing top-level assignment, so table bodies are never
-    disturbed.
+    已有的赋值原地替换；缺失的插到最后一个顶层赋值之后，不惊动任何表体。
     """
     rendered = "%s = %s" % (key, _toml_value(value))
     lines = text.split("\n")
@@ -423,7 +396,7 @@ def toml_upsert_top_key(text, key, value):
 
 
 def toml_upsert_table(text, table, mapping):
-    """Upsert several keys inside [table]; append the table when missing."""
+    """新增或更新 [table] 内的若干键；表缺失时整体追加。"""
     lines = text.split("\n")
     idx = 0
     while idx < len(lines):
@@ -435,7 +408,6 @@ def toml_upsert_table(text, table, mapping):
             return "\n".join(
                 _toml_upsert_in_range(lines, idx + 1, end, mapping))
         idx += 1
-    # Table not present: append it whole at the end of the file.
     while lines and not lines[-1].strip():
         lines.pop()
     if lines:
@@ -467,11 +439,11 @@ def _toml_upsert_in_range(lines, start, end, mapping):
 
 
 # ---------------------------------------------------------------------------
-# Text-level dotenv editor
+# 文本级 dotenv 编辑器
 # ---------------------------------------------------------------------------
 
 def env_upsert(text, mapping):
-    """Upsert KEY=VALUE lines; comments and unrelated lines are preserved."""
+    """新增或更新 KEY=VALUE 行；注释与无关行原样保留。"""
     lines = text.split("\n")
     remaining = dict(mapping)
     for idx, line in enumerate(lines):
@@ -489,7 +461,7 @@ def env_upsert(text, mapping):
 
 
 # ---------------------------------------------------------------------------
-# Backup + state bookkeeping
+# backup 与状态记录
 # ---------------------------------------------------------------------------
 
 def _state_path(accounts_dir):
@@ -519,7 +491,7 @@ def _backup_dir(accounts_dir, client_id):
 
 
 def _backup_file(accounts_dir, client_id, path, original):
-    """Store the original bytes of `path`; returns the backup file path."""
+    """保存 `path` 的原始字节；返回 backup 文件路径。"""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     name = "%s-%s" % (stamp, os.path.basename(path) or "config")
     directory = _backup_dir(accounts_dir, client_id)
@@ -535,7 +507,7 @@ def _backup_file(accounts_dir, client_id, path, original):
 
 
 def _prune_backups(directory, keep=BACKUP_KEEP):
-    """Keep only the newest `keep` backups of each basename."""
+    """每个 basename 只保留最新的 `keep` 份 backup。"""
     by_name = {}
     try:
         entries = sorted(os.listdir(directory))
@@ -553,7 +525,7 @@ def _prune_backups(directory, keep=BACKUP_KEEP):
 
 
 # ---------------------------------------------------------------------------
-# Client registry
+# 客户端注册表
 # ---------------------------------------------------------------------------
 
 def _claude_settings_path(home):
@@ -567,7 +539,7 @@ def _apply_claude_code(paths, ctx):
     path = paths["settings"]
     data = _load_json(path, "claude settings")
     env = dict(data.get("env") or {})
-    # Claude Code appends /v1 itself when it needs it; keep the bare root.
+    # Claude Code 需要时自己补 /v1，这里只留根路径。
     env["ANTHROPIC_BASE_URL"] = re.sub(r"/v1/?$", "", ctx["base_url"])
     env["ANTHROPIC_AUTH_TOKEN"] = ctx["api_key"]
     if ctx.get("model"):
@@ -629,7 +601,7 @@ def _apply_opencode(paths, ctx):
 
 
 def dsh_reasoning_levels(raw):
-    """{档位: 线上拼写} for DSH, from the gateway's `reasoning_efforts` list.
+    """DSH 的 {档位: 线上拼写} 映射，取自网关的 `reasoning_efforts` 列表。
 
     DSH 的模型条目用 `reasoningEfforts` 声明可选思考档位（键=选择器里的档位，
     值=请求里实际发的拼写）。本路由不在它的内置目录里，所以不声明就没有选择
@@ -654,14 +626,11 @@ def dsh_reasoning_levels(raw):
 
 
 def dsh_default_model(text, provider, model):
-    """The `agent-default-model` entry to write, keeping keys we do not own.
+    """要写入的 `agent-default-model` 条目，保留不属于本程序的键。
 
-    yaml_upsert_inline() replaces that leaf wholesale, so writing a bare
-    {provider, model} silently drops whatever the user set beside it - a
-    reasoningEffort, for instance, which is how a default thinking level gets
-    lost on a re-apply. Read the current inline mapping and merge the route
-    over it; a block-style or unparsable value falls back to the bare pair
-    rather than guessing.
+    yaml_upsert_inline() 会整块替换该叶子，只写 {provider, model} 会悄悄丢掉旁边已有
+    的内容（例如 reasoningEffort，也就是默认思考档位在重新接入时消失）。这里先读当前
+    inline 映射再把路由合并上去；块式写法或解析不了的值退回裸的一对，不猜。
     """
     out = {"provider": provider, "model": model}
     for line in str(text or "").split("\n"):
@@ -754,22 +723,19 @@ def _apply_crush(paths, ctx):
 
 
 def _apply_zcode(paths, ctx):
-    """Add or update a wb-proxy provider rule in ZCode's provider config.
+    """在 ZCode 的 provider 配置里新增或更新 wb-proxy 规则。
 
-    The rule is addressed by a stable providerId, so re-applying updates that
-    one entry instead of stacking new ones, and everything else in the
-    document - other providers, their order, the model rules - is merged
-    around untouched. Note the file belongs to the ZCode app and is rewritten
-    by it while running; configure with ZCode closed (the panel card and the
-    CLI both say so) or the app's next save can drop the new entry.
+    规则用稳定的 providerId 定位，重复接入只更新那一条，不会叠出新的；文档里其它内容
+    （别的 provider、顺序、模型规则）原样合并保留。该文件属于 ZCode 应用，运行中会被
+    它重新写回：要在 ZCode 关闭时配置（面板卡片与 CLI 都会提示），否则它下一次保存
+    可能把新条目丢掉。
     """
     path = paths["config"]
     data = _load_json(path, "zcode provider config")
     if not data:
-        # No ZCode profile on this machine yet: start from the wrapper shape a
-        # live 3.x profile writes (schemaVersion + config + the two rule
-        # holders), so a fresh install can be configured without running the
-        # app first.
+        # 本机还没有 ZCode profile：按 3.x 实际写出的外层结构初始化
+        # （schemaVersion + config + 两个规则容器），全新安装不用先跑一遍
+        # 应用即可配置。
         data = {"schemaVersion": 1,
                 "config": {"providerOrder": [],
                            "providerConfigRules": {"providerRules": []}}}
@@ -932,11 +898,33 @@ def _client(client_id):
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# 对外接口
 # ---------------------------------------------------------------------------
 
+def enrich_agent_models(models, specs):
+    """把只有 id 的模型条目补上网关自己的目录规格。
+
+    看板送来的是一串模型 id，而 DSH、Crush 这类客户端要把规格写进自己的配置，
+    包括上下文窗口、输出上限与思考档位，才会生成对应控件；只写 id 时它们
+    只能使用内置默认值，档位选择器不会出现。`specs` 是模型 id 到规格的映射，
+    条目里显式带来的字段优先，空值不算显式。
+    """
+    if not specs:
+        return models
+    out = []
+    for item in models or []:
+        spec = specs.get(str((item or {}).get("id")))
+        if not spec:
+            out.append(item)
+            continue
+        merged = dict(spec)
+        merged.update({k: v for k, v in item.items() if v not in (None, "")})
+        out.append(merged)
+    return out
+
+
 def overview(accounts_dir, home=None):
-    """Per-client install/apply summary for the panel."""
+    """面板用的各客户端安装/接入摘要。"""
     home = _resolve_home(home)
     state = _load_state(accounts_dir)
     out = {}
@@ -953,8 +941,8 @@ def overview(accounts_dir, home=None):
                 if not path or not os.path.exists(path):
                     external = True
                     continue
-                # Compare against the bytes we last wrote, not the backup: a
-                # hand edit after apply must read as an external change.
+                # 与上次写入的字节比对；backup 不参与比较，接入后手改必须算
+                # 外部改动。
                 try:
                     if _sha256_bytes(_read_bytes(path)) != entry.get("sha256"):
                         external = True
@@ -973,9 +961,8 @@ def overview(accounts_dir, home=None):
             "desc": client["desc"],
             "protocol": client["protocol"],
             "installed": bool(client["probe"](home)) or bool(existing),
-            # "configured" is about this gateway's integration record, not about
-            # the client merely having a config file on disk - otherwise every
-            # pre-existing config would advertise a restore that cannot run.
+            # "configured" 只认本网关的接入记录。磁盘上恰好有配置文件不算接入，
+            # 否则原有的配置会让面板显示无法执行的 restore。
             "configured": isinstance(record, dict),
             "config_paths": list(paths.values()),
             "applied": applied,
@@ -984,13 +971,11 @@ def overview(accounts_dir, home=None):
 
 
 def plan(client_id, base_url, api_key, model=None, models=None, home=None):
-    """The exact file contents integrate() would write; touches nothing.
+    """integrate() 将要写入的确切文件内容；不碰任何文件。
 
-    Each entry in ``files`` carries the target ``path``, the new ``content``
-    and whether the file already ``existed``, so a caller can preview an
-    apply - the CLI's --dry-run - before anything is backed up or written.
-    integrate() and the preview share this one builder, so what a dry run
-    prints is what a real run writes.
+    ``files`` 每项带目标 ``path``、新 ``content`` 与文件此前是否 ``existed``，
+    供调用方在备份与写入之前预览接入结果（CLI 的 --dry-run）。integrate() 与
+    预览共用这一个构建器，dry run 打印的内容即实际写入的内容。
     """
     client = _client(client_id)
     home = _resolve_home(home)
@@ -1034,11 +1019,10 @@ def plan(client_id, base_url, api_key, model=None, models=None, home=None):
 
 def integrate(accounts_dir, client_id, base_url, api_key, model=None,
               models=None, home=None):
-    """Point `client_id` at this gateway; returns what was written.
+    """把 `client_id` 指向本网关；返回写入的内容。
 
-    The first apply backs up the original bytes of every touched file; later
-    applies keep the earliest backup so restore always returns to the state
-    before the very first integration.
+    首次接入备份每个动过文件的原始字节；之后的接入保留最早的 backup，
+    保证 restore 总能回到首次接入之前的状态。
     """
     built = plan(client_id, base_url, api_key, model=model, models=models,
                  home=home)
@@ -1047,17 +1031,16 @@ def integrate(accounts_dir, client_id, base_url, api_key, model=None,
     previous_files = {entry.get("path"): entry
                       for entry in record.get("files") or []
                       if isinstance(entry, dict)}
-    # Phase 1: stage backups for all target files before making any modifications.
+    # 阶段 1：动任何文件之前，先为全部目标文件备好 backup。
     staged = []
     for entry in built["files"]:
         path, content, existed = entry["path"], entry["content"], entry["existed"]
         prior = previous_files.get(path)
         if prior is not None and not prior.get("existed") and existed:
-            # We created this file in an earlier apply. While it still holds
-            # exactly what we wrote it stays "ours", so restore deletes it
-            # instead of resurrecting our own bytes (that is the documented
-            # promise, and the bytes may hold the API key); a hand edit since
-            # then makes it the user's file again, and it gets backed up.
+            # 该文件是之前接入时新建的。内容仍与当时写入的完全一致时算本程序
+            # 所有，restore 直接删除，把我们自己写的字节还原回来没有意义（这是
+            # 文档承诺，且那些字节可能含 API key）；此后被手改过就归还用户，
+            # 照常备份。
             try:
                 if _sha256_bytes(_read_bytes(path)) == prior.get("sha256"):
                     existed = False
@@ -1065,16 +1048,15 @@ def integrate(accounts_dir, client_id, base_url, api_key, model=None,
                 pass
         backup = None
         if existed and prior and prior.get("backup"):
-            # Keep the very first backup: it holds the pre-integration bytes.
+            # 保留最早的 backup：接入前的原始字节在里面。
             backup = prior.get("backup")
         elif existed:
             backup = _backup_file(accounts_dir, client_id, path,
                                   _read_bytes(path))
         staged.append((path, content, existed, backup))
 
-    # Phase 2: apply writes transactionally. If any write fails, roll back
-    # all already-written files so a multi-file integration (e.g. DSH) never
-    # leaves a half-configured state with missing state records.
+    # 阶段 2：写入按事务处理。任一写入失败就回滚已写的全部文件，多文件接入
+    # （如 DSH）不会留下配置了一半、状态记录缺失的局面。
     written = []
     entries = []
     try:
@@ -1118,10 +1100,9 @@ def integrate(accounts_dir, client_id, base_url, api_key, model=None,
 
 
 def restore(accounts_dir, client_id, home=None):
-    """Undo integrate(): put the backed-up originals back byte for byte.
+    """撤销 integrate()：把 backup 的原始内容逐字节写回。
 
-    Files that did not exist before the first apply are deleted; the state
-    record for the client is cleared.
+    首次接入前不存在的文件删除；该客户端的状态记录清除。
     """
     client = _client(client_id)
     home = _resolve_home(home)
@@ -1143,16 +1124,14 @@ def restore(accounts_dir, client_id, home=None):
             _atomic_write_bytes(path, _read_bytes(backup))
             restored.append({"path": path, "action": "restored"})
         else:
-            # We created this file; removing it returns to the original state.
             try:
                 os.remove(path)
                 restored.append({"path": path, "action": "deleted"})
             except FileNotFoundError:
                 restored.append({"path": path, "action": "already-absent"})
-            # Applying had to create the parent directories too. Leaving an
-            # empty one behind makes the probe report the client as installed
-            # when the only config it ever had was ours, so prune the chain we
-            # emptied - never touching a directory that still holds anything.
+            # 接入时连父目录一起新建过。留下空目录会让 probe 把客户端误报成
+            # 已安装（它唯一的配置本来就是我们写的），所以把清空的目录链一并
+            # 剪掉，仍有内容的目录绝不动。
             _prune_empty_parents(path, home)
     state.pop(client_id, None)
     _save_state(accounts_dir, state)
@@ -1164,24 +1143,20 @@ def restore(accounts_dir, client_id, home=None):
 
 
 # ---------------------------------------------------------------------------
-# Standalone configurator
+# 独立配置器
 # ---------------------------------------------------------------------------
 #
-# The panel's one-click setup runs inside the gateway process, so it can only
-# ever edit the machine the gateway runs on - which is also why /agents/apply
-# refuses non-loopback callers and container deployments. The CLI inverts the
-# direction: it runs where the clients are and reaches the gateway only over
-# HTTP (the model list), so a gateway on a server, NAS or router can still
-# serve clients on every other machine.
+# 面板的一键接入跑在网关进程里，只能改网关所在那台机器的配置，这也是
+# /agents/apply 拒绝非 loopback 调用与容器部署的原因。CLI 方向相反：跑在
+# 客户端所在机器，仅经 HTTP（模型列表）访问网关，网关装在服务器、NAS 或
+# 路由器上时仍能服务其他所有机器的客户端。
 
 
 def fetch_models_from_gateway(base_url, api_key, timeout=10):
-    """The gateway's model list, for clients that embed model definitions.
+    """从网关取模型列表，供需要内嵌模型定义的客户端使用。
 
-    Reads the OpenAI-compatible ``GET /v1/models``, which is reachable with
-    the API key alone (it is not a panel route). Doubles as key validation:
-    a 401 here means the key is wrong, anything else means the gateway or its
-    upstream is unreachable.
+    读 OpenAI 兼容的 ``GET /v1/models``，单凭 API key 即可访问（它不是面板
+    路由）。顺带校验 key：401 说明 key 不对，其余错误说明网关或其上游不可达。
     """
     base = str(base_url or "").strip().rstrip("/")
     if not re.match(r"^https?://", base):
@@ -1236,16 +1211,15 @@ def fetch_models_from_gateway(base_url, api_key, timeout=10):
         if name:
             entry["name"] = str(name)
         models.append(entry)
-    # Same cap as the panel's apply: a runaway catalog must not turn into a
-    # megabyte config file.
+    # 与面板 apply 相同的上限：失控的模型目录不能变成 MB 级配置文件。
     return models[:80]
 
 
 def _default_state_dir():
-    """Where the standalone CLI keeps its state and backups.
+    """独立 CLI 存放状态与 backup 的位置。
 
-    Deliberately NOT the gateway's accounts/ directory: this runs on a
-    different machine, and every machine keeps its own record and backups.
+    刻意避开网关的 accounts/ 目录：CLI 跑在另一台机器上，各机器自留记录与
+    backup。
     """
     return os.path.join(os.path.expanduser("~"), ".wb-agent-config")
 
@@ -1265,9 +1239,8 @@ def _cli_error(message):
 
 
 def main(argv=None):
-    # --home/--state-dir/--json are accepted before AND after the subcommand:
-    # the shared parent carries them into every subparser with SUPPRESS
-    # defaults, so a subparser never clobbers a value given at the top level.
+    # --home/--state-dir/--json 在子命令前后都接受：共享 parent 以 SUPPRESS
+    # 默认值把它们带进每个子解析器，子解析器不会覆盖顶层给的值。
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--home", default=argparse.SUPPRESS,
                         help="home directory to configure "
@@ -1319,9 +1292,8 @@ def main(argv=None):
 
     args = parser.parse_args(argv)
 
-    # A Chinese path or model name in the output must not abort the run on a
-    # legacy Windows console - the same guard tests/run_all.py applies to
-    # itself.
+    # 输出里的中文路径或模型名不能让旧式 Windows 控制台上的运行中断——
+    # tests/run_all.py 对自身也加了同样的保护。
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")
@@ -1369,11 +1341,10 @@ def main(argv=None):
         if not re.match(r"^https?://", base_url):
             return _cli_error("--base-url must start with http:// or https://")
         key = str(args.key or os.environ.get("WB_PROXY_API_KEY") or "")
-        # Prompt only when there is a real console. On Windows isatty() is
-        # also true for the NUL device (a common stdin for spawned or
-        # service-run processes), and getpass there reads CONIN$ directly -
-        # it would block forever in a process that has no console. stdout
-        # being a terminal is the signal that one exists.
+        # 只在有真实控制台时才提示输入。Windows 上 NUL 设备也会让 isatty()
+        # 为真（被拉起或服务方式运行的进程常以它作 stdin），而 getpass 在那里
+        # 直接读 CONIN$，无控制台的进程会永远卡住。stdout 是终端才说明控制台
+        # 存在。
         if not key and sys.stdin.isatty() and sys.stdout.isatty():
             try:
                 key = getpass.getpass("Gateway API key: ").strip()

@@ -1,15 +1,12 @@
 // 账号页的纯逻辑：可用性分档、筛选、排序、分页、积分与有效期口径；只依赖 core/format.js，可以在 Node 里直接测试。
 
-import { fmtAgo, fmtNumber, toMillis } from '../../core/format.js';
+import { fmtAgo, fmtClock, fmtNumber, toMillis } from '../../core/format.js';
 
-export const PAGE_SIZE = 20;
-export const PRIORITY_DEFAULT = 100;
-export const PRIORITY_MAX = 9999;
+const PAGE_SIZE = 20;
+const PRIORITY_DEFAULT = 100;
+const PRIORITY_MAX = 9999;
 //: 单账号单模型的并发上限，与服务端 MAX_ACCOUNT_CONCURRENCY 一致。
-export const CONCURRENCY_MAX = 1000;
-
-/** 四个展示分组，顺序即筛选芯片顺序：可用、需处理、冷却中、已停用。 */
-export const AVAILABILITY_GROUPS = ['usable', 'attention', 'cooling', 'stopped'];
+const CONCURRENCY_MAX = 1000;
 
 export const FILTERS = [
   { id: 'all', label: '全部' },
@@ -41,7 +38,7 @@ function seconds(value) {
 }
 
 /** 令牌是否已经过期。expiresAt 缺失时改用服务端给出的文本判断。 */
-export function tokenExpired(account, now = Date.now()) {
+function tokenExpired(account, now = Date.now()) {
   const ms = toMillis(account && account.expiresAt);
   if (ms !== null) return ms <= now;
   return String((account && account.expiresIn) || '') === 'expired';
@@ -63,15 +60,6 @@ export function cooldownPills(account, now = Date.now()) {
     text: item.model + ' · ' + fmtClock(item.at) + ' 恢复',
     title: '只有这个模型暂时受限，账号仍可服务其它模型。恢复时刻按本机时区显示。',
   }));
-}
-
-const pad2 = (n) => String(n).padStart(2, '0');
-
-/** 本地时间「月-日 时:分」。 */
-export function fmtClock(ms) {
-  const d = new Date(Number(ms));
-  if (!Number.isFinite(d.getTime())) return '—';
-  return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
 }
 
 /** 行内错误提示。模型限流另有专门的徽章，不再重复显示这条原文。 */
@@ -106,7 +94,7 @@ const TIER_GROUP = {
   usable: 'usable',
 };
 
-export function availabilityGroup(tier) {
+function availabilityGroup(tier) {
   return TIER_GROUP[tier] || 'attention';
 }
 
@@ -185,7 +173,6 @@ export function concurrencyOf(account) {
   return Number.isInteger(value) && value > 0 ? value : 0;
 }
 
-/** 正在服务的请求数。 */
 export function activeRequestsOf(account) {
   const value = Number(account && account.activeRequests);
   return Number.isInteger(value) && value > 0 ? value : 0;
@@ -302,7 +289,7 @@ export function urgencyTone(msLeft) {
 }
 
 /** 归一化 creditExpiries：只保留还有额度且能解析出到期时刻的条目，按到期升序。 */
-export function creditExpiries(account) {
+function creditExpiries(account) {
   const list = Array.isArray(account && account.creditExpiries) ? account.creditExpiries : [];
   return list
     .map((item) => ({

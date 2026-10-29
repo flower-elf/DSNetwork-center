@@ -1,25 +1,10 @@
-"""Warm-account fallback and page rotation for long conversations.
+"""验证会话亲和的暖账号回退与超长会话分页轮换契约。
 
-The prompt cache lives upstream, per account: a hit needs the same account to
-see the same prefix again. Two places used to give that up for nothing.
+账号不可用时，会话沿最近使用列表回退到见过它的暖账号，前缀缓存继续命中；
+超过 ``WB_AFFINITY_MAX_MSGS`` 的会话在 ``WB_AFFINITY_PAGE_SIZE`` 大小的分页内轮换，
+让分页内每个账号保持前缀缓存温热，超大请求体仍分散在多个账号上。
 
-* When a conversation's account became unusable (cooling, parked, disabled),
-  the binding was wiped and the next pick went wherever the pool's own
-  preferences pointed - usually a cold account, so a long conversation paid a
-  full-price prompt again. Now the conversation keeps a short most-recently-used
-  list and the next pick walks it in order, so it moves to an account that has
-  already seen the conversation instead of a stranger. The account that served
-  the last turn stays the front entry, and an account that just failed a request
-  is demoted to the back (see SessionAffinity.demote) rather than forgotten.
-
-* Conversations past ``WB_AFFINITY_MAX_MSGS`` were released to the whole pool,
-  where each account saw them once per pool-size turns - long enough for the
-  prefix to fall out of the cache between visits. Now they rotate over one page
-  of the pool (``WB_AFFINITY_PAGE_SIZE``): every account of the page keeps a
-  warm copy, and the oversized bodies still spread over more than one account,
-  which is what the length cap exists for.
-
-Run with the current interpreter (python tests/run_all.py affinity).
+运行方式：python tests/run_all.py affinity。
 """
 import os
 import sys
@@ -39,7 +24,7 @@ def make_account(uid, realm="cn", **extra):
 
 
 def credits(*days, remain=100):
-    """A credits blob whose packages expire in the given days."""
+    """构造一个额度数据，其套餐在给定天数后过期。"""
     packages = []
     for index, day in enumerate(days):
         packages.append({
@@ -66,7 +51,7 @@ def make_pool(accounts, window=None):
 
 
 class SessionAffinityHistoryTests(unittest.TestCase):
-    """The binding is a short most-recently-used list, not one account."""
+    """绑定是一段短的最近使用历史。"""
 
     def test_the_last_account_is_the_front_entry(self):
         affinity = wb_accounts.SessionAffinity()
@@ -130,13 +115,12 @@ class SessionAffinityHistoryTests(unittest.TestCase):
 
 
 class WarmFallbackTests(unittest.TestCase):
-    """An unusable account hands the conversation to a warm one, not a cold one."""
+    """账号不可用时，会话交给见过它的暖账号。"""
 
     def _pool_with_warm_history(self):
-        """fresh (unusable, most recent) -> warm (older) -> urgent (expiring).
+        """构造 fresh（不可用、最新）→ warm（较早）→ urgent（额度将过期）的历史。
 
-        The expiring-credits preference would hand a new conversation to
-        `urgent`; this conversation must go to `warm` instead.
+        额度过期偏好会把新会话分给 urgent，本会话必须落到 warm。
         """
         fresh = make_account("fresh")
         warm = make_account("warm")
@@ -144,24 +128,15 @@ class WarmFallbackTests(unittest.TestCase):
         pool = make_pool([fresh, warm, urgent], window=7)
         pool.affinity.bind("s", "warm")
         pool.affinity.bind("s", "fresh")
-        fresh.note_error("boom")            # cooling for 60s
+        fresh.note_error("boom")            # 冷却 60 秒
         return pool, fresh, warm, urgent
-
-    def test_the_pool_preference_would_pick_the_urgent_account(self):
-        """Guard for the test below: `urgent` really is the pool's choice."""
-        pool, _fresh, _warm, urgent = self._pool_with_warm_history()
-        self.assertEqual(pool.pick(realm="cn").uid, urgent.uid)
-
-    def test_a_conversation_moves_to_its_warm_account(self):
-        pool, _fresh, warm, _urgent = self._pool_with_warm_history()
-        self.assertEqual(pool.pick_for_session(realm="cn", session_key="s").uid,
-                         warm.uid)
 
     def test_the_fallback_account_becomes_the_binding(self):
         pool, _fresh, warm, _urgent = self._pool_with_warm_history()
-        pool.pick_for_session(realm="cn", session_key="s")
+        picked = pool.pick_for_session(realm="cn", session_key="s")
+        self.assertEqual(picked.uid, warm.uid)
         self.assertEqual(pool.affinity.get("s"), warm.uid)
-        # And it stays there: the next turn goes straight to the warm account.
+        # 绑定保留，下一轮仍直接选中 warm。
         self.assertEqual(pool.pick_for_session(realm="cn", session_key="s").uid,
                          warm.uid)
 
@@ -173,8 +148,7 @@ class WarmFallbackTests(unittest.TestCase):
     def test_a_disabled_account_is_skipped_without_losing_the_history(self):
         pool, _fresh, warm, _urgent = self._pool_with_warm_history()
         pool.get("warm").enabled = False
-        # Nothing warm is usable, so the pool decides - and the two warm
-        # accounts stay in the history for the next time one of them recovers.
+        # 两个暖账号都不可用，由池决定去向；它们仍留在历史里，恢复后继续可用。
         self.assertEqual(pool.pick_for_session(realm="cn", session_key="s").uid,
                          "urgent")
         history = pool.affinity.recent("s")
@@ -183,7 +157,7 @@ class WarmFallbackTests(unittest.TestCase):
 
 
 class PageRotationTests(unittest.TestCase):
-    """Past the cap a conversation rotates over one page of the pool."""
+    """超过上限后，会话在池的一个分页内轮换。"""
 
     def _pool(self, uids=("a", "b", "c", "d", "e", "f")):
         return make_pool([make_account(uid) for uid in uids])
@@ -196,18 +170,17 @@ class PageRotationTests(unittest.TestCase):
                          ["b", "d", "f"])
 
     def test_the_page_does_not_depend_on_the_load_order(self):
-        """Ranking by uid keeps a conversation's page stable across reloads."""
+        """按 uid 排序，会话的分页在重新加载后保持稳定。"""
         pool = self._pool()
         shuffled = list(reversed(pool.accounts))
         self.assertEqual(sorted(a.uid for a in pool._page_slice(shuffled, (0, 3))),
                          sorted(a.uid for a in pool._page_slice(pool.accounts, (0, 3))))
 
     def test_a_page_is_scoped_to_its_realm(self):
-        """A mixed-realm pool must not shrink a realm's page below the size.
+        """混合 realm 的池不能把某个 realm 的分页缩到不足 size。
 
-        Ranking across the whole pool would put foreign accounts on the page;
-        the realm filter then leaves it with fewer - or with one, which would
-        pin the conversation, the state the length cap exists to leave.
+        跨整个池排序会把外部 realm 的账号排进分页，realm 过滤后剩下的账号不足 size，
+        甚至只剩一个，会话就又固定在单账号上，这正是长度上限要避免的状态。
         """
         intl = [make_account("intl-%d" % i, realm="intl") for i in range(6)]
         pool = make_pool([make_account("cn-0", realm="cn"),
@@ -230,7 +203,7 @@ class PageRotationTests(unittest.TestCase):
         for _ in range(4):
             pool.pick(realm="cn", page=(0, 2))
         self.assertEqual(pool._cursor, before)
-        # The plain rotation still starts where it always did.
+        # 普通轮换的起点不变。
         self.assertEqual([pool.pick(realm="cn").uid for _ in range(3)],
                          ["a", "b", "c"])
 
@@ -242,7 +215,7 @@ class PageRotationTests(unittest.TestCase):
         self.assertIn(picked.uid, {"b", "d", "f"})
 
     def test_a_page_conversation_is_not_bound(self):
-        """A binding would pin it back to one account - the state it left."""
+        """建立绑定会把会话重新固定到单账号上，正是它刚离开的状态。"""
         pool = self._pool()
         pool.pick_for_session(realm="cn", session_key="s", page=(0, 2))
         self.assertIsNone(pool.affinity.get("s"))

@@ -38,12 +38,17 @@ class NoteFieldTests(unittest.TestCase):
         self.assertEqual(account.public()["note"], "自用")
         self.assertEqual(make_account("n-view2").public()["note"], "")
 
-    def test_note_round_trips_through_the_credential_file(self):
+    def test_note_reaches_the_disk_through_both_write_paths(self):
+        """Account.save 直写与 pool.set_note 各写一次，落盘重载后备注都可见。"""
         with tempfile.TemporaryDirectory(prefix="note-persist-") as directory:
             make_account("n-disk", note="批量01").save(directory)
             pool = wb_accounts.AccountPool(directory, log=lambda _m: None)
-            loaded = {a.uid: a for a in pool.load()}
+            pool.accounts = [make_account("n-set")]
+            pool.set_note("n-set", "批量02")
+            loaded = {a.uid: a
+                      for a in wb_accounts.AccountPool(directory, log=lambda _m: None).load()}
             self.assertEqual(loaded["n-disk"].note, "批量01")
+            self.assertEqual(loaded["n-set"].note, "批量02")
 
 
 class SetNoteTests(unittest.TestCase):
@@ -64,12 +69,6 @@ class SetNoteTests(unittest.TestCase):
 
     def test_unknown_uid_returns_none(self):
         self.assertIsNone(self.pool.set_note("nope", "x"))
-
-    def test_note_change_reaches_the_disk(self):
-        self.pool.set_note("s-b", "批量02")
-        # 重新读取原目录，确认数据已写入磁盘
-        pool2 = wb_accounts.AccountPool(self.directory, log=lambda _m: None)
-        self.assertEqual({a.uid: a for a in pool2.load()}["s-b"].note, "批量02")
 
 
 if __name__ == "__main__":

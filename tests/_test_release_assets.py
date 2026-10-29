@@ -1,32 +1,6 @@
-"""Release assets are built from the tag, not from the checkout.
+"""测 release 资产契约：便携 ZIP 按 release/portable.txt 显式清单打包、携带能启动网关的裁剪运行时，release 只允许 release job 写入且打标签前先核对 push 测试结果。
 
-The fork's release pipeline is ``.github/workflows/release.yml``:
-
-  * a manual ``workflow_dispatch`` carrying one required ``version`` input;
-  * ``VERSION`` is already on main: the dispatch refuses a mismatch instead of
-    bumping and pushing anything itself;
-  * the ``release`` job reads the push-triggered ``tests.yml`` run for that
-    commit and continues only when it passed, then creates ``v<version>`` and
-    publishes the GitHub Release with generated notes (pre-release for ``-rc``
-    style versions);
-  * ``docker-publish.yml`` builds the image and ``package.yml`` builds the
-    green package, both from that tag.
-
-``package.yml`` runs ``release/release_tools.py portable`` on Windows after
-preparing the pinned runtime: the ZIP comes from ``release/portable.txt`` (only
-the managed release files, so dot folders cannot leak in), plus the trimmed
-``python/`` runtime and ``release-manifest.json``, and it is attached to the
-Release. The assertions below pin those promises locally, so a release cannot
-ship a working-tree snapshot, a runtime that cannot start the gateway, or a
-package missing ``app/web``.
-
-The portable-ZIP helper in ``release/`` is the explicit-manifest builder (the
-``release/portable.txt`` list is what the updater replaces). It is exercised
-against this fork's ``app/`` layout: every source and dashboard file has to be
-listed, the archive has to carry the runtime marker, and a rebuild has to be
-byte-identical.
-
-Run with: python tests/_test_release_assets.py
+运行：python tests/_test_release_assets.py
 """
 import ast
 import glob
@@ -45,19 +19,17 @@ import matrix_legs  # noqa: E402
 import portable_runtime  # noqa: E402
 import release_tools as tools  # noqa: E402
 
-# The legs the repository has to keep running for a release today. The gate
-# reads them from tests.yml rather than from this tuple - this is the
-# expectation the reader checks that derivation against.
+# 发布要求仓库持续运行的腿。gate 从 tests.yml 推导它们，
+# 这个元组用于核对推导结果。
 EXPECTED_LEGS = (
     "ubuntu-latest / python 3.9",
     "ubuntu-latest / python 3.12",
     "windows-latest / python 3.12",
 )
 
-# Windows CPython links these into python312.dll, so the packaged runtime has
-# no Lib file to require. Linux builds expose math as a shared module instead,
-# which makes the host's sys.builtin_module_names an unsafe proxy for what the
-# Windows runtime already contains.
+# Windows CPython 把这些模块静态链接进 python312.dll，包内运行时没有对应的 Lib
+# 文件可要求。Linux 构建把 math 做成共享模块，所以宿主机的
+# sys.builtin_module_names 代表不了 Windows 运行时实际内置的模块。
 WINDOWS_BUILTINS = {"math"}
 
 
@@ -67,7 +39,7 @@ def read(*parts):
 
 
 def make_runtime(directory, extra=()):
-    """A stand-in runtime that satisfies portable_runtime.verify()."""
+    """伪造一个能通过 portable_runtime.verify() 的运行时目录。"""
     for rel in list(portable_runtime.REQUIRED_FILES) + list(extra):
         path = os.path.join(directory, *rel.split("/"))
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -76,39 +48,34 @@ def make_runtime(directory, extra=()):
     return directory
 
 
-# ---- release-writer scanner ------------------------------------------------
+# ---- release 写入扫描器 ----------------------------------------------------
 #
-# A release mutation is a command the workflow actually *runs*: one that sits at
-# command position, either on its own line inside a `run: |` block, after a
-# one-line `run:`, or behind a shell separator. A step that merely prints the
-# same command inside an echo must not be flagged - command position is what
-# separates "runs it" from "talks about it".
+# release 写入命令指工作流真正执行的命令：处在命令位置，即 run: | 块内的独立行、
+# 单行 run: 之后，或 shell 分隔符之后。echo 里打印的同名命令不算——命令位置区分
+# 「真正执行」与「只是提到」。
 #
-# `gh api` is the subtle half. It defaults to GET, but *any* field flag turns
-# the request into a POST, so `gh api repos/o/r/releases -f tag_name=v1` creates
-# a release without ever naming a method. Only an explicit `-X GET` /
-# `--method GET` says the call is a read.
+# gh api 是难点：默认 GET，但出现任一带值 flag 就转成 POST，所以
+# `gh api repos/o/r/releases -f tag_name=v1` 不写方法名也会创建 release。
+# 只有显式 `-X GET` / `--method GET` 才算读取。
 
-# `gh release <verb>` - the four verbs that change a release.
+# `gh release <verb>`：会改动 release 的四个动词。
 GH_RELEASE_WRITE = re.compile(r"^gh\s+release\s+(?:create|edit|upload|delete)\b")
 GH_API = re.compile(r"^gh\s+api\b")
-# `-X POST`, `-XPOST`, `--method POST`, `--method=POST`.
+# 匹配 `-X POST`、`-XPOST`、`--method POST`、`--method=POST`。
 API_METHOD = re.compile(r"(?:^|\s)(?:-X|--method)(?:[=\s]*)([A-Za-z]+)")
-# Flags that make gh send a body, which is what flips the default to POST.
+# 会让 gh 发送请求体的 flag，它们把默认方法翻成 POST。
 API_BODY_FLAG = re.compile(r"(?:^|\s)(?:-f|-F|--field|--raw-field|--input)(?:=|\s|$)")
 
-# Fragments a shell command can be split into. Pipes are left alone on purpose:
-# splitting on `|` would slice through quoted strings for no gain here.
+# 切分 shell 命令的分隔符。刻意不切 `|`：切它会把引号里的字符串劈开，这里没有收益。
 SHELL_SEPARATOR = re.compile(r"&&|\|\||;")
-# A one-line step carries its command after `run:` (possibly as a list item).
+# 单行 step 的命令跟在 `run:` 之后，也可能写成列表项。
 INLINE_RUN = re.compile(r"^(?:-\s*)?run:\s*")
 
 
 def shell_commands(text):
-    """Logical shell commands in a workflow, with `\\` continuations joined.
+    """工作流里的逻辑 shell 命令，把 `\\` 续行拼成一条。
 
-    Only line continuations are normalised - this is not a shell parser and
-    does not try to be one.
+    只做续行归并，不解析 shell 语法。
     """
     joined, buf = [], ""
     for raw in text.splitlines():
@@ -129,7 +96,7 @@ def shell_commands(text):
 
 
 def is_release_mutation(command):
-    """Would running this command change a GitHub Release?"""
+    """执行这条命令会不会改动 GitHub Release。"""
     if GH_RELEASE_WRITE.match(command):
         return True
     if not GH_API.match(command):
@@ -141,12 +108,12 @@ def is_release_mutation(command):
 
 
 def release_mutations(text):
-    """The release-mutating commands a piece of workflow text runs."""
+    """一段工作流文本中会改动 release 的命令。"""
     return [c for c in shell_commands(text) if is_release_mutation(c)]
 
 
 def workflow_jobs(text):
-    """{job id: job text} for the top-level `jobs:` mapping of a workflow."""
+    """工作流顶层 `jobs:` 映射的 {job id: job 文本}。"""
     lines = text.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -178,7 +145,7 @@ def workflow_jobs(text):
 
 
 def dispatch_input_names(text):
-    """Input names declared under `on.workflow_dispatch.inputs`."""
+    """`on.workflow_dispatch.inputs` 下声明的输入名。"""
     lines = text.splitlines()
     for i, line in enumerate(lines):
         if line.strip() != "workflow_dispatch:":
@@ -207,26 +174,23 @@ def dispatch_input_names(text):
 
 
 def release_writer_jobs(text):
-    """Jobs that run at least one release-mutating command."""
+    """至少执行一条 release 写入命令的 job。"""
     return sorted(name for name, body in workflow_jobs(text).items()
                   if release_mutations(body))
 
 
-# The only job allowed to touch the Release, and the only input a dispatch may
-# take. `tests` runs on every push to main, so the writer checks that result
-# instead of repeating the matrix inside the release run.
+# 唯一允许写 Release 的 job，也是 dispatch 唯一的输入。tests 在每次 push 到 main
+# 时运行，写入方核对那次结果，不在 release 运行里重复测试矩阵。
 RELEASE_WRITER_JOB = "release"
 DISPATCH_INPUTS = ["version"]
 
 
 def check_release_writers(text):
-    """Raise AssertionError unless the release contract below still holds.
+    """release 契约不成立时抛 AssertionError。
 
-    The fork publishes from a manual dispatch (there is no tag-push trigger),
-    so the safety property is not "only a tag push may write": it is that the
-    one writer job owns `contents: write`, reads the push-triggered test run
-    for the same commit before tagging, and that the dispatch offers nothing
-    but the version number.
+    本 fork 走手动 dispatch 发布，没有 tag push 触发器。安全要求是：唯一的写入
+    job 持有 `contents: write`，打标签前先读取同一提交的 push 测试运行结果，
+    且 dispatch 只提供 version 一个输入。
     """
     jobs = workflow_jobs(text)
     writers = release_writer_jobs(text)
@@ -255,7 +219,7 @@ def check_release_writers(text):
 
 
 class ManifestTests(unittest.TestCase):
-    """release/portable.txt is the authoritative list of packaged files."""
+    """release/portable.txt 是打包文件的权威清单。"""
 
     def test_every_listed_path_exists(self):
         for name in tools.read_manifest():
@@ -263,10 +227,8 @@ class ManifestTests(unittest.TestCase):
                             "清单里的 %s 不存在" % name)
 
     def test_every_application_file_is_listed(self):
-        # The regression this list exists for: a new module (or a dashboard
-        # asset under app/web) that nobody remembered to add would otherwise
-        # be missing from the portable package, and the launcher would fail
-        # with ModuleNotFoundError / a blank panel on a user's machine.
+        # 新模块或 app/web 下的仪表盘文件若忘了登记，便携包会缺文件，
+        # 用户机器上启动即 ModuleNotFoundError 或面板空白。
         on_disk = []
         for base, dirs, files in os.walk(os.path.join(ROOT, "app")):
             dirs[:] = [d for d in dirs if d != "__pycache__"]
@@ -308,9 +270,8 @@ class ManifestTests(unittest.TestCase):
             self.assertNotIn("console_tail", text, name)
 
     def test_runtime_data_files_are_listed(self):
-        # wb_pricing._candidate_file() prefers pricing/pricing.json over the
-        # copy inlined in the module, so a package without it silently ships
-        # older prices than the release it came from.
+        # wb_pricing._candidate_file() 优先读 pricing/pricing.json，缺了它，
+        # 包里带的会是模块内联的旧价格。
         self.assertIn("pricing/pricing.json", tools.read_manifest())
 
     def test_entries_are_relative_and_inside_the_repo(self):
@@ -324,9 +285,8 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(listed), len(set(listed)))
 
     def test_user_data_directories_are_not_managed_files(self):
-        # The updater replaces exactly the managed files and must leave
-        # accounts/ and usage/ byte-for-byte alone, so no manifest entry may
-        # live inside them.
+        # 更新器只替换受管文件，必须原样保留 accounts/ 与 usage/，
+        # 清单里不能有落在它们内部的条目。
         for name in tools.read_manifest():
             for protected in tools.PROTECTED:
                 self.assertFalse(name.startswith(protected),
@@ -340,11 +300,11 @@ class ManifestTests(unittest.TestCase):
 
 
 class RuntimeTrimTests(unittest.TestCase):
-    """The trim rules reproduce the runtime the portable package ships."""
+    """裁剪规则要精确复现便携包实际携带的运行时。"""
 
     def test_the_app_modules_survive_the_trim(self):
-        # Every stdlib module the gateway imports has to be in the contract
-        # list, or the trim could drop the thing it depends on.
+        # 网关导入的每个标准库模块都必须进契约清单，
+        # 否则裁剪可能删掉它依赖的模块。
         imported = set()
         for path in glob.glob(os.path.join(ROOT, "app", "wb_*.py")):
             with open(path, encoding="utf-8") as fh:
@@ -356,8 +316,7 @@ class RuntimeTrimTests(unittest.TestCase):
                     imported.add(node.module.split(".")[0])
         local = {os.path.basename(p)[:-3]
                  for p in glob.glob(os.path.join(ROOT, "app", "*.py"))}
-        # sys / time and friends are compiled into python312.dll, so the trim
-        # cannot remove them and they have no Lib/ file to check.
+        # sys、time 等编译进 python312.dll，裁剪删不掉它们，也没有 Lib/ 文件可查。
         needed = sorted(m for m in imported
                         if m not in local and m not in sys.builtin_module_names
                         and m not in WINDOWS_BUILTINS)
@@ -387,7 +346,7 @@ class RuntimeTrimTests(unittest.TestCase):
     def test_verify_rejects_a_runtime_that_cannot_start_the_gateway(self):
         with tempfile.TemporaryDirectory(prefix="relrt-") as directory:
             make_runtime(directory)
-            portable_runtime.verify(directory)          # the fixture is valid
+            portable_runtime.verify(directory)          # 这个夹具是合法的
 
             os.remove(os.path.join(directory, "python.exe"))
             with self.assertRaises(SystemExit):
@@ -408,9 +367,8 @@ class RuntimeTrimTests(unittest.TestCase):
 
 
 class PortableZipTests(unittest.TestCase):
-    # The version comes from the checkout, not a literal: a release tool that
-    # refused to build after a version bump would be a tool nobody trusts, and
-    # a test pinned to yesterday's number would hide that.
+    # 版本从当前检出的源码读取。版本号更新后工具必须照常构建，
+    # 测试若写死旧版本号会掩盖问题。
     VERSION = tools.source_version(ROOT)
     TAG = "v" + VERSION
 
@@ -435,8 +393,7 @@ class PortableZipTests(unittest.TestCase):
             self.assertIn("%s/python/Lib/os.py" % root, names)
 
     def test_the_archive_is_not_a_source_archive(self):
-        # The whole point of the round-1 fix: a ZIP without the runtime is a
-        # different, much less useful asset, so the builder must not produce it.
+        # 不带运行时的 ZIP 起不了网关，构建器不许产出这种产物。
         with tempfile.TemporaryDirectory(prefix="relzip-") as directory:
             path, _ = self.build(directory)
             runtime_files = [n for n in zipfile.ZipFile(path).namelist()
@@ -486,15 +443,13 @@ class PortableZipTests(unittest.TestCase):
             self.assertEqual(manifest["root"], tools.PACKAGE_ROOT)
             self.assertEqual(manifest["version"], tools.source_version(ROOT))
             self.assertEqual(manifest["tag"], self.TAG)
-            # The updater replaces the runtime as one subtree, so the manifest
-            # has to name it instead of leaving it implicit.
+            # 更新器把运行时当作一棵子树整体替换，manifest 必须写明它，不能留作隐含信息。
             self.assertEqual(manifest["runtime"]["prefix"], "python/")
             self.assertEqual(manifest["runtime"]["python"], portable_runtime.RUNTIME_VERSION)
             self.assertGreater(manifest["runtime"]["files"], 0)
 
     def test_the_launchers_look_where_the_runtime_is(self):
-        # The packaged path and the path the launcher probes have to agree, or
-        # the package silently falls back to a system interpreter.
+        # 打包路径与启动脚本探测的路径必须一致，否则包会悄悄回退到系统解释器。
         bat = read("start-wb-proxy.bat")
         self.assertIn("python\\python.exe", bat)
         self.assertIn("app\\wb_proxy.py", bat)
@@ -503,8 +458,7 @@ class PortableZipTests(unittest.TestCase):
         self.assertIn("app/wb_proxy.py", sh)
 
     def test_the_archive_root_matches_the_package_layout(self):
-        # Extracting the asset gives one top-level folder, so launchers and
-        # the update path agree.
+        # 解压产物只含一个顶层目录，启动脚本与更新路径据此保持一致。
         self.assertEqual(tools.PACKAGE_ROOT, "wb-proxy-center")
 
     def test_archive_paths_are_safe(self):
@@ -590,31 +544,28 @@ class ReleaseBodyTests(unittest.TestCase):
 
 
 class MatrixLegsTests(unittest.TestCase):
-    """The release gate names every leg instead of trusting a summary."""
+    """release gate 明确列出每条腿，不信任汇总结果。"""
 
     def test_the_repository_matrix_is_the_expected_three(self):
         self.assertEqual(tuple(matrix_legs.legs()), EXPECTED_LEGS)
 
     def test_dropping_a_leg_narrows_what_the_gate_requires(self):
-        # Deriving the legs from tests.yml is the point: if a leg disappears
-        # there, the gate stops waiting for it - and the unit above is what
-        # makes that a deliberate change rather than a silent weakening.
+        # 腿从 tests.yml 推导：那边删掉一条，gate 就少等一条；上面的用例负责把
+        # 这类删改变成显式失败，防止悄悄放宽要求。
         text = read(".github", "workflows", "tests.yml")
         without = text.replace('          - os: windows-latest\n            python: "3.12"\n', "")
         self.assertNotEqual(without, text, "tests.yml 里没有找到预期的 windows 腿")
         self.assertEqual(tuple(matrix_legs.legs(without)), EXPECTED_LEGS[:2])
 
     def test_an_unparseable_matrix_yields_nothing(self):
-        # Empty means "the gate must refuse", never "no legs to check".
+        # 返回空列表代表 gate 必须拒绝，不能理解成无需检查的腿。
         self.assertEqual(matrix_legs.legs("name: tests\njobs:\n  test:\n    runs-on: x\n"), [])
 
 
 class ReleaseToolingTests(unittest.TestCase):
     def test_the_tools_survive_a_non_utf8_console(self):
-        # The Windows runner's stdout is cp1252, and the first Chinese progress
-        # line aborted the first rehearsal of this workflow - the repository
-        # already paid for the same lesson in tests/run_all.py. Every tool pins
-        # its own streams instead of trusting the console.
+        # Windows 运行器的 stdout 是 cp1252，中文进度输出会让进程中断；
+        # 每个工具都固定自己的输出流编码，不依赖控制台。
         for name in ("release/portable_runtime.py", "release/release_tools.py"):
             self.assertIn('reconfigure(encoding="utf-8"', read(*name.split("/")), name)
 
@@ -630,11 +581,9 @@ class ReleaseToolingTests(unittest.TestCase):
 
 
 class ReleaseMutationScannerTests(unittest.TestCase):
-    """The command shapes the scanner has to classify, and how.
+    """扫描器要区分的命令形态，以表格列明契约：WRITES 全部命中，READS 全部放过。
 
-    Kept as a table so the contract is readable: everything in WRITES must be
-    caught, everything in READS must not be. `gh api` is the interesting half -
-    it defaults to GET, but any body flag turns the call into a POST.
+    `gh api` 是关键的一半：默认 GET，出现任一带值 flag 即转为 POST。
     """
 
     WRITES = (
@@ -715,8 +664,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn(r'^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$', step)
         self.assertIn("版本号格式无效", step)
         self.assertIn("exit 1", step)
-        # The tag, the value and the pre-release flag all come from this one
-        # validated variable.
+        # tag、value 和 pre-release 标志全部来自这一个校验过的变量。
         self.assertIn('echo "value=$V"', step)
         self.assertIn('echo "tag=v$V"', step)
         self.assertIn("prerelease=true", step)
@@ -725,9 +673,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
                         self.text.index("Check VERSION matches the input"))
 
     def test_the_version_must_already_match_main(self):
-        # app/wb_proxy.py is the single source of truth: VERSION drives
-        # server_version and the /health payload. The release tags an already
-        # tested commit, so it refuses to bump or push anything itself.
+        # app/wb_proxy.py 是唯一事实来源，VERSION 驱动 server_version 与 /health
+        # 载荷。发布只给已通过测试的提交打标签，自身不改版本号、不推送。
         self.assertIn("""grep -c '^VERSION = "' app/wb_proxy.py""", self.text)
         self.assertIn(
             """CURRENT="$(sed -n 's/^VERSION = "\\([^"]*\\)"/\\1/p' app/wb_proxy.py)\"""",
@@ -749,8 +696,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                       '--generate-notes', self.text)
         self.assertIn('if [ "$PRERELEASE" = "true" ]; then', self.text)
         self.assertIn("--prerelease", self.text)
-        # The fork publishes directly; there is no draft stage or manual
-        # publish step that could leave a release invisible.
+        # 本 fork 直接发布，没有草稿阶段或手动发布步骤，release 不会停留在不可见状态。
         self.assertNotIn("--draft", self.text)
 
     def test_the_release_job_reads_the_push_test_result(self):
@@ -777,10 +723,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         check_release_writers(self.text)
         self.assertEqual(release_writer_jobs(self.text), [RELEASE_WRITER_JOB])
 
-    # ---- negative evidence: the checker has to be able to fail -------------
+    # ---- 反面证据：检查器必须有能力报错 ------------------------------------
     #
-    # A checker that cannot fail proves nothing. Each mutation below is a real
-    # way the contract could regress; the suite is the thing that notices.
+    # 不会失败的检查器证明不了任何事。下面每个变体都是契约真实可能的退化方式，
+    # 由这套用例负责发现。
 
     def test_the_checker_rejects_a_writer_outside_the_release_job(self):
         mutated = self.text.replace(
@@ -825,9 +771,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
             check_release_writers(mutated)
 
     def test_the_checker_accepts_a_read_only_api_call_anywhere(self):
-        # The other half of the contract: an explicit GET stays legal even when
-        # it carries fields. A scanner that flagged this would push people to
-        # weaken the check instead of fixing it.
+        # 契约的另一半：显式 GET 即使带字段也合法。若误报这类命令，
+        # 人们往往会选择削弱检查来绕过它。
         synthetic = (
             "name: synthetic\n"
             "on:\n"
@@ -864,7 +809,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
 
 
 class PackageWorkflowTests(unittest.TestCase):
-    """package.yml builds the portable ZIP from the manifest and attaches it."""
+    """package.yml 按清单构建便携 ZIP 并挂到 Release 上。"""
 
     def test_the_package_workflow_builds_and_attaches_the_zip(self):
         package = read(".github", "workflows", "package.yml")
@@ -872,8 +817,7 @@ class PackageWorkflowTests(unittest.TestCase):
         self.assertIn("workflow_call:\n    inputs:\n      tag:", package)
         self.assertIn("workflow_dispatch:\n    inputs:\n      tag:", package)
         self.assertIn("runs-on: windows-latest", package)
-        # The version comes from the tag, never a second hand-maintained
-        # literal that could disagree with it.
+        # 版本从 tag 提取，仓库里没有第二份手写版本号可与它冲突。
         self.assertIn("value=${TAG#v}", package)
         self.assertIn("python release/portable_runtime.py download", package)
         self.assertIn("python release/portable_runtime.py prepare", package)
@@ -900,9 +844,8 @@ class PackageWorkflowTests(unittest.TestCase):
                 "%s 藏在点开头的路径里" % name)
 
     def test_user_data_cannot_reach_the_archive(self):
-        # The manifest is the only source list, and the updater's protected
-        # directories are gitignored - so a release can never carry accounts/
-        # or usage/ from the maintainer's machine.
+        # 清单是唯一来源，更新器的受保护目录都在 .gitignore 里，
+        # 发布包不可能带上维护者机器上的 accounts/ 或 usage/。
         ignored = read(".gitignore")
         for pattern in ("accounts/*.json", "usage/*.jsonl"):
             self.assertIn(pattern, ignored)

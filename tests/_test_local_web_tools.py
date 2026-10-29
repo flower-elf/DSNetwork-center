@@ -1,26 +1,7 @@
-"""The gateway declares and runs web_search / web_fetch itself; the queries array, duplicated declaration and resp_wrapup defects of issue #43 stay pinned here.
+"""客户端把 web_search 声明成服务端工具，聊天端点没有对应执行器；网关于是自行声明 function 形的 web_search / web_fetch，拦截模型的调用并在本地执行。本文件回归 issue #43 的三个缺陷：模型用 queries 数组提问被误判为空查询、重试耗尽轮次预算，注入的定义与客户端声明同名重复，轮次耗尽后合成 resp_wrapup 把失败伪装成正常结束。
 
-The client declares web_search as a server-side tool the chat endpoint has no
-executor for, so the gateway declares a function-shaped one, swallows the calls
-and runs them locally. v1.5.0-1.5.2 did that and was reverted (issue #43) over
-three defects, all pinned here:
-
-  * a model answering with a `queries` array was told it had asked for nothing,
-    retried, and burned the round budget;
-  * the injected definition was appended next to the client's own declaration,
-    so the upstream saw two tools with the same name;
-  * an exhausted round budget ended in a synthesised resp_wrapup - a failure
-    presented as a normal finish, which the client showed as a cut-off answer.
-
-The last one is checked against a fake upstream that walks the real streaming
-path, so the number of response.created frames and the final event are observed
-rather than assumed.
-
-Sections [12]-[17] cover the multi-engine rotation and fetch hardening:
-invisible failover across the backend chain, labelled non-standard sources,
-engine cooldown, cache and throttle, failure classification, the text-content
-gate and the DNS / IP guards. Engine runs and HTTP responses are injected, so
-the file stays offline. No network access required.
+[12]-[17] 段覆盖多引擎轮换与抓取加固：后端链无感切换、非标准来源标注、引擎冷却、缓存与限流、失败分类、正文类型门槛、DNS / IP 守卫。引擎运行与 HTTP 响应全部注入，不需要外网。
+Run with: python tests/run_all.py _test_local_web_tools
 """
 
 import ipaddress
@@ -33,6 +14,10 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 
 import wb_proxy as proxy
+import wb_chat_routes as C
+import wb_http as H
+import wb_usage as U
+import wb_translate as T
 import wb_webtools as W
 
 # 仓库里的 accounts/ 与 usage/ 归正在跑的网关用：这个进程一律指向临时目录。
@@ -141,31 +126,6 @@ for destination in (
 check("loopback, private, link-local and local-name redirect targets are refused",
       all(blocked), blocked)
 
-class _StopOpener(Exception):
-    pass
-
-
-class _StopOpenerFactory(object):
-    def open(self, req, timeout=None):
-        raise _StopOpener()
-
-captured_handlers = []
-
-
-def capture_build_opener(*handlers):
-    captured_handlers.extend(handlers)
-    return _StopOpenerFactory()
-
-
-with mock.patch.object(W.urllib.request, "build_opener", capture_build_opener):
-    try:
-        W._open_url("https://example.com/")
-    except _StopOpener:
-        pass
-check("the search fetch installs the safe redirect handler",
-      any(isinstance(h, W._SafeRedirectHandler) for h in captured_handlers),
-      captured_handlers)
-
 hops = []
 
 
@@ -237,8 +197,7 @@ class FakeHandler(object):
     _responses_stream_response = proxy.Handler._responses_stream_response
 
     def _key_id(self):
-        # These tests present no API key, so the usage row they produce is
-        # unattributed - exactly what the real handler records in that case.
+        # 本用例不带 API key，usage 行因此没有归属，真实 handler 在同样情形下也是这样记录。
         return None
 
     def __init__(self):
@@ -275,8 +234,7 @@ opened = []
 
 def fake_open_upstream(body, session_key=None, target_realm=None, **kwargs):
     opened.append(body)
-    # The real one returns (response, account, effort); the follow-up callers
-    # record the effort on the usage row and ignore it here.
+    # 真实的 open_upstream 返回 (response, account, effort)三元组，调用方把 effort 记入 usage 行；此处 effort 的取值不影响断言。
     return FakeUpstream(sse(ANSWER_CHUNKS)), FakeAccount(), body.get("reasoning_effort")
 
 
@@ -284,17 +242,16 @@ chat_body = {
     "model": "deepseek-v4.1-flash",
     "messages": [{"role": "user", "content": "tell me about cats"}],
     "tools": [W.web_search_tool_def()],
-    # responses_to_chat sets this mark when the gateway swaps in its own definitions; interception keys on proxy.web_tools_active.
+    # responses_to_chat 在网关替换工具声明时写入此标记；拦截逻辑以 proxy.web_tools_active 为开关。
     "_web_tools": True,
     "stream": True,
 }
 handler = FakeHandler()
 executed = []
 
-with mock.patch.multiple(proxy,
-                         open_upstream=fake_open_upstream,
-                         record_usage=lambda *a, **k: None,
-                         record_error=lambda *a, **k: None), \
+with mock.patch.multiple(proxy, open_upstream=fake_open_upstream), \
+        mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                            record_error=lambda *a, **k: None), \
         mock.patch.object(W, "execute", lambda name, args: executed.append((name, args)) or
                           "Search results for: cats" + chr(10) + "1. Cats - https://example.com"):
     handler._responses_stream_response(
@@ -326,7 +283,7 @@ seqs = [e["sequence_number"] for e in events if isinstance(e.get("sequence_numbe
 check("sequence_number increases monotonically across rounds",
       seqs == sorted(seqs) and len(seqs) == len(set(seqs)), seqs)
 check("no synthesised wrapup id", "resp_wrapup" not in body)
-check("a second upstream call was made for the tool result", len(opened) == 1, len(opened))
+check("the tool round opens exactly one upstream call", len(opened) == 1, len(opened))
 check("the tool was run once", len(executed) == 1 and executed[0][0] == "web_search", executed)
 check("the query reached the tool", "cats" in (executed[0][1] if executed else ""), executed)
 check("the client never sees a web_search call", '"name": "web_search"' not in body)
@@ -344,17 +301,15 @@ def always_tool_body(body, session_key=None, target_realm=None, **kwargs):
     calls["n"] += 1
     calls.setdefault("bodies", []).append(body)
     if calls["n"] > W.MAX_WEB_ROUNDS:
-        # out of rounds: the gateway must have taken the tools away, so this
-        # answer is a real one and the stream can end normally.
+        # 超出轮次预算后网关已撤掉工具，此时返回真实回答，流可以正常收尾。
         return FakeUpstream(sse(ANSWER_CHUNKS)), FakeAccount(), body.get("reasoning_effort")
     return FakeUpstream(sse(TOOL_CHUNKS)), FakeAccount(), body.get("reasoning_effort")
 
 
 handler2 = FakeHandler()
-with mock.patch.multiple(proxy,
-                         open_upstream=always_tool_body,
-                         record_usage=lambda *a, **k: None,
-                         record_error=lambda *a, **k: None), \
+with mock.patch.multiple(proxy, open_upstream=always_tool_body), \
+        mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                            record_error=lambda *a, **k: None), \
         mock.patch.object(W, "execute", lambda name, args: "Search results for: cats"):
     handler2._responses_stream_response(
         FakeUpstream(sse(TOOL_CHUNKS)), "deepseek-v4.1-flash", set(), {}, "fp",
@@ -385,10 +340,9 @@ def stubborn_body(body, session_key=None, target_realm=None, **kwargs):
 
 
 handler2b = FakeHandler()
-with mock.patch.multiple(proxy,
-                         open_upstream=stubborn_body,
-                         record_usage=lambda *a, **k: None,
-                         record_error=lambda *a, **k: None), \
+with mock.patch.multiple(proxy, open_upstream=stubborn_body), \
+        mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                            record_error=lambda *a, **k: None), \
         mock.patch.object(W, "execute", lambda name, args: "Search results for: cats"):
     handler2b._responses_stream_response(
         FakeUpstream(sse(TOOL_CHUNKS)), "deepseek-v4.1-flash", set(), {}, "fp",
@@ -417,7 +371,7 @@ check("the title comes along", found and found[0]["title"] == "All About Cats", 
 check("an error string yields no sources", W.sources_from_result("Error: nope") == [])
 
 answer = "See [All About Cats](https://example.com/cats) and https://example.com/other plus https://evil.example/x"
-anns = proxy.build_citations(answer, found)
+anns = T.build_citations(answer, found)
 urls = sorted(a["url"] for a in anns)
 check("a markdown link is cited", "https://example.com/cats" in urls, anns)
 check("a bare url is cited too", "https://example.com/other" in urls, anns)
@@ -477,11 +431,10 @@ class JsonHandler(FakeHandler):
 
 
 jh = JsonHandler()
-with mock.patch.multiple(proxy,
-                         open_upstream=capture_open,
-                         aggregate_stream=fake_aggregate,
-                         record_usage=lambda *a, **k: None,
-                         record_error=lambda *a, **k: None), \
+with mock.patch.multiple(proxy, open_upstream=capture_open), \
+        mock.patch.multiple(C, aggregate_stream=fake_aggregate), \
+        mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                            record_error=lambda *a, **k: None), \
         mock.patch.object(W, "execute", lambda name, args: SAMPLE):
     jh._responses_nonstream_response(
         FakeUpstream(sse(TOOL_CHUNKS)), "deepseek-v4.1-flash", set(), {}, "fp",
@@ -515,10 +468,9 @@ def passthrough_open(body, session_key=None, target_realm=None, **kwargs):
 
 handler3 = FakeHandler()
 ran = []
-with mock.patch.multiple(proxy,
-                         open_upstream=passthrough_open,
-                         record_usage=lambda *a, **k: None,
-                         record_error=lambda *a, **k: None), \
+with mock.patch.multiple(proxy, open_upstream=passthrough_open), \
+        mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                            record_error=lambda *a, **k: None), \
         mock.patch.object(W, "execute", lambda name, args: ran.append(name) or "no"), \
         mock.patch.object(proxy.wb_settings, "local_web_tools", lambda accounts_dir: False):
     handler3._responses_stream_response(

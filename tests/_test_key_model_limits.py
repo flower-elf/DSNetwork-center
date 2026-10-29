@@ -1,18 +1,14 @@
-"""A key may be limited to the models it is allowed to ask for; a request outside the list is refused locally with a readable 400.
+"""API key 可以限制可请求的模型；名单外的请求在本地被拒绝，返回可读的 400。
 
-The panel binds each API key to an exit; this adds a second, optional binding:
-the models that key is allowed to ask for. A request that names a model outside
-the list is answered with a readable 400 locally, so nothing reaches upstream
-and no credits are spent - which is the whole point, since clients fire
-background requests straight at the catalogue from outside the model picker.
+面板把每个 API key 绑到出口，这里再加一道可选绑定：该 key 允许请求的模型。请求点名
+名单外的模型时，本地直接回可读的 400，什么都不发往上游、不花额度；客户端会在模型
+选择器之外直接向目录发后台请求，这正是这道限制的目的。
 
-These cases pin the storage shape, the matching rules and the enforcement
-point, plus the upgrade path: every key written before this field existed has
-to read back as unrestricted. No network access required.
+这些用例固定存储结构、匹配规则与拦截位置，也固定升级路径：字段出现之前写入的每个
+key 读回时都不受限制。不需要网络。
 
-A limited key that names no model is refused rather than waved through: the
-request cannot be shown to be asking for something the key may use, and
-forwarding it would only reach the upstream with an empty model.
+受限 key 不带模型名时拒绝，不放行：无法证明它在请求允许的模型，放行只会把空模型
+转发给上游。
 """
 
 import os
@@ -42,7 +38,7 @@ def check(label, cond, extra=""):
 
 
 class FakeRequest(object):
-    """Just enough of the handler for the pieces under test."""
+    """被测片段所需的最小 handler 替身。"""
 
     _key_model_error = proxy.Handler._key_model_error
     _handle_settings_save = proxy.Handler._handle_settings_save
@@ -145,7 +141,7 @@ d3 = tempfile.mkdtemp(prefix="wb-keymodels-")
 S.set_api_keys(d3, [{"id": "k1", "name": "limited", "key": "key-delta",
                      "realm": "cn", "models": ["deepseek/*"]}])
 with mock.patch.multiple(proxy, ACCOUNTS_DIR=d3, POOL=None, SCHEDULER=None):
-    # An older cached panel posts rows without the new field.
+    # 面板的旧缓存页面提交的行不带这个字段，保存必须保留已存的模型限制。
     request = FakeRequest(payload={"api_keys": [
         {"id": "k1", "name": "limited", "key": "", "realm": "cn", "enabled": True},
     ]})
@@ -199,8 +195,8 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d5, POOL=None, SCHEDULER=None):
     check("runtime_settings_view returns the key list", len(keys_in_view) == 1, keys_in_view)
     check("runtime_settings_view includes models", keys_in_view[0].get("models") == ["deepseek*"], keys_in_view[0])
 
-    # Simulates panel round-trip: the panel reads data.api_keys from /settings,
-    # maps them to editable rows, adds a new row, and calls saveApiKeys().
+    # 模拟面板往返：面板从 /settings 读 data.api_keys，映射成可编辑行，加一行
+    # 新 key，再调 saveApiKeys()。
     mapped_rows = []
     for k in keys_in_view:
         mapped_rows.append({
@@ -209,9 +205,9 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d5, POOL=None, SCHEDULER=None):
             "realm": k.get("realm") or "",
             "models": list(k.get("models") or []),
             "enabled": k.get("enabled") is not False,
-            "key": "",  # Blank means keep stored secret
+            "key": "",  # 空字符串表示保留已存密钥
         })
-    # Append a newly created key
+    # 追加一把新建的 key
     mapped_rows.append({
         "id": "",
         "name": "second",

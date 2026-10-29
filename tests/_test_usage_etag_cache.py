@@ -1,29 +1,29 @@
-"""面板轮询的 JSON 读接口：条件请求（ETag + 304），数字没变就不再重传。
+"""面板轮询的 JSON 读接口：条件请求（ETag + 304），数字没变就不重传。
 
-回归背景（四段）：
+回归背景：
 
 1. 面板每 5 秒轮询一批读接口（/usage、/usage/perf、/usage/analytics、
    /usage/timeseries、/usage/by-account），单个响应 10~100KB。这些接口在服务端
    带 _STATS_TTL 缓存，两次重建之间响应体逐字节不变，却每次整份重传。
-2. 校验符只能由「缓存条目的构建时刻 + 缓存键」派生，不能对响应字节做哈希：
+2. 校验符只能由“缓存条目的构建时刻 + 缓存键”派生，不能对响应字节做哈希：
    payload 里有 time.time() 派生的字段（/usage 的 started/since、
    /usage/timeseries 的桶边界），同一份缓存序列化两次都不逐字节相同，哈希出来的
-   tag 永远不命中，304 一次也拿不到。这条推理钉在 [5]/[7]：缓存没重建时 tag
+   tag 永远不命中，304 一次也拿不到。这条推理对应 [5]/[7]：缓存没重建时 tag
    必须稳定，重建后必须变化。
 3. 校验符还必须**描述它跟着一起发出去的那份响应体**：取数前后各取一次缓存戳，
    两次一致才发 tag（见 wb_proxy._json_cached 的注释）。不一致说明中间发生了
    重建，这次就不发校验符、走普通 200——宁可少一次 304，也不能让客户端拿着一个
-   不描述当前响应体的 tag 回来命中 304、然后一直显示过期数字。[6] 钉住这条。
+   不描述当前响应体的 tag 回来命中 304、然后一直显示过期数字。[6] 就是这条。
 4. 只改服务端等于没改：面板前端用 cache:'no-store' 发 fetch，浏览器既不存副本
-   也不发 If-None-Match。两端一起改这件事，前端那一半钉在
-   _test_panel_poll_revalidate.js 里。
-5. 304 是「内容没变」的答复，不是免鉴权的捷径：未授权时该 401 还是 401，哪怕
+   也不发 If-None-Match。两端一起改这件事，前端那一半见
+   _test_panel_poll_revalidate.js。
+5. 304 只回答“内容没变”，不能当免鉴权的捷径：未授权时该 401 还是 401，哪怕
    请求带着一个完全正确的 If-None-Match。[9] 就是为这条安全红线设的。
 
 套件在空闲端口上起一个真实网关，用真 HTTP 走一遍完整周期。WB_STATS_TTL 压到
-4 秒，让「缓存重建」在一次测试里就能发生，而不是等 30 分钟。
+1.5 秒，让“缓存重建”在一次测试里就能发生，不用等 30 分钟。
 
-    python tests/_test_usage_etag_cache.py
+用 python tests/run_all.py _test_usage_etag_cache 运行。
 """
 import http.client
 import json
@@ -35,13 +35,13 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)          # the gateway lives one level up
+ROOT = os.path.dirname(HERE)          # 网关在上一层目录
 PY = os.path.join(ROOT, "python", "python.exe")
 if not os.path.exists(PY):
     PY = sys.executable
 sys.path.insert(0, HERE)
 
-import _lifecycle as life            # noqa: E402  (spare port + managed process)
+import _lifecycle as life            # noqa: E402  备用端口与托管进程
 
 PASS = 0
 FAIL = 0
@@ -52,8 +52,8 @@ COVERED = ("/usage", "/v1/usage", "/usage/perf", "/usage/analytics",
 # 没被覆盖的接口：/usage/recent 每次新请求都进榜，服务端没有缓存、也就没有稳定
 # 的校验符可发，照旧整份重取（面板那一侧同样没给它 POLL_READ）。
 UNCOVERED = ("/usage/recent",)
-# 4 秒 TTL：够"同一份缓存期间"连续发几个请求，也够等一次重建。
-TTL = 4.0
+# 1.5 秒 TTL：够“同一份缓存期间”连续发几个请求，也够等一次重建。
+TTL = 1.5
 
 
 def check(label, ok, detail=""):
@@ -66,7 +66,6 @@ def check(label, ok, detail=""):
         print("  [FAIL] %s %s" % (label, detail))
 
 
-port = life.free_port()
 work = tempfile.mkdtemp(prefix="usageetag_")
 usage_dir = os.path.join(work, "usage")
 os.makedirs(usage_dir)
@@ -99,20 +98,16 @@ now = time.time()
 write_rows([row(now - 600 - 30 * i, total_tokens=100 + i, account="a%d" % (i % 2 + 1))
             for i in range(12)])
 
-proc = life.spawn_managed(
-    [PY, os.path.join(ROOT, "app", "wb_proxy.py"), "--port", str(port), "--host", "127.0.0.1",
-     "--accounts-dir", store],
-    cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
-    env=dict(os.environ, WB_PROXY_USAGE_DIR=usage_dir, WB_STATS_TTL=str(TTL)))
-
-TOKEN = None
+#: 当前在用的网关实例；稳定期与重建期各起一个。
+SERVER = None
 
 
-def get(path, headers=None, conn=None):
+def get(path, headers=None, conn=None, server=None):
     """一次 GET；返回 (status, headers, body)。conn 给定时复用它（keep-alive）。"""
+    target = server or SERVER
     own = conn is None
     if own:
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        conn = http.client.HTTPConnection("127.0.0.1", target["port"], timeout=20)
     try:
         conn.request("GET", path, headers=headers or {})
         resp = conn.getresponse()
@@ -124,8 +119,8 @@ def get(path, headers=None, conn=None):
 
 def panel_headers(extra=None):
     h = dict(extra or {})
-    if TOKEN:
-        h["X-Panel-Token"] = TOKEN
+    if SERVER["token"]:
+        h["X-Panel-Token"] = SERVER["token"]
     return h
 
 
@@ -134,22 +129,22 @@ def poll(path, extra=None, conn=None):
     return get(path, panel_headers(extra), conn=conn)
 
 
-def wait_ready():
+def wait_ready(server):
     for _ in range(40):
         time.sleep(0.5)
         try:
-            status, _, _ = get("/health")
+            status, _, _ = get("/health", server=server)
             if status == 200:
                 return True
         except Exception:
-            if proc.poll() is not None:
+            if server["proc"].poll() is not None:
                 return False
     return False
 
 
-def login():
+def login(server):
     """面板会话：POST /panel/login（默认口令 admin）换一个 X-Panel-Token。"""
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    conn = http.client.HTTPConnection("127.0.0.1", server["port"], timeout=20)
     try:
         body = json.dumps({"password": "admin"}).encode("utf-8")
         conn.request("POST", "/panel/login", body=body,
@@ -171,7 +166,7 @@ def is_strong_tag(tag):
 
 
 def body_matches(body):
-    """响应体是不是这个接口此刻的正常答复（用来证明 200 是真答复、不是空壳）。"""
+    """响应体是不是这个接口此刻的正常答复（用来证明 200 带真实载荷）。"""
     try:
         payload = json.loads(body.decode("utf-8"))
     except Exception:
@@ -193,14 +188,35 @@ def synced_tag(path, extra=None):
     return etag_of(headers)
 
 
-try:
-    if not wait_ready():
+def start_server(ttl):
+    """起一个网关实例并登好面板会话。
+
+    缓存稳定期用长 TTL、重建期用短 TTL，两个阶段各用一个实例：稳定期里
+    若干次请求必须落在同一个缓存窗口内，机器繁忙时用 1.5 秒的窗口会把
+    「窗口内 tag 稳定」测成「窗口刚好过期」。
+    """
+    port = life.free_port()
+    proc = life.spawn_managed(
+        [PY, os.path.join(ROOT, "app", "wb_proxy.py"), "--port", str(port),
+         "--host", "127.0.0.1", "--accounts-dir", store],
+        cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT,
+        env=dict(os.environ, WB_PROXY_USAGE_DIR=usage_dir,
+                 WB_STATS_TTL=str(ttl)))
+    server = {"proc": proc, "port": port, "token": None}
+    if not wait_ready(server):
+        life.stop_managed(proc)
         print("  [FAIL] server did not start")
         sys.exit(1)
-    TOKEN = login()
-    if not TOKEN:
+    server["token"] = login(server)
+    if not server["token"]:
+        life.stop_managed(proc)
         print("  [FAIL] panel login failed")
         sys.exit(1)
+    return server
+
+
+try:
+    SERVER = start_server(3600)
 
     print("[1] 200：带强校验符 + no-cache，body 是完整 JSON，不发 Last-Modified")
     for path in COVERED:
@@ -270,6 +286,9 @@ try:
               "%s / %d vs %d bytes" % (status, len(again), len(first)))
 
     print("[6] 校验符必须描述它一起发出去的那份 body（重建那一轮尤其关键）")
+    # 重建阶段换成 1.5 秒 TTL 的实例：后面的用例靠它让缓存真的过期。
+    life.stop_managed(SERVER["proc"])
+    SERVER = start_server(TTL)
     time.sleep(TTL + 0.4)
     for path in COVERED:
         status, headers, body = poll(path)          # 这一轮触发重建
@@ -362,7 +381,7 @@ try:
     check("带引号的 realm 仍发出合法的 ETag", is_strong_tag(tag_weird), tag_weird)
 
     print("[12] keep-alive：一条连接上，校验符不会漏给下一个响应")
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+    conn = http.client.HTTPConnection("127.0.0.1", SERVER["port"], timeout=20)
     try:
         status, headers, _b = poll("/usage", conn=conn)
         check("连接内第一个请求（/usage）带 ETag", is_strong_tag(etag_of(headers)),
@@ -377,7 +396,8 @@ try:
         conn.close()
 
 finally:
-    life.stop_managed(proc)
+    if SERVER is not None:
+        life.stop_managed(SERVER["proc"])
     shutil.rmtree(work, ignore_errors=True)
 
 print()

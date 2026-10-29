@@ -87,6 +87,27 @@ export function fmtDateTimeMarked(ts, now = Date.now()) {
   return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${time}`;
 }
 
+/** 本地时间「月-日 时:分」。 */
+export function fmtClock(ms) {
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return '—';
+  return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+
+/** 本地时间「时:分」。 */
+export function fmtTime(ms) {
+  const d = new Date(Number(ms));
+  if (!Number.isFinite(d.getTime())) return '—';
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+}
+
+/** 数字或破折号：空值与非数字都显示破折号。 */
+export function fmtNumberDash(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  const n = Number(value);
+  return Number.isFinite(n) ? fmtNumber(n) : '—';
+}
+
 /** 剩余秒数 → 「已过期」「35 分钟」「5.5 小时」「12.3 天」。 */
 export function fmtRemain(seconds) {
   const s = Number(seconds);

@@ -36,7 +36,7 @@ export function createProxyTab(page) {
     }
   }
 
-  /** 行数变化后必须重绘，输入过程中的 markDirty 只在首次置位时重绘。 */
+  /** 行数变化后必须重绘。 */
   function structChanged() {
     shownDirty = isDirty();
     page.draw();

@@ -4,7 +4,7 @@
 多打一个就白烧一个账号的额度（重复打卡不给积分），漏打一个则那天的积分悄悄丢掉。
 名单是调用方的明确意图，所以空名单等于「一个都不打」，不能回落成「全部账号」。
 
-Run with: python tests/_test_daily_chat_pending_route.py
+用 python tests/run_all.py _test_daily_chat_pending_route 运行。
 """
 import os
 import sys
@@ -13,6 +13,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import wb_accounts
 import wb_proxy
 
 
@@ -64,11 +65,13 @@ class RouteTests(unittest.TestCase):
         ]
         self.pool = FakePool(self.accounts)
         for target, value in (("POOL", self.pool),
-                              ("log", lambda *a, **k: None),
-                              ("account_views", lambda realm=None: [])):
+                              ("log", lambda *a, **k: None)):
             patcher = mock.patch.object(wb_proxy, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        views = mock.patch.object(wb_accounts, "account_views", lambda realm=None: [])
+        views.start()
+        self.addCleanup(views.stop)
 
     def call(self, payload):
         handler = self.Handler()

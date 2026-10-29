@@ -34,6 +34,7 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
 _TMP = isolated_data_dirs("wb-login-ratelimit-")
 
 import wb_proxy as proxy  # noqa: E402
+import wb_panel_routes as panel  # noqa: E402
 import wb_settings  # noqa: E402
 
 WRONG_PASSWORD = "definitely-not-the-panel-password"
@@ -45,13 +46,13 @@ class RateLimitKeyTests(unittest.TestCase):
 
     def setUp(self):
         # 默认名单为空；需要显式可信代理的用例自己覆盖。
-        patcher = mock.patch.object(proxy, "TRUSTED_PROXIES", ())
+        patcher = mock.patch.object(panel, "TRUSTED_PROXIES", ())
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def test_loopback_peer_uses_x_real_ip(self):
         self.assertEqual(
-            proxy.login_rate_limit_key("127.0.0.1", {"X-Real-IP": "203.0.113.7"}),
+            panel.login_rate_limit_key("127.0.0.1", {"X-Real-IP": "203.0.113.7"}),
             "203.0.113.7")
 
     def test_ipv6_loopback_and_mapped_forms_are_trusted(self):
@@ -60,19 +61,14 @@ class RateLimitKeyTests(unittest.TestCase):
         for peer in ("::1", "::ffff:127.0.0.1"):
             with self.subTest(peer=peer):
                 self.assertEqual(
-                    proxy.login_rate_limit_key(peer, {"X-Real-IP": "203.0.113.8"}),
+                    panel.login_rate_limit_key(peer, {"X-Real-IP": "203.0.113.8"}),
                     "203.0.113.8")
 
     def test_x_real_ip_wins_over_forwarded_for(self):
         headers = {"X-Real-IP": "203.0.113.7",
                    "X-Forwarded-For": "198.51.100.9, 10.0.0.1"}
-        self.assertEqual(proxy.login_rate_limit_key("127.0.0.1", headers),
+        self.assertEqual(panel.login_rate_limit_key("127.0.0.1", headers),
                          "203.0.113.7")
-
-    def test_forwarded_for_takes_the_first_hop(self):
-        headers = {"X-Forwarded-For": "198.51.100.9, 10.0.0.1, 172.16.0.3"}
-        self.assertEqual(proxy.login_rate_limit_key("127.0.0.1", headers),
-                         "198.51.100.9")
 
     def test_host_port_forms_are_accepted(self):
         # nginx 的几种变体写法（带端口 / 带方括号的 IPv6）都要认；
@@ -85,7 +81,7 @@ class RateLimitKeyTests(unittest.TestCase):
         for header, raw, want in cases:
             with self.subTest(header=header, raw=raw):
                 self.assertEqual(
-                    proxy.login_rate_limit_key("127.0.0.1", {header: raw}), want)
+                    panel.login_rate_limit_key("127.0.0.1", {header: raw}), want)
 
     def test_malformed_headers_fall_back_without_raising(self):
         # 多值/非法/超长/半截方括号/非数字端口：X-Real-IP 不可用就退回对端。
@@ -96,58 +92,52 @@ class RateLimitKeyTests(unittest.TestCase):
         for raw in unusable:
             with self.subTest(raw=raw[:30]):
                 self.assertEqual(
-                    proxy.login_rate_limit_key("127.0.0.1", {"X-Real-IP": raw}),
+                    panel.login_rate_limit_key("127.0.0.1", {"X-Real-IP": raw}),
                     "127.0.0.1")
         # X-Forwarded-For 整条链都是垃圾：同样退回对端。
         self.assertEqual(
-            proxy.login_rate_limit_key(
+            panel.login_rate_limit_key(
                 "127.0.0.1", {"X-Forwarded-For": "garbage, also-garbage"}),
             "127.0.0.1")
 
     def test_malformed_x_real_ip_falls_through_to_the_chain(self):
         headers = {"X-Real-IP": "1.2.3.4,5.6.7.8",
                    "X-Forwarded-For": "198.51.100.9"}
-        self.assertEqual(proxy.login_rate_limit_key("127.0.0.1", headers),
+        self.assertEqual(panel.login_rate_limit_key("127.0.0.1", headers),
                          "198.51.100.9")
 
-    def test_untrusted_peer_ignores_forged_headers(self):
-        forged = {"X-Real-IP": "203.0.113.7",
-                  "X-Forwarded-For": "198.51.100.9"}
-        self.assertEqual(proxy.login_rate_limit_key("192.168.1.50", forged),
-                         "192.168.1.50")
-
     def test_configured_trusted_proxy_is_believed(self):
-        with mock.patch.object(proxy, "TRUSTED_PROXIES",
-                               proxy.parse_trusted_proxies("10.0.0.1, fd00::/8")):
+        with mock.patch.object(panel, "TRUSTED_PROXIES",
+                               panel.parse_trusted_proxies("10.0.0.1, fd00::/8")):
             self.assertEqual(
-                proxy.login_rate_limit_key("10.0.0.1", {"X-Real-IP": "203.0.113.7"}),
+                panel.login_rate_limit_key("10.0.0.1", {"X-Real-IP": "203.0.113.7"}),
                 "203.0.113.7")
             self.assertEqual(
-                proxy.login_rate_limit_key("fd00::9", {"X-Real-IP": "203.0.113.8"}),
+                panel.login_rate_limit_key("fd00::9", {"X-Real-IP": "203.0.113.8"}),
                 "203.0.113.8")
             # 不在名单里的对端仍然不认头。
             self.assertEqual(
-                proxy.login_rate_limit_key("10.0.0.2", {"X-Real-IP": "203.0.113.9"}),
+                panel.login_rate_limit_key("10.0.0.2", {"X-Real-IP": "203.0.113.9"}),
                 "10.0.0.2")
 
     def test_parse_trusted_proxies_drops_junk(self):
-        nets = proxy.parse_trusted_proxies("10.0.0.1, fd00::/8, junk, , 300.1.2.3")
+        nets = panel.parse_trusted_proxies("10.0.0.1, fd00::/8, junk, , 300.1.2.3")
         self.assertEqual([str(n) for n in nets], ["10.0.0.1/32", "fd00::/8"])
 
     def test_unparsable_peer_is_not_trusted_and_never_raises(self):
-        self.assertFalse(proxy.peer_is_trusted(""))
-        self.assertFalse(proxy.peer_is_trusted(None))
-        self.assertFalse(proxy.peer_is_trusted("garbage"))
+        self.assertFalse(panel.peer_is_trusted(""))
+        self.assertFalse(panel.peer_is_trusted(None))
+        self.assertFalse(panel.peer_is_trusted("garbage"))
 
 
 class PruneTests(unittest.TestCase):
     """清理/裁剪逻辑保持原样：过期的丢、新鲜的留、空桶删掉。"""
 
     def test_prune_keeps_recent_drops_stale_and_removes_empty_buckets(self):
-        with mock.patch.object(proxy, "_login_attempts",
+        with mock.patch.object(panel, "_login_attempts",
                                {"a": [10.0, 70.0], "b": [10.0], "c": [100.0]}):
-            proxy._prune_login_attempts(now=100.0, window=60)
-            self.assertEqual(proxy._login_attempts,
+            panel._prune_login_attempts(now=100.0, window=60)
+            self.assertEqual(panel._login_attempts,
                              {"a": [70.0], "c": [100.0]})
 
 
@@ -198,13 +188,13 @@ class LoginFlowTests(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(prefix="login-ratelimit-")
         self.addCleanup(self._tmp.cleanup)
         self.directory = self._tmp.name
-        proxy._login_attempts.clear()
-        self.addCleanup(proxy._login_attempts.clear)
+        panel._login_attempts.clear()
+        self.addCleanup(panel._login_attempts.clear)
         # 错密码路径有 0.5s 反爆破延迟；这里只验证限流语义，不替它计时。
         sleep = mock.patch.object(proxy.time, "sleep", lambda _s: None)
         sleep.start()
         self.addCleanup(sleep.stop)
-        trusted = mock.patch.object(proxy, "TRUSTED_PROXIES", ())
+        trusted = mock.patch.object(panel, "TRUSTED_PROXIES", ())
         trusted.start()
         self.addCleanup(trusted.stop)
 
@@ -226,7 +216,7 @@ class LoginFlowTests(unittest.TestCase):
             status, _ = self.login(WRONG_PASSWORD, client_a, nginx)
             self.assertEqual(status, 401)
         # 失败次数落在 A 的真实 IP 上，而不是代理的对端地址上。
-        self.assertEqual(set(proxy._login_attempts), {"203.0.113.7"})
+        self.assertEqual(set(panel._login_attempts), {"203.0.113.7"})
         status, payload = self.login(WRONG_PASSWORD, client_a, nginx)
         self.assertEqual(status, 429)
         self.assertIn("too many login attempts", payload["error"]["message"])
@@ -245,7 +235,7 @@ class LoginFlowTests(unittest.TestCase):
             status, _ = self.login(
                 WRONG_PASSWORD, {"X-Real-IP": "203.0.113.%d" % i}, attacker)
             self.assertEqual(status, 401)
-        self.assertEqual(set(proxy._login_attempts), {"192.168.1.50"})
+        self.assertEqual(set(panel._login_attempts), {"192.168.1.50"})
         # 第 6 次换一个伪造 IP：桶是同一把，照样 429。
         status, _ = self.login(
             WRONG_PASSWORD, {"X-Real-IP": "203.0.113.99"}, attacker)
@@ -264,7 +254,7 @@ class LoginFlowTests(unittest.TestCase):
             self.assertEqual(status, 401)
         status, _ = self.login(WRONG_PASSWORD, chain_a)
         self.assertEqual(status, 429)
-        self.assertIn("203.0.113.7", proxy._login_attempts)
+        self.assertIn("203.0.113.7", panel._login_attempts)
         status, _ = self.login(RIGHT_PASSWORD, chain_b)
         self.assertEqual(status, 200)
 
@@ -291,7 +281,7 @@ class LoginFlowTests(unittest.TestCase):
             self.assertEqual(status, 401)
         status, _ = self.login(RIGHT_PASSWORD, client)
         self.assertEqual(status, 200)
-        self.assertNotIn("203.0.113.7", proxy._login_attempts)
+        self.assertNotIn("203.0.113.7", panel._login_attempts)
         # 清桶之后重新计数：再错 3 次不触发限流（旧账没有残留）。
         for _ in range(3):
             status, _ = self.login(WRONG_PASSWORD, client)

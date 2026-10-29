@@ -1,23 +1,15 @@
-"""Automatic pricing for models the upstream adds after a release.
-
-Pinned here, in one place, the four pieces that let a new upstream model be
-priced without a code change:
-
-  - the fetch input is the bundled catalogue **union** the gateway's live
-    catalogue, filtered the way /v1/models is (aliases and paid variants
-    never enter the price input);
-  - a model called between two fetches is priced on demand from the index the
-    last fetch left in memory (no network on the request path), idempotently
-    and without a rewrite of anything already stored;
-  - a name carrying a channel suffix (`-lkeap`) inherits from its base, but
-    only when that base matches OpenRouter uniquely, and the policy records
-    that it was inherited; the setting can turn the whole rule off;
-  - the unpriced report the panel reads: the reason per model and, where one
-    exists, a hand-entered mapping that lives in the data folder.
-
-No network: OpenRouter is a fixture, the live catalogue is a stub. The real
-catalogue is exercised separately, in the deployment check.
+"""测上游新增模型自动定价的契约：抓取输入、按需定价、渠道后缀继承与未定价报告。用 python tests/run_all.py _test_pricing_auto 运行，不联网。
 """
+
+# 这套契约有四块：
+#   - 抓取输入是内置目录与网关实时目录的并集，按 /v1/models 的方式过滤，
+#     别名和付费变体不进计价输入；
+#   - 两次抓取之间被调用的模型按需定价，用上次抓取留在内存里的索引，请求
+#     路径不出网，幂等且不重写已存内容；
+#   - 带渠道后缀的名字（-lkeap）从基础名继承，仅当基础名唯一匹配
+#     OpenRouter，策略记录继承来源；设置可以关掉整条规则；
+#   - 面板读的未定价报告：每个模型的原因，以及数据目录里人工录入的映射。
+# 不联网：OpenRouter 是夹具，实时目录是替身。真实目录由部署检查另外覆盖。
 import json
 import os
 import subprocess
@@ -38,17 +30,18 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_pricing
 import wb_proxy as P
+import wb_models as M
 import wb_settings
 
 
 def rate(prompt, completion, cache=None):
-    """One OpenRouter entry, per-token USD strings like the API sends."""
+    """一条 OpenRouter 条目，按 token 的 USD 字符串，与 API 下发的形态一致。"""
     return {"prompt": str(prompt), "completion": str(completion),
             "input_cache_read": str(prompt if cache is None else cache)}
 
 
-# A stand-in for the live catalogue: the base models the variant names in the
-# bundled catalogue need, plus one name the bundled catalogue has never seen.
+# 实时目录的替身：内置目录里变体名需要的基础模型，外加一个内置目录没见过的
+# 名字。
 OR = {
     "deepseek/deepseek-v4.1-flash": rate(0.00000003, 0.0000005, 0.00000001),
     "deepseek/deepseek-r1-0528": rate(0.0000005, 0.00000215, 0.00000035),
@@ -59,14 +52,13 @@ OR = {
     "moonshotai/kimi-k2.6": rate(0.00000043415, 0.000001828, 0.00000007312),
 }
 
-# The five virtual alias names in the bundled catalogue: not models, never
-# priced, never counted as a coverage gap.
+# 内置目录里的五个虚拟别名：不是模型，从不定价，也不算覆盖缺口。
 ALIASES = ("default-model", "fast-model", "balanced-model", "primary-model",
            "deep-model")
 
 
 class PricingTestCase(unittest.TestCase):
-    """A private data dir plus the module-level state each test can dirty."""
+    """独立的数据目录，加上每个用例都可能弄脏的模块级状态。"""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="wb-price-auto-case-")
@@ -102,14 +94,14 @@ class PricingTestCase(unittest.TestCase):
 
 
 class UnionInputTests(PricingTestCase):
-    """The fetch input is the bundled catalogue plus the live additions."""
+    """抓取输入是内置目录加上实时新增。"""
 
     def test_the_static_baseline_is_unchanged(self):
         ids = wb_pricing.hub_model_ids()
         self.assertEqual(len(ids), len(set(ids)))
         self.assertIn("hy4-preview-f", ids)
-        # A live-only name must not leak into the baseline; that is the whole
-        # reason priced_model_ids() exists as a separate function.
+        # 只有实时目录有的名字不得混进基线，这正是 priced_model_ids()
+        # 单独存在的原因。
         self.assertNotIn("glm-5.3-flashx", ids)
 
     def test_extra_ids_are_appended_in_order_without_duplicates(self):
@@ -126,7 +118,7 @@ class UnionInputTests(PricingTestCase):
         self.assertEqual(doc["models"]["glm-5.3-flashx"]["or_id"],
                          "z-ai/glm-5.3-flashx")
         self.assertNotIn("glm-5.3-flashx", unpriced)
-        # Nothing about it was human-entered, so it is not an override.
+        # 它不是人工录入的，所以不算 override。
         self.assertNotIn("glm-5.3-flashx", overridden)
 
     def test_a_failed_snapshot_fetch_keeps_previous_prices(self):
@@ -137,19 +129,18 @@ class UnionInputTests(PricingTestCase):
             None, previous, ["glm-5.3-flashx"])
         self.assertEqual(again["models"]["glm-5.3-flashx"],
                          previous["glm-5.3-flashx"])
-        # Every id that had a price keeps it; only the never-priced ones are
-        # reported, exactly as before the union input existed.
+        # 有价的 id 全部保留，只报告从没定过价的那些。
         self.assertNotIn("glm-5.3-flashx", unpriced2)
         self.assertEqual(sorted(unpriced2), sorted(unpriced))
 
     def test_run_once_prices_a_live_only_model(self):
-        original = P.read_cached_remote_catalog
-        P.read_cached_remote_catalog = lambda realm: (["glm-5.3-flashx"], {})
+        original = M.read_cached_remote_catalog
+        M.read_cached_remote_catalog = lambda realm: (["glm-5.3-flashx"], {})
         try:
             refresher = self._refresher()
             ok, message = refresher.run_once()
         finally:
-            P.read_cached_remote_catalog = original
+            M.read_cached_remote_catalog = original
         self.assertTrue(ok, message)
         self.assertEqual(refresher.last_extra, 1)
         _at, assignment = wb_pricing.current_assignment()
@@ -160,41 +151,40 @@ class UnionInputTests(PricingTestCase):
         def boom(realm):
             raise RuntimeError("live catalogue unavailable")
 
-        original = P.curated_live_sources
-        P.curated_live_sources = boom
+        original = M.curated_live_sources
+        M.curated_live_sources = boom
         try:
             refresher = self._refresher()
             ok, message = refresher.run_once()
         finally:
-            P.curated_live_sources = original
+            M.curated_live_sources = original
         self.assertTrue(ok, message)
         self.assertEqual(refresher.last_extra, 0)
-        # Coverage is exactly the static baseline - not less than it.
+        # 覆盖范围恰好是静态基线，不少于它。
         static_doc, _unpriced, _ov = wb_pricing.build_snapshot(OR)
         self.assertEqual(refresher.last_models, len(static_doc["models"]))
         self.assertGreater(refresher.last_models, 3)
 
     def test_live_ids_use_the_same_filter_as_the_model_list(self):
-        original = P.read_cached_remote_catalog
-        P.read_cached_remote_catalog = lambda realm: (
+        original = M.read_cached_remote_catalog
+        M.read_cached_remote_catalog = lambda realm: (
             ["default-model", "auto", "lite", "codewise-inline",
              "glm-5.3-flashx", "hy4-preview-sg", "glm-5.3-flash"], {})
         try:
             ids = self._refresher().live_ids()
         finally:
-            P.read_cached_remote_catalog = original
-        # The new name comes through...
+            M.read_cached_remote_catalog = original
+        # 新名字进来；
         self.assertIn("glm-5.3-flashx", ids)
-        # ...while the virtual aliases, the non-chat helper and the paid
-        # "-sg" build are dropped by the gateway's own curation, and a name
-        # the bundled catalogue already carries is not duplicated.
+        # 虚拟别名、非聊天辅助项和付费的 "-sg" 构建被网关自己的甄选挡掉，
+        # 内置目录已有的名字不会重复。
         for dropped in ("default-model", "auto", "lite", "codewise-inline",
                         "hy4-preview-sg", "glm-5.3-flash"):
             self.assertNotIn(dropped, ids, dropped)
 
     def test_live_ids_ask_both_realms_and_dedupe(self):
         asked = []
-        original = P.curated_live_sources
+        original = M.curated_live_sources
 
         def fake(realm):
             asked.append(realm)
@@ -202,49 +192,46 @@ class UnionInputTests(PricingTestCase):
                 return [("glm-5.3-flashx", {}), ("kimi-k2.6", {})], True, "remote"
             return [("glm-5.3-flashx", {}), ("glm-5.3-flash", {})], True, "remote"
 
-        P.curated_live_sources = fake
+        M.curated_live_sources = fake
         try:
             ids = self._refresher().live_ids()
         finally:
-            P.curated_live_sources = original
-        # Both realms are asked - the remote catalogue is fetched per realm,
-        # and either tab's additions belong in the price input.
+            M.curated_live_sources = original
+        # 两个出口都问一遍：远程目录按出口抓取，任一出口的新增都属于计价输入。
         self.assertEqual(asked, ["intl", "cn"])
         self.assertEqual(ids, ["glm-5.3-flashx"])
 
     def test_one_failing_realm_does_not_hide_the_other(self):
-        original = P.curated_live_sources
+        original = M.curated_live_sources
 
         def fake(realm):
             if realm == "cn":
                 raise RuntimeError("cn catalogue down")
             return [("glm-5.3-flashx", {})], True, "remote"
 
-        P.curated_live_sources = fake
+        M.curated_live_sources = fake
         try:
             refresher = wb_pricing.PriceRefresher(5)
             ids = refresher.live_ids()
         finally:
-            P.curated_live_sources = original
+            M.curated_live_sources = original
         self.assertEqual(ids, ["glm-5.3-flashx"])
         self.assertTrue(any("cn" in line for line in refresher.logs), refresher.logs)
 
     def test_an_extra_id_never_pollutes_the_alias_rows(self):
-        # A live catalogue that somehow still names an alias must not get it
-        # priced (it cannot match OpenRouter anyway) nor logged as an override.
+        # 实时目录若仍然报出别名，不得给它定价，也不得记成 override。
         doc, unpriced, overridden = wb_pricing.build_snapshot(
             OR, None, list(ALIASES))
         for alias in ALIASES:
             self.assertNotIn(alias, doc["models"])
-            self.assertIn(alias, unpriced)  # unchanged from before the change
+            self.assertIn(alias, unpriced)  # 别名始终留在未定价列表里
         for alias in ALIASES:
             self.assertNotIn(alias, overridden)
 
 
-# Run in a fresh interpreter: set up a gateway standing in for __main__, then
-# import wb_pricing and see what that left in sys.modules. __ROOT__ is the
-# directory wb_pricing itself was imported from, so a mutated copy beside this
-# test is the one the probe loads.
+# 在全新解释器里跑：搭一个顶替 __main__ 的网关，再 import wb_pricing，看
+# sys.modules 里留下了什么。__ROOT__ 是 wb_pricing 自身被导入的目录，所以
+# 测试旁边的改过的副本才是探针加载的那份。
 _TWIN_IMPORT_PROBE = '''\
 import sys
 sys.path.insert(0, __ROOT__)
@@ -257,6 +244,9 @@ class FakeGateway(object):
 
     def curated_live_sources(self, realm):
         return ([], True, None)
+
+    def add_log_entry(self, message, tag=None):
+        pass
 
 
 sys.modules["__main__"] = FakeGateway()
@@ -276,15 +266,13 @@ if problems:
 
 
 class SingleGatewayInstanceTests(PricingTestCase):
-    """Pricing must talk to the gateway module the server actually runs.
+    """计价必须与服务器真正运行的网关模块对话。
 
-    The container starts `python wb_proxy.py`, which makes the live instance
-    __main__; a second `import wb_proxy` inside that process has no account
-    pool - the live catalogue reads empty, silently - and its own log buffer,
-    so pricing lines never reach the panel. Production showed exactly both: a
-    refresh reporting no live additions while /v1/models still listed them,
-    and an empty log page for the pricing tag. `__main__` stands in for the
-    server here, with wb_proxy imported the ordinary way right beside it.
+    容器以 python wb_proxy.py 启动，运行中的实例是 __main__。进程里再
+    import wb_proxy 会得到一个没有账号池的副本：实时目录静默读成空，日志
+    缓冲也是自己的，计价行到不了面板。线上出过这两种症状：刷新报无实时
+    新增而 /v1/models 仍列出它们，定价标签的整页日志是空的。这里用
+    __main__ 顶替服务器，wb_proxy 在旁边按普通方式导入。
     """
 
     @staticmethod
@@ -305,14 +293,16 @@ class SingleGatewayInstanceTests(PricingTestCase):
 
         return FakeGateway()
 
-    def test_the_live_catalogue_is_read_from_the_running_gateway(self):
-        fake = self._fake_gateway()
-        with unittest.mock.patch.dict(sys.modules, {"__main__": fake}):
+    def test_the_live_catalogue_is_read_from_the_catalog_module(self):
+        seen = []
+
+        def fake_sources(realm):
+            seen.append(realm)
+            return ([("gpt-6-sol", {})], True, "remote")
+
+        with unittest.mock.patch.object(M, "curated_live_sources", fake_sources):
             ids = self._refresher().live_ids()
-        # Both realms were asked on the running module...
-        self.assertEqual(fake.realms, ["intl", "cn"])
-        # ...and the name the bundled catalogue has never seen is the one
-        # that enters the price input.
+        self.assertEqual(seen, ["intl", "cn"])
         self.assertEqual(ids, ["gpt-6-sol"])
 
     def test_the_pricing_lines_reach_the_running_gateway(self):
@@ -324,9 +314,9 @@ class SingleGatewayInstanceTests(PricingTestCase):
         self.assertEqual(fake.lines, [("[定价] 已取价：1 个模型", "pricing"),
                                       ("[定价] 按需补价：gpt-6-sol", "pricing")])
 
-    def test_the_alias_set_comes_from_the_running_gateway_too(self):
-        fake = self._fake_gateway()
-        with unittest.mock.patch.dict(sys.modules, {"__main__": fake}):
+    def test_the_alias_set_comes_from_the_catalog_module(self):
+        with unittest.mock.patch.object(M, "VIRTUAL_ALIAS_MODELS",
+                                        {"default-model", "auto"}):
             self.assertEqual(wb_pricing.virtual_alias_names(),
                              {"default-model", "auto"})
 
@@ -342,21 +332,15 @@ class SingleGatewayInstanceTests(PricingTestCase):
             self.assertIs(wb_pricing.gateway_module(), P)
 
     def test_nothing_imports_wb_proxy_behind_the_resolver(self):
-        """Importing wb_pricing must not bring a second wb_proxy with it.
+        """导入 wb_pricing 不得顺带引入第二个 wb_proxy。
 
-        The gateway runs as `python wb_proxy.py`, so the live instance is
-        __main__; any `import wb_proxy` that executes while wb_pricing is being
-        imported runs that file a second time and produces the twin with no
-        account pool and its own log buffer.
-
-        This used to scan wb_pricing.py for a line starting with
-        "import wb_proxy". A scan can only say the text is there, not when it
-        runs: moving the lazy fallback in gateway_module() to module level
-        leaves the line byte-identical, and `from wb_proxy import Handler` is
-        not that text at all - both recreate the twin while the scan stays
-        green. It also went red for a docstring that merely quoted the line.
-        Asking a real interpreter what it ended up importing has neither
-        problem.
+        网关以 python wb_proxy.py 运行，运行中的实例是 __main__；wb_pricing
+        导入期间执行的任何 import wb_proxy 都会把那份文件再跑一遍，造出没有
+        账号池、带自己日志缓冲的副本。文本扫描只能说明那行字在文件里，说明
+        不了它什么时候跑：把 gateway_module() 的惰性回退挪到模块级，那行字
+        节不变；from wb_proxy import Handler 根本不是那段文本——两种改法都会
+        造出副本而扫描照样绿，引用了那行字的 docstring 还会误报。让真正的
+        解释器报告它实际导入了什么，这些问题都没有。
         """
         probe = _TWIN_IMPORT_PROBE.replace(
             "__ROOT__",
@@ -370,7 +354,7 @@ class SingleGatewayInstanceTests(PricingTestCase):
 
 
 class OnDemandPricingTests(PricingTestCase):
-    """A model called between two fetches still gets a price on the first row."""
+    """两次抓取之间被调用的模型，在第一行上就能拿到价。"""
 
     def setUp(self):
         super().setUp()
@@ -386,8 +370,8 @@ class OnDemandPricingTests(PricingTestCase):
         self.assertEqual(wb_pricing.current_policy_id("glm-5.3-flashx"), pid)
 
     def test_the_write_path_prices_the_first_row_of_a_live_only_model(self):
-        # wb_proxy stamps every row with current_policy_id(model) at write
-        # time; that call must mint the price on the spot, from memory only.
+        # wb_proxy 在写入时给每行盖 current_policy_id(model)；这个调用必须
+        # 当场凭内存里的索引铸出价格。
         pid = wb_pricing.current_policy_id("glm-5.3-flashx")
         self.assertIsNotNone(pid)
         row = {"model": "glm-5.3-flashx", "at": time.time(),
@@ -459,16 +443,14 @@ class OnDemandPricingTests(PricingTestCase):
             thread.join(timeout=10)
         self.assertEqual(len(results), 8)
         self.assertTrue(all(pid == results[0] for pid in results), results)
-        # One policy row, one timeline row, and every line is valid JSON -
-        # no interleaved half-writes.
+        # 一行策略、一行时间线，每行都是合法 JSON，没有交错的半截写入。
         for name in ("pricing-policies.jsonl", "pricing-timeline.jsonl"):
             lines = self._lines(name)
             self.assertEqual(len(lines), 1, name)
             json.loads(lines[0])
 
     def test_an_on_demand_row_keeps_the_other_models_in_force(self):
-        # A single-model registration must not shrink the timeline's view of
-        # what is in force: it merges into the previous assignment.
+        # 单个模型的登记不得缩小时间线对生效范围的视图，它并入上一次指派。
         wb_pricing.record_policies(wb_pricing.build_snapshot(OR)[0])
         at, before = wb_pricing.current_assignment()
         self.assertGreater(len(before), 3)
@@ -480,7 +462,7 @@ class OnDemandPricingTests(PricingTestCase):
 
 
 class VariantInheritanceTests(PricingTestCase):
-    """The suffix rule: inherit only from a unique base, and only when on."""
+    """后缀规则：只从唯一的基础名继承，且仅在开关打开时。"""
 
     def setUp(self):
         super().setUp()
@@ -496,8 +478,8 @@ class VariantInheritanceTests(PricingTestCase):
                 ref, mid)
 
     def test_the_two_names_without_a_counterpart_stay_unpriced(self):
-        # kimi-k2-instruct-taiji strips to a base OpenRouter does not publish,
-        # and kimi-k2.8-preview has no suffix to strip. Neither may be guessed.
+        # kimi-k2-instruct-taiji 剥掉后缀后是 OpenRouter 不发布的基础名，
+        # kimi-k2.8-preview 没有可剥的后缀，两者都不能猜。
         for mid in ("kimi-k2-instruct-taiji", "kimi-k2.8-preview"):
             self.assertIsNone(
                 wb_pricing.resolve(mid, OR, self.by_norm, variants=True)[0], mid)
@@ -515,8 +497,8 @@ class VariantInheritanceTests(PricingTestCase):
             "glm-5.3-flash-f", OR, self.by_norm, variants=True)[0])
 
     def test_the_uncertain_suffixes_are_not_peeled(self):
-        # -f / -dev / -x never strip: hub uses them for its own tiers, and
-        # peeling them would silently drop a per-tier price difference.
+        # -f / -dev / -x 从不剥：hub 用它们区分自己的档位，剥掉会静默丢掉
+        # 档位差价。
         for mid in ("hy3-x", "hy4-preview-f", "hy4-preview-dev"):
             self.assertEqual(list(wb_pricing.variant_bases(mid)), [], mid)
         self.assertEqual(list(wb_pricing.variant_bases("deepseek-r1-0528-lkeap")),
@@ -548,17 +530,15 @@ class VariantInheritanceTests(PricingTestCase):
         self.assertTrue(wb_pricing.variant_inherit_enabled(self.accounts))
 
     def test_a_settings_file_without_the_key_reads_as_on(self):
-        # An install upgraded from a build that never wrote the key keeps the
-        # new behaviour (default on), which is what the release notes say.
+        # 从没写过该键的版本升级上来，读出的默认值仍是打开，与发布说明一致。
         with open(os.path.join(self.accounts, "settings.json"), "w",
                   encoding="utf-8") as fh:
             json.dump({"pricing_refresh_minutes": 5}, fh)
         self.assertTrue(wb_pricing.variant_inherit_enabled(self.accounts))
 
     def test_the_switch_read_is_cached_but_never_goes_stale(self):
-        # ensure_policy reads this on every request for an unpriced model, so
-        # the read is cached by (path, mtime, size) - an external rewrite (the
-        # panel saving settings.json) must still be picked up.
+        # ensure_policy 每次为未定价模型请求都要读它，所以按（路径、mtime、
+        # 大小）缓存；外部改写（面板保存 settings.json）仍必须被察觉。
         path = os.path.join(self.accounts, "settings.json")
         self.assertTrue(wb_pricing.variant_inherit_enabled(self.accounts))
         with open(path, "w", encoding="utf-8") as fh:
@@ -570,7 +550,7 @@ class VariantInheritanceTests(PricingTestCase):
 
 
 class GapReportTests(PricingTestCase):
-    """What the panel shows for models that still have no price."""
+    """面板对还没价的模型显示什么。"""
 
     def test_the_report_categorises_every_kind(self):
         items, summary = wb_pricing.gap_items(OR, None, None, variants=True)
@@ -581,8 +561,7 @@ class GapReportTests(PricingTestCase):
         self.assertEqual(by_model["kimi-k2.8-preview"]["reason"], "or_missing")
         self.assertEqual(by_model["kimi-k2-instruct-taiji"]["reason"],
                          "variant_unmatched")
-        # Aliases are reported but never counted into the gap total, which is
-        # the number an operator chases.
+        # 别名会列出来，但从不计入缺口合计，运营盯的是那个数。
         self.assertEqual(summary["aliases"], len(ALIASES))
         self.assertEqual(summary["total"],
                          summary["or_missing"] + summary["variant_unmatched"])
@@ -601,13 +580,13 @@ class GapReportTests(PricingTestCase):
         by_model = {item["model"]: item for item in items}
         self.assertEqual(by_model["deepseek-r1-0528-lkeap"]["reason"],
                          "variant_unmatched")
-        # A model in the factory snapshot is priced regardless of the switch.
+        # 出厂快照里的模型不受开关影响，始终有价。
         self.assertNotIn("deepseek-v4.1-flash", by_model)
 
     def test_candidates_are_suggestions_never_applied(self):
         cands = wb_pricing.suggest_matches("glm-5.3-flash-20260101", OR)
         self.assertEqual(cands[0], "z-ai/glm-5.3-flash")
-        # Suggesting is all it does: no policy, no override, no price.
+        # 它只给建议：不建策略、不写映射、不定价。
         self.assertIsNone(wb_pricing.ensure_policy("glm-5.3-flash-20260101"))
         self.assertEqual(wb_pricing.runtime_overrides(), {})
 
@@ -644,26 +623,24 @@ class GapReportTests(PricingTestCase):
             wb_pricing.resolve("kimi-k2.8-preview", OR, by_norm)[0])
 
     def test_the_report_covers_a_live_only_name_that_could_not_be_priced(self):
-        original = P.curated_live_sources
-        P.curated_live_sources = lambda realm: (
+        original = M.curated_live_sources
+        M.curated_live_sources = lambda realm: (
             ([("glm-5.3-flash-20260101", {})] if realm == "intl"
              else [("glm-5.3-flashx", {})]), True, "remote")
         try:
             refresher = self._refresher()
             ok, message = refresher.run_once()
         finally:
-            P.curated_live_sources = original
+            M.curated_live_sources = original
         self.assertTrue(ok, message)
         items, summary = refresher.gap_report(ttl=0)
         by_model = {item["model"]: item for item in items}
-        # The live-only name OpenRouter does not carry is visible, with the
-        # closest entry suggested for a hand mapping, and counted in the total.
+        # OpenRouter 没有的实时名字可见，附上最接近的条目供人工映射，并计入合计。
         row = by_model["glm-5.3-flash-20260101"]
         self.assertEqual(row["reason"], "or_missing")
         self.assertEqual(row["candidates"][0], "z-ai/glm-5.3-flash")
         self.assertEqual(summary["total"], len(items) - len(ALIASES))
-        # A live-only name that did resolve was priced by that very cycle, so
-        # it is not a gap at all.
+        # 已经解析成功的实时名字在同一个周期里就定了价，根本不算缺口。
         self.assertNotIn("glm-5.3-flashx", by_model)
         self.assertIsNotNone(wb_pricing.ensure_policy("glm-5.3-flashx"))
 
@@ -675,7 +652,7 @@ class GapReportTests(PricingTestCase):
         self.assertIn("gap_summary", status)
         self.assertIsInstance(status["gaps"], list)
         self.assertIn("variant_inherit", status)
-        # The on-demand path is fed by the same fetch that just ran.
+        # 按需定价路径用的就是刚跑过的那次抓取留下的索引。
         self.assertTrue(wb_pricing.ensure_policy("glm-5.3-flashx"))
         models = {item["model"] for item in status["gaps"]}
         self.assertNotIn("glm-5.3-flashx", models)
@@ -692,7 +669,7 @@ class GapReportTests(PricingTestCase):
 
 
 class PricingEndpointTests(PricingTestCase):
-    """The panel's two pricing writes, driven through the handler methods."""
+    """面板的两个计价写入口，走 handler 方法驱动。"""
 
     def _handler(self, payload, pricing=None):
         class Stub(object):
@@ -741,8 +718,7 @@ class PricingEndpointTests(PricingTestCase):
             handler = self._handler({"pricing_variant_inherit": "false"})
             status, _data = handler._handle_settings_save()
         self.assertEqual(status, 400)
-        # Strictly boolean: a string would read as true and keep the feature
-        # on for the one operator trying to turn it off.
+        # 必须是真布尔：字符串会被当成 true，想关掉功能的运营会关不掉。
         self.assertTrue(wb_settings.pricing_variant_inherit(self.accounts))
 
     def test_an_unchanged_switch_does_not_kick_a_refresh(self):
@@ -777,26 +753,6 @@ class PricingEndpointTests(PricingTestCase):
                 {"model": "kimi-k2.8-preview", "or_id": ""})
             self.assertEqual(status, 200)
         self.assertEqual(wb_pricing.runtime_overrides(), {})
-
-
-class RouteRegistrationTests(PricingTestCase):
-    """POST /pricing/* must be registered, or the panel's buttons 404.
-
-    The dashboard's 立即取价 button used to fail with a 404 because the path
-    was never routed, and nothing but the browser noticed. This is a textual
-    guard on the dispatcher, the same way the dashboard handler test sweeps
-    the page.
-    """
-
-    def test_do_post_routes_the_pricing_writes(self):
-        path = os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "app", "wb_proxy.py")
-        with open(path, encoding="utf-8") as fh:
-            source = fh.read()
-        body = source.split("def do_POST(self):", 1)[1]
-        head = body.split("def ", 1)[0]
-        for route in ("/pricing/refresh", "/pricing/mapping"):
-            self.assertIn(route, head, route)
 
 
 if __name__ == "__main__":

@@ -5,14 +5,9 @@
 // lastDailyChat / lastActivityReport 只在「今天确实做过、但这一版还没有历史行」时
 // 补一个中性状态。没有记录不等于失败。
 
-export const BUDDY_LABEL = 'Buddy 加油站';
+import { fmtDate } from '../../core/format.js';
 
-/** 本地日历日的 YYYY-MM-DD。 */
-export function localStamp(now = Date.now()) {
-  const d = new Date(now);
-  const pad = (n) => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
-}
+export const BUDDY_LABEL = 'Buddy 加油站';
 
 function startsToday(value, stamp) {
   return !!value && String(value).startsWith(stamp);
@@ -37,11 +32,10 @@ function fromRow(row, label, okText, failText) {
   };
 }
 
-/** 一个账号今天的活动状态。 */
 export function activityView(account, byUid, now = Date.now()) {
   const uid = String((account && account.uid) || '');
   const row = (byUid || {})[uid] || null;
-  const stamp = localStamp(now);
+  const stamp = fmtDate(now);
 
   if (account && account.realm === 'cn') {
     let gas = { kind: 'none', text: '未领', at: '', hint: '今天还没有 Buddy 加油站的记录' };
@@ -84,7 +78,7 @@ export function todaySummary(accounts, byUid, realm, now = Date.now()) {
 
 /** 国内版成长计划（连登活跃上报）今天的完成情况。 */
 export function streakSummary(accounts, now = Date.now()) {
-  const stamp = localStamp(now);
+  const stamp = fmtDate(now);
   const visible = (accounts || []).filter((account) => account.realm === 'cn' && account.enabled);
   const done = visible.filter((account) => startsToday(account.lastActivityReport, stamp)).length;
   return { total: visible.length, done };
@@ -101,4 +95,15 @@ export function summaryText(summary, doneWord, pendingWord) {
   if (summary.done === summary.total) return '今日' + doneWord + ' (' + summary.done + '/' + summary.total + ')';
   if (summary.done > 0) return '部分' + doneWord + ' (' + summary.done + '/' + summary.total + ')';
   return '今日' + pendingWord + ' (0/' + summary.total + ')';
+}
+
+/** 今日活动汇总卡的数值、色调与提示；账号页与任务页共用同一套口径。 */
+export function summaryStat(summary, { doneWord, pendingWord }) {
+  return {
+    value: summaryText(summary, doneWord, pendingWord),
+    tone: summary.total && summary.done === summary.total ? 'success' : 'warning',
+    hint: summary.pending.length
+      ? '待处理：' + namesOf(summary.pending).join('、')
+      : '今天全部完成',
+  };
 }

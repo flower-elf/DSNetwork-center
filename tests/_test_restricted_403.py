@@ -103,7 +103,7 @@ class StubPool(object):
 
 
 class ScriptedUpstream(object):
-    """按尝试顺序吐预设结果：异常抛出、FakeResp 返回。"""
+    """按尝试顺序给出默认结果：异常抛出、FakeResp 返回。"""
 
     def __init__(self, script):
         self.script = list(script)

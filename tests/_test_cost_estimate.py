@@ -16,6 +16,7 @@ os.makedirs(ACCOUNTS, exist_ok=True)
 
 import wb_cost
 import wb_proxy as P
+import wb_usage as U
 import wb_settings
 
 PASS = FAIL = 0
@@ -83,7 +84,7 @@ check("缓存价留空时按输入价计", wb_cost.clean({"models": [
     {"model": "glm-5.3", "input": 2, "output": 3}]})["models"][0]["cached_input"] == 2)
 
 print("[3] 按模型折算：官方价格、积分折算支出与省了多少")
-view = P.cost_estimate_view(realm="intl", range="today")
+view = U.cost_estimate_view(realm="intl", range="today")
 by_model = {item["model"]: item for item in view["models"]}
 deepseek = by_model["deepseek-v4.1-flash"]
 check("未命中 50 万 token 与命中 50 万 token 合计 1.02 元",
@@ -96,22 +97,22 @@ check("合计只算已定价模型", abs(view["summary"]["official_cny"] - 1.02)
 check("未定价模型列出来", view["unpriced_models"] == ["glm-5.3"], view["unpriced_models"])
 
 print("[4] 本月消耗包含本月早些时候的请求")
-analytics = P.compute_usage_analytics(realm="intl", range="today")
+analytics = U.compute_usage_analytics(realm="intl", range="today")
 check("今日窗口只有今天两行", analytics["summary"]["window"]["credit"] == 5,
       analytics["summary"]["window"]["credit"])
-month = P.month_credit_view(realm="intl")
+month = U.month_credit_view(realm="intl")
 check("本月消耗为本月全部三行", month["credit"] == 10, month)
-check("另一个出口没有消耗", P.month_credit_view(realm="cn")["credit"] == 0)
-check("两个出口合计为本月全部三行", P.month_credit_view(realm="all")["credit"] == 10)
+check("另一个出口没有消耗", U.month_credit_view(realm="cn")["credit"] == 0)
+check("两个出口合计为本月全部三行", U.month_credit_view(realm="all")["credit"] == 10)
 
 # 追加一行后必须从旧 offset 继续，不能因为文件变大就从头重扫。
-_ = P.month_credits(ttl=0)
-_start_offset = P._month_credit["offset"]
+_ = U.month_credits(ttl=0)
+_start_offset = U._month_credit["offset"]
 with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(row(now - 30, "deepseek-v4.1-flash", 1000, 0, credit=2),
                         ensure_ascii=False) + chr(10))
 _calls = []
-_real_center = P._center_fold_rows
+_real_center = U._center_fold_rows
 
 
 def _spy_center(offset, fold, *args, **kwargs):
@@ -119,27 +120,27 @@ def _spy_center(offset, fold, *args, **kwargs):
     return _real_center(offset, fold, *args, **kwargs)
 
 
-P._center_fold_rows = _spy_center
+U._center_fold_rows = _spy_center
 try:
-    totals, ok = P.month_credits(ttl=0)
+    totals, ok = U.month_credits(ttl=0)
 finally:
-    P._center_fold_rows = _real_center
+    U._center_fold_rows = _real_center
 check("追加行后从旧 offset 继续折叠", _calls == [_start_offset], _calls)
 check("追加行的积分进入本月合计", ok and totals.get("intl") == 12,
       (totals, ok))
 
-_after_offset = P._month_credit["offset"]
+_after_offset = U._month_credit["offset"]
 _calls = []
-P._center_fold_rows = _spy_center
+U._center_fold_rows = _spy_center
 try:
-    totals, ok = P.month_credits(ttl=0)
+    totals, ok = U.month_credits(ttl=0)
 finally:
-    P._center_fold_rows = _real_center
+    U._center_fold_rows = _real_center
 check("第二次读取从文件尾开始", _calls == [_after_offset], _calls)
 check("第二次读取不重复累加", ok and totals.get("intl") == 12, (totals, ok))
 
 print("[5] 调用量化为 0 的模型")
-empty = P.cost_estimate_view(realm="cn", range="today")
+empty = U.cost_estimate_view(realm="cn", range="today")
 check("没有请求时合计为 0", empty["summary"]["official_cny"] == 0, empty["summary"])
 check("没有请求时模型列表为空", empty["models"] == [], empty["models"])
 

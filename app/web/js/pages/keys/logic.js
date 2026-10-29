@@ -1,7 +1,7 @@
 // 密钥页的纯逻辑：状态判定、表单校验、请求体组装与客户端接入片段；界面状态与请求在 keys.js / keys/dialogs.js。
 import { fmtNumber, fmtCredit, fmtDate, fmtAgo, fmtUntil } from '../../core/format.js';
 
-export const KEY_STATUSES = ['ok', 'disabled', 'expired', 'quota_exceeded'];
+const KEY_STATUSES = ['ok', 'disabled', 'expired', 'quota_exceeded'];
 
 export const STATUS_TEXT = {
   ok: '正常',
@@ -42,7 +42,7 @@ export const EXPIRY_MODES_EDIT = [
 ];
 
 /** 服务端返回的用量块，字段缺失时按 0 处理。 */
-export function keyUsage(row) {
+function keyUsage(row) {
   const usage = (row && row.usage) || {};
   return {
     requests: Number(usage.requests) || 0,
@@ -52,11 +52,11 @@ export function keyUsage(row) {
   };
 }
 
-export function quotaTokens(row) {
+function quotaTokens(row) {
   return Math.max(0, Number(row && row.quota_tokens) || 0);
 }
 
-export function quotaCredit(row) {
+function quotaCredit(row) {
   return Math.max(0, Number(row && row.quota_credit) || 0);
 }
 
@@ -107,12 +107,12 @@ export function expiryHint(row, nowMs = Date.now()) {
   return fmtUntil(expiresAt, nowMs);
 }
 
-export function ipList(row) {
+function ipList(row) {
   const list = row && row.ip_allowlist;
   return Array.isArray(list) ? list.filter((v) => String(v || '').trim()) : [];
 }
 
-export function modelPatterns(row) {
+function modelPatterns(row) {
   const list = row && row.models;
   return Array.isArray(list) ? list.filter((v) => String(v || '').trim()) : [];
 }
@@ -155,7 +155,6 @@ export function lastUsedText(row, nowMs = Date.now()) {
   return usage.lastUsedAt ? fmtAgo(usage.lastUsedAt, nowMs) : '从未使用';
 }
 
-/** 各状态的密钥计数。 */
 export function summarizeKeys(rows, nowMs = Date.now()) {
   const out = { total: 0, ok: 0, disabled: 0, expired: 0, quota_exceeded: 0 };
   for (const row of rows || []) {
@@ -293,7 +292,7 @@ export function parseIpAllowlist(text) {
 // 新建 / 编辑表单
 // ---------------------------------------------------------------------------
 
-export function expiryDaysFromRow(row, nowMs = Date.now()) {
+function expiryDaysFromRow(row, nowMs = Date.now()) {
   const expiresAt = Number(row && row.expires_at) || 0;
   if (!expiresAt) return 30;
   const days = Math.ceil((expiresAt * 1000 - nowMs) / 86400000);

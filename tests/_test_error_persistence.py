@@ -1,19 +1,4 @@
-"""A stale error label must not survive a restart.
-
-An account's `lastError` / `cooldownUntil` are live state: they describe what
-the upstream said on the last request, not the credential. They used to be
-written into the account file and read back unconditionally, so an old
-"HTTP 429 (model throttled)" label came back on the panel after every restart
-even though the account had been serving fine for days - the in-memory clear
-(successful request -> clear_error()) never reached the file, and the file was
-only rewritten on unrelated events.
-
-The fix makes them runtime-only for the local credential file, exactly like
-`model_cooldowns` (see VOLATILE_FIELDS): __init__ ignores them, save() does not
-write them. Export still carries them for inspection, because an export is a
-snapshot of live state rather than a credential file.
-
-No network: accounts are built from dicts and written to a temp directory.
+"""测错误标签与冷却时间不跨重启存活。账号的 lastError / cooldownUntil 是运行时状态，描述上游上一次的应答，与凭据无关；本地凭据文件里 __init__ 忽略它们、save() 不写它们，与 model_cooldowns 同列在 VOLATILE_FIELDS。导出仍带上它们供排查，导出是运行时状态的快照。不联网，账号用字典构造，写入临时目录。用 python tests/run_all.py _test_error_persistence 运行。
 """
 import base64
 import json

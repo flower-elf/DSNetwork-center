@@ -1,12 +1,10 @@
-"""Shared lifecycle for the suites that start a process: a port, and a managed pair.
+"""启动进程的套件共用的生命周期工具：一个空闲端口与一对受管进程接口。
 
-Only what more than one suite needs lives here. Gateway readiness and every HTTP
-detail stay in _test_connection_reuse.py.
+只放多个套件都要用的东西。网关就绪探测与 HTTP 细节留在 _test_connection_reuse.py。
 
-spawn_managed() and stop_managed() are one pair: the spawn always puts the child
-in its own group/session, and the stop only takes a process started that way.
-That is what makes the tree cleanup unambiguous - there is no ownership flag to
-get wrong, and signalling the group can never reach the caller's own group.
+spawn_managed() 与 stop_managed() 是一对：spawn 总把子进程放进独立的进程组或
+会话，stop 只接受这样启动的进程。整棵树的清理因此没有歧义：不存在会弄错的
+归属标志，给进程组发信号也波及不到调用方自己的进程组。
 """
 import os
 import signal
@@ -17,7 +15,7 @@ STOP_TIMEOUT = 10.0
 
 
 def free_port():
-    """A loopback port that is free right now."""
+    """当前空闲的回环端口。"""
     sock = socket.socket()
     try:
         sock.bind(("127.0.0.1", 0))
@@ -27,9 +25,9 @@ def free_port():
 
 
 def spawn_managed(*args, **kwargs):
-    """Popen a child in its own group/session, so stop_managed() can take its tree.
+    """在独立进程组或会话里 Popen 子进程，stop_managed() 才能整棵树收掉。
 
-    Anything Popen accepts can be passed through; the two group flags are set here.
+    Popen 的参数原样透传，两个分组标志由这里设置。
     """
     kwargs.update({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
                   if os.name == "nt" else {"start_new_session": True})
@@ -37,20 +35,19 @@ def spawn_managed(*args, **kwargs):
 
 
 def stop_managed(proc, timeout=STOP_TIMEOUT):
-    """Stop a process from spawn_managed(), with everything it started.
+    """停掉 spawn_managed() 启动的进程，连同它启动的一切。
 
-    Returns True when the cleanup happened. False means the tree step did not:
-    a locked-down host can refuse it (taskkill answers "Access denied"), and on
-    Windows a pid that has already exited cannot be walked for its children at
-    all. The child itself is reaped either way.
+    清理成功返回 True。False 表示整树那一步没成：受限主机可以拒绝执行
+    （taskkill 回答 Access denied），Windows 上已退出的 pid 也无法再遍历其
+    子进程。子进程本身两种情况都会被收走。
     """
     if proc is None:
         return True
     if os.name == "nt":
         if proc.poll() is not None:
             return False
-        # Ask first, force if it does not go - and never wait on a pass that was
-        # rejected, which is what turns a refused taskkill into a 10s stall.
+        # 先请求、不肯退再强杀；被拒绝的那一轮绝不等待，否则一次被拒的
+        # taskkill 会拖成 10 秒停顿。
         walked = _taskkill(proc.pid, force=False)
         if walked:
             _reap(proc, timeout)
@@ -62,8 +59,8 @@ def stop_managed(proc, timeout=STOP_TIMEOUT):
         if proc.poll() is None:
             _reap(proc, 5, kill=True)
         return bool(walked and proc.poll() is not None)
-    # POSIX: the child leads its own group, so the group id is its pid - and the
-    # group outlives the leader, which is what reaches a grandchild left behind.
+    # POSIX：子进程自成进程组，组 id 就是它的 pid；组比组长活得久，因此能
+    # 波及被留下的孙进程。
     pgid = proc.pid
     try:
         os.killpg(pgid, signal.SIGTERM)
@@ -88,7 +85,7 @@ def _reap(proc, timeout, kill=False):
 
 
 def _taskkill(pid, force):
-    """True when taskkill accepted the request."""
+    """taskkill 接受请求时为 True。"""
     args = ["taskkill", "/T", "/PID", str(pid)]
     if force:
         args.insert(1, "/F")

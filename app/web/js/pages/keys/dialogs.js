@@ -30,6 +30,9 @@ export function openKeyDialog({ row = null, saveEntry, onCreated }) {
   let busy = false;
   // 出口 -> 启用中的模型 ID；下拉只列出这些模型。
   const enabledModels = {};
+  let modelMenuOpen = false;
+  let modelQuery = '';
+  let modelActive = -1;
 
   /** 当前出口可选的模型：绑定出口只列该出口，跟随默认出口时取两个出口的并集，已添加的不再列出。 */
   function pickableModels() {
@@ -37,6 +40,60 @@ export function openKeyDialog({ row = null, saveEntry, onCreated }) {
     const ids = new Set();
     realms.forEach((realm) => (enabledModels[realm] || []).forEach((id) => ids.add(id)));
     return [...ids].filter((id) => !form.patterns.includes(id)).sort();
+  }
+
+  function matchingModels() {
+    const query = modelQuery.trim().toLowerCase();
+    const models = pickableModels();
+    return query ? models.filter((id) => id.toLowerCase().includes(query)) : models;
+  }
+
+  function addModel(raw) {
+    form.patterns = addPatterns(form.patterns, raw);
+    form.patternsTouched = true;
+    modelQuery = '';
+    modelMenuOpen = false;
+    modelActive = -1;
+    ctl.update();
+  }
+
+  function onPatternKeydown(event) {
+    const matches = matchingModels();
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      modelMenuOpen = true;
+      modelActive = matches.length ? Math.min(modelActive + 1, matches.length - 1) : -1;
+      ctl.update();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      modelActive = Math.max(modelActive - 1, 0);
+      ctl.update();
+      return;
+    }
+    if (event.key === 'Escape') {
+      modelMenuOpen = false;
+      ctl.update();
+      return;
+    }
+    if (event.key !== 'Enter' && event.key !== ',') return;
+    event.preventDefault();
+    const picked = modelActive >= 0 && matches[modelActive];
+    addModel(picked || event.target.value);
+  }
+
+  function modelSuggestions() {
+    const matches = matchingModels();
+    return html`
+      <div class="model-suggest" role="listbox" aria-label="启用中的模型">
+        ${matches.length ? matches.map((id, index) => html`
+          <button type="button" class="model-option ${index === modelActive ? 'active' : ''}"
+                  role="option" aria-selected=${index === modelActive}
+                  @mousedown=${(e) => e.preventDefault()}
+                  @click=${() => addModel(id)}>${id}</button>`)
+        : html`<div class="model-empty">没有匹配的启用模型</div>`}
+      </div>`;
   }
 
   async function loadModels() {
@@ -58,7 +115,7 @@ export function openKeyDialog({ row = null, saveEntry, onCreated }) {
     title: form.editing ? '编辑密钥' : '新建密钥',
     desc: form.editing
       ? '修改名称、出口绑定、模型限制、有效期、配额与 IP 白名单；密钥内容留空表示不改动。'
-      : '密钥只在创建时完整显示一次，请立即保存。留空的字段表示不限制。',
+      : '密钥创建后仍可在列表里复制。留空的字段表示不限制。',
     body: () => html`
       <div class="grid-2 key-form-grid">
         <label class="field">
@@ -86,7 +143,7 @@ export function openKeyDialog({ row = null, saveEntry, onCreated }) {
                  .value=${form.keyValue} @input=${(e) => { form.keyValue = e.target.value; }}>
           <button class="btn btn-outline btn-sm" type="button" @click=${() => { form.keyValue = randomKeyValue(); ctl.update(); }}>随机生成</button>
         </div>
-        <span class="field-hint">至少 4 个字符。密钥明文只在创建成功时显示一次，之后只能通过列表里的复制按钮读取。</span>
+        <span class="field-hint">至少 4 个字符。</span>
       </div>
 
       <div class="field">
@@ -96,27 +153,21 @@ export function openKeyDialog({ row = null, saveEntry, onCreated }) {
             <span class="tag">${pattern}
               <button type="button" class="tag-remove" title="移除" @click=${() => { form.patterns = removePatternAt(form.patterns, index); form.patternsTouched = true; ctl.update(); }}>${icon('X')}</button>
             </span>`)}
-          <input class="tag-input" id="keyFormPattern" type="text" list="keyFormModelOptions" autocomplete="off"
-                 placeholder=${form.patterns.length ? '输入模型名后按回车' : '输入模型名后按回车，留空表示不限制，接受全部模型'}
-                 @change=${(e) => {
-                   // 从下拉里选中一项时直接添加；手工输入仍然等回车。
-                   if (!pickableModels().includes(e.target.value)) return;
-                   form.patterns = addPatterns(form.patterns, e.target.value);
-                   form.patternsTouched = true;
-                   e.target.value = '';
-                   ctl.update();
-                 }}
-                 @keydown=${(e) => {
-                   if (e.key !== 'Enter' && e.key !== ',' ) return;
-                   e.preventDefault();
-                   form.patterns = addPatterns(form.patterns, e.target.value);
-                   form.patternsTouched = true;
-                   e.target.value = '';
-                   ctl.update();
-                 }}>
-          <datalist id="keyFormModelOptions">
-            ${pickableModels().map((id) => html`<option value=${id}></option>`)}
-          </datalist>
+          <div class="tag-input-wrap">
+            <input class="tag-input" id="keyFormPattern" type="text" autocomplete="off"
+                   placeholder=${form.patterns.length ? '输入模型名后按回车' : '输入模型名后按回车，留空表示不限制，接受全部模型'}
+                   .value=${live(modelQuery)}
+                   @focus=${() => { modelMenuOpen = true; modelActive = -1; ctl.update(); }}
+                   @blur=${() => { if (modelMenuOpen) { modelMenuOpen = false; ctl.update(); } }}
+                   @input=${(e) => {
+                     modelQuery = e.target.value;
+                     modelMenuOpen = true;
+                     modelActive = -1;
+                     ctl.update();
+                   }}
+                   @keydown=${onPatternKeydown}>
+            ${modelMenuOpen ? modelSuggestions() : nothing}
+          </div>
         </div>
         <span class="field-hint">点击输入框可以从下拉里选择启用中的模型；也支持 * 通配，例如 deepseek*，按回车添加。点标签上的叉号移除。${form.editing && !form.patternsKnown ? ' 当前版本的服务端没有返回已保存的模型限制：留空表示保持原值，添加标签后保存会覆盖原值。' : ''}</span>
       </div>
@@ -205,7 +256,7 @@ export function openCreatedKeyDialog({ entry, origin }) {
     width: 620,
     icon: 'CircleCheck',
     title: '密钥创建成功',
-    desc: '请立即复制保存，关闭后将无法再次查看完整密钥。',
+    desc: '下面是这次创建的密钥与接入配置。',
     body: () => html`
       <div class="col" style="gap:12px">
         <div class="key-plain">

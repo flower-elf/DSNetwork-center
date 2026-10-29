@@ -1,32 +1,57 @@
-"""Tests for fingerprint sanitization and the DSH system opener rewrite."""
+"""指纹脱敏与 DSH system 自我介绍改写的契约。
+用 python tests/run_all.py fingerprint 运行。"""
 import json, os, sys, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits. This suite used to share
-# tests/_acc_test and tests/_use_test with _test_daily_chat.py and
-# _test_tasks_cache.py, which made them unsafe to run at the same time and left
-# directories in the repo after a run.
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  独立数据根目录
+# 每轮运行独立的数据目录，进程退出时自动删除，可与其他套件并行运行。
 _TMP = isolated_data_dirs("wb-fingerprint-")
 
 import wb_proxy as P
+import wb_sanitize as S
+import wb_settings
+
+
+class NeutralizationSwitchTests(unittest.TestCase):
+    def test_the_switch_reads_the_running_gateway_directory(self):
+        """脚本入口下活动实例是 __main__，开关必须读它的 ACCOUNTS_DIR。"""
+        import tempfile
+        import types
+
+        with tempfile.TemporaryDirectory() as tmp:
+            wb_settings.set_dsh_tool_neutralization(tmp, False)
+            fake = types.ModuleType("gateway-main")
+            fake.ACCOUNTS_DIR = tmp
+            fake.build_upstream_body = lambda payload: payload
+            saved = sys.modules.get("__main__")
+            sys.modules["__main__"] = fake
+            try:
+                self.assertFalse(S._dsh_tool_neutralization_enabled())
+                wb_settings.set_dsh_tool_neutralization(tmp, True)
+                self.assertTrue(S._dsh_tool_neutralization_enabled())
+            finally:
+                if saved is None:
+                    sys.modules.pop("__main__", None)
+                else:
+                    sys.modules["__main__"] = saved
+
 
 class FingerprintSanitizationTests(unittest.TestCase):
     def test_omo_junior_fingerprint_neutralized(self):
         fp = "Sisyphus-Junior - Focused executor from OhMyOpenCode"
-        self.assertEqual(P.sanitize_text(fp), "Sisyphus-Junior - Focused executor")
+        self.assertEqual(S.sanitize_text(fp), "Sisyphus-Junior - Focused executor")
 
-        self.assertEqual(P.sanitize_text(fp.lower()), "Sisyphus-Junior - Focused executor")
+        self.assertEqual(S.sanitize_text(fp.lower()), "Sisyphus-Junior - Focused executor")
 
         text = f"You are a subagent. {fp}. Complete the task."
         expected = "You are a subagent. Sisyphus-Junior - Focused executor. Complete the task."
-        self.assertEqual(P.sanitize_text(text), expected)
+        self.assertEqual(S.sanitize_text(text), expected)
 
     def test_omo_partial_tokens_untouched(self):
-        # Tokens alone stay untouched
-        self.assertEqual(P.sanitize_text("Sisyphus-Junior alone"), "Sisyphus-Junior alone")
-        self.assertEqual(P.sanitize_text("from OhMyOpenCode alone"), "from OhMyOpenCode alone")
-        self.assertEqual(P.sanitize_text("Sisyphus master agent"), "Sisyphus master agent")
+        # 单独出现的 token 不改写
+        self.assertEqual(S.sanitize_text("Sisyphus-Junior alone"), "Sisyphus-Junior alone")
+        self.assertEqual(S.sanitize_text("from OhMyOpenCode alone"), "from OhMyOpenCode alone")
+        self.assertEqual(S.sanitize_text("Sisyphus master agent"), "Sisyphus master agent")
 
     def test_sanitize_messages_covers_all_roles_and_tool_args(self):
         fp = "Sisyphus-Junior - Focused executor from OhMyOpenCode"
@@ -65,17 +90,17 @@ class DshSystemRewriteTests(unittest.TestCase):
     def test_both_sentences_rewritten(self):
         text = self.AI_SENTENCE + "\n" + self.CODING_SENTENCE
         self.assertEqual(
-            P.sanitize_dsh_system(text),
+            S.sanitize_dsh_system(text),
             "You are a helpful AI assistant.\n"
             "You are an assistant built on the deepseek-v4.1-flash model.")
 
     def test_case_insensitive(self):
-        self.assertEqual(P.sanitize_dsh_system(self.AI_SENTENCE.lower()),
+        self.assertEqual(S.sanitize_dsh_system(self.AI_SENTENCE.lower()),
                          "You are a helpful AI assistant.")
 
     def test_tool_contract_after_the_sentences_kept(self):
         text = self.AI_SENTENCE + "\nUse the read tool first."
-        self.assertEqual(P.sanitize_dsh_system(text),
+        self.assertEqual(S.sanitize_dsh_system(text),
                          "You are a helpful AI assistant.\n"
                          "Use the read tool first.")
 
@@ -84,13 +109,13 @@ class DshSystemRewriteTests(unittest.TestCase):
                      "You are an AI agent.",
                      "You are a coding agent powered by Acme Harness.",
                      "You are a coding agent powered by the acme-harness model."):
-            self.assertEqual(P.sanitize_dsh_system(text), text)
+            self.assertEqual(S.sanitize_dsh_system(text), text)
 
     def test_text_blocks_rewritten_without_mutating_input(self):
         content = [{"type": "text", "text": self.AI_SENTENCE},
                    {"type": "image", "source": "x"},
                    {"type": "text", "text": self.CODING_SENTENCE}]
-        out = P.sanitize_dsh_system(content)
+        out = S.sanitize_dsh_system(content)
         self.assertEqual(out[0]["text"],
                          "You are a helpful AI assistant.")
         self.assertEqual(out[1], {"type": "image", "source": "x"})
@@ -114,8 +139,8 @@ class DshSystemRewriteTests(unittest.TestCase):
 
     def test_rewrite_is_idempotent(self):
         for text in (self.AI_SENTENCE, self.CODING_SENTENCE):
-            once = P.sanitize_dsh_system(text)
-            self.assertEqual(P.sanitize_dsh_system(once), once)
+            once = S.sanitize_dsh_system(text)
+            self.assertEqual(S.sanitize_dsh_system(once), once)
 
     def test_build_upstream_body_rewrites_developer_message(self):
         body = P.build_upstream_body({
@@ -138,7 +163,7 @@ class DshGuiParagraphTests(unittest.TestCase):
          'naming another target, they mean this GUI.')
 
     def test_paragraph_rewritten(self):
-        self.assertEqual(P.sanitize_dsh_system(self.A + " " + self.B),
+        self.assertEqual(S.sanitize_dsh_system(self.A + " " + self.B),
                          self.CLEAN_A + " " + self.B)
 
     def test_developer_message_rewritten(self):
@@ -160,8 +185,8 @@ class DshGuiParagraphTests(unittest.TestCase):
         self.assertEqual(out[1]["content"], self.CLEAN_A + " " + self.B)
 
     def test_rewrite_is_idempotent(self):
-        once = P.sanitize_dsh_system(self.A)
-        self.assertEqual(P.sanitize_dsh_system(once), once)
+        once = S.sanitize_dsh_system(self.A)
+        self.assertEqual(S.sanitize_dsh_system(once), once)
 
 
 class DshPreemptiveTests(unittest.TestCase):
@@ -202,8 +227,8 @@ class DshPreemptiveTests(unittest.TestCase):
     )
 
     def test_system_client_identifiers_reduced(self):
-        self.assertEqual(P.sanitize_dsh_system(self.SOURCE), self.SOURCE_CLEAN)
-        self.assertEqual(P.sanitize_dsh_system(self.WEB), self.WEB_CLEAN)
+        self.assertEqual(S.sanitize_dsh_system(self.SOURCE), self.SOURCE_CLEAN)
+        self.assertEqual(S.sanitize_dsh_system(self.WEB), self.WEB_CLEAN)
 
     def test_assistant_brand_reduced(self):
         out = P.sanitize_messages([
@@ -258,10 +283,10 @@ class DshPreemptiveTests(unittest.TestCase):
 
     def test_rewrite_is_idempotent(self):
         for text in (self.SOURCE, self.WEB):
-            once = P.sanitize_dsh_system(text)
-            self.assertEqual(P.sanitize_dsh_system(once), once)
-        once = P.sanitize_dsh_user_context(self.RUNTIME)
-        self.assertEqual(P.sanitize_dsh_user_context(once), once)
+            once = S.sanitize_dsh_system(text)
+            self.assertEqual(S.sanitize_dsh_system(once), once)
+        once = S.sanitize_dsh_user_context(self.RUNTIME)
+        self.assertEqual(S.sanitize_dsh_user_context(once), once)
 
     def test_wire_body_carries_both_rewrites(self):
         body = P.build_upstream_body({
@@ -302,32 +327,32 @@ class DshFileReferenceTests(unittest.TestCase):
     )
 
     def test_first_two_sentences_rewritten(self):
-        out = P.sanitize_dsh_system(self.A + " " + self.B)
+        out = S.sanitize_dsh_system(self.A + " " + self.B)
         self.assertEqual(out, self.A_REWORDED + " " + self.B)
         self.assertNotIn(self.A + " " + self.B, out)
 
     def test_current_paragraph_keeps_the_rest_verbatim(self):
         paragraph = self.A + " " + self.B + " " + self.TAIL
         self.assertEqual(
-            P.sanitize_dsh_system(paragraph),
+            S.sanitize_dsh_system(paragraph),
             self.A_REWORDED + " " + self.B + " " + self.TAIL)
 
     def test_older_paragraph_rewritten(self):
         self.assertEqual(
-            P.sanitize_dsh_system(self.PARA_OLD),
+            S.sanitize_dsh_system(self.PARA_OLD),
             self.PARA_OLD.replace(self.A, self.A_REWORDED, 1))
 
     def test_sentence_a_alone_rewritten(self):
-        self.assertEqual(P.sanitize_dsh_system(self.A), self.A_REWORDED)
+        self.assertEqual(S.sanitize_dsh_system(self.A), self.A_REWORDED)
 
     def test_case_insensitive(self):
         text = (self.A + " " + self.B).lower()
-        self.assertEqual(P.sanitize_dsh_system(text),
+        self.assertEqual(S.sanitize_dsh_system(text),
                          self.A_REWORDED + " " + self.B.lower())
 
     def test_rewrite_is_idempotent(self):
-        once = P.sanitize_dsh_system(self.A + " " + self.B)
-        self.assertEqual(P.sanitize_dsh_system(once), once)
+        once = S.sanitize_dsh_system(self.A + " " + self.B)
+        self.assertEqual(S.sanitize_dsh_system(once), once)
         self.assertEqual(once.count("paths that the user"), 1)
 
     def test_unrelated_text_untouched(self):
@@ -337,7 +362,7 @@ class DshFileReferenceTests(unittest.TestCase):
             self.B,
             "Tokens prefixed with @ are file references.",
         ):
-            self.assertEqual(P.sanitize_dsh_system(text), text, text)
+            self.assertEqual(S.sanitize_dsh_system(text), text, text)
 
     def test_developer_message_rewritten(self):
         body = P.build_upstream_body({
@@ -497,7 +522,7 @@ class DshToolAliasTests(unittest.TestCase):
 
     def test_aliases_apply_to_tools_choice_history_and_prompts(self):
         payload = self._payload()
-        reverse = P.apply_dsh_tool_aliases(payload)
+        reverse = S.apply_dsh_tool_aliases(payload)
         self.assertEqual(reverse, {"read_job": "job_output"})
         self.assertEqual(payload["tools"][0]["function"]["name"], "read_job")
         self.assertEqual(payload["tools"][0]["function"]["parameters"],
@@ -519,7 +544,7 @@ class DshToolAliasTests(unittest.TestCase):
             "messages": [{"role": "system",
                           "content": "Use job_output or present."}],
         }
-        reverse = P.apply_dsh_tool_aliases(payload)
+        reverse = S.apply_dsh_tool_aliases(payload)
         self.assertEqual(reverse, {"read_job": "job_output"})
         self.assertEqual(payload["messages"][0]["content"],
                          "Use read_job or present.")
@@ -535,7 +560,7 @@ class DshToolAliasTests(unittest.TestCase):
                 "id": "call_1", "type": "function",
                 "function": {"name": "job_output", "arguments": "{}"}}]}],
         }
-        self.assertEqual(P.apply_dsh_tool_aliases(payload), {})
+        self.assertEqual(S.apply_dsh_tool_aliases(payload), {})
         self.assertEqual([t["function"]["name"] for t in payload["tools"]],
                          ["job_output", "read_job"])
         self.assertEqual(payload["tool_choice"], "job_output")
@@ -615,7 +640,7 @@ class DshToolAliasTests(unittest.TestCase):
             "skill", "subagent", "subagent_fork", "todo_write", "update_goal",
             "web_fetch", "web_search", "workflow", "working_directory", "write",
         }
-        self.assertEqual(names & set(P.DSH_TOOL_ALIASES.values()), set())
+        self.assertEqual(names & set(S.DSH_TOOL_ALIASES.values()), set())
 
 
 if __name__ == "__main__":

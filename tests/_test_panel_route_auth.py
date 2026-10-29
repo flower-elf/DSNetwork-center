@@ -1,33 +1,14 @@
-"""Management routes answer to the panel session, not to an API key.
+"""管理路由只认面板会话，不认 API key。
 
-A management endpoint drawn in the web panel is reached with a panel session.
-An API key is the credential for the model APIs; holding one is not a substitute
-for the panel password. The two boundaries are separate, and the dispatcher is
-where they are enforced - which is exactly why the two halves of one surface can
-drift apart. The update-status read used to answer to `_authorized()` while
-POST /updates/check was already panel-only, so a caller holding nothing but a
-key could read the running version and the release status.
+看板的管理端点用面板会话访问，API key 只是模型 API 的凭证，不能代替面板密码。两道
+边界分开，都在调度器执行，同一个界面的两半可能各自漂移，所以每个路由都按同一张表
+检查。
 
-This suite drives the real do_GET/do_POST over an in-memory socket, so what it
-pins is the dispatcher's behaviour rather than any handler's internals, and it
-covers the management surface as a whole rather than the one route that was
-fixed. Every route in the tables below must give the same four answers: an
-anonymous caller is refused, an API key alone is refused, a wrong panel token
-is refused, and a real panel session gets through.
+本套件在内存 socket 上驱动真实 do_GET/do_POST，固定调度器的行为，覆盖整个管理面。
+表里每个路由都给四种回答：匿名拒绝、仅有 API key 拒绝、面板 token 错误拒绝、真面板
+会话放行。/agents 自己不带任何检查，只靠调度器前缀保护：契约是调度器执行的边界。
 
-The pricing table is the other half of that story: its writes were always
-panel-only while the read answered to `_authorized()`, so an API key alone
-could read the estimate and the resolved project-local file paths behind it.
-The read is on the panel boundary now, and it is covered below like the rest.
-
-/agents is in the tables for a different reason: that read carries no check of
-its own, neither key nor session, and is protected only by the dispatcher's
-prefix. The contract is the boundary the dispatcher enforces, not the check a
-handler remembers to add.
-
-No network: the model listing and the release checker are both injected.
-
-    python tests/_test_panel_route_auth.py
+不联网：模型清单与发布检查器都用注入。用 python tests/_test_panel_route_auth.py 运行。
 """
 import email
 import io
@@ -40,11 +21,12 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  独立数据根目录
 
 _TMP = isolated_data_dirs("wb-panel-route-auth-")
 
-import wb_proxy as proxy  # noqa: E402
+import wb_proxy as proxy
+import wb_http as H  # noqa: E402
 import wb_settings  # noqa: E402
 
 KEY = "panel-route-key"
@@ -54,12 +36,12 @@ LATEST = "1.6.18"
 
 
 def injected_models(realm=None):
-    """The model listing, without walking anything upstream."""
+    """模型清单，不访问任何上游。"""
     return [(MODEL_ID, {"name": "Injected"})]
 
 
 class StubUpdates(object):
-    """Stands in for the release checker: the boundary is what is under test."""
+    """顶替发布检查器：被测的是边界。"""
 
     def __init__(self):
         self.manual_checks = 0
@@ -77,11 +59,10 @@ class StubUpdates(object):
 
 
 class DispatchRequest(proxy.Handler):
-    """A real Handler driven over an in-memory socket.
+    """内存 socket 上驱动真实的 Handler。
 
-    Which boundary refuses a management route is a property of the dispatcher,
-    not of the endpoint method, so the request has to go through the real
-    do_GET/do_POST for the test to mean anything.
+    哪道边界拒绝管理路由属于调度器的性质，与端点方法无关，所以请求必须走真实
+    的 do_GET/do_POST，测试才有意义。
     """
 
     def __init__(self, path, headers=None, command="GET", body=b""):
@@ -111,28 +92,27 @@ class DispatchRequest(proxy.Handler):
         pass
 
     def dispatch(self):
-        """Run the real dispatcher and hand back status, JSON body, raw body."""
+        """运行真实调度器，返回状态码、JSON 内容与原始内容。"""
         getattr(self, "do_" + self.command)()
         raw = self.wfile.getvalue().decode("utf-8")
         try:
             payload = json.loads(raw) if raw else None
         except ValueError:
-            payload = None      # the log export is plain text, not a document
+            payload = None      # 日志导出是纯文本，不是文档
         return self.status, payload, raw
 
 
 class BoundaryCase(unittest.TestCase):
-    """One management surface, one isolated settings directory per test."""
+    """同一个管理面，每个用例一套独立设置目录。"""
 
-    # Management reads the panel draws, none of which is a model API.
+    # 看板展示的管理读取路由，没有一个是模型 API。
     PANEL_ONLY_GET = ("/settings", "/updates", "/logs", "/tasks", "/scheduler",
                       "/accounts", "/usage", "/pricing", "/proxy/slots",
                       "/activity/history", "/agents", "/accounts/credits/grants")
-    # The same boundary on a reply that is a file rather than a document.
+    # 返回文件的路由也在同一道边界上。
     PANEL_ONLY_DOWNLOAD = ("/logs/export",)
-    # The management writes, each guarded by its own panel check in do_POST.
-    # /updates/check is the half of the update pair that was already correct;
-    # the two pricing writes are the ones the panel's own buttons post to.
+    # 管理写入路由，各自在 do_POST 里有面板检查。/updates/check 是更新一对里的
+    # 写入侧；两个 pricing 写入是看板自己的按钮提交的。
     PANEL_ONLY_POST = ("/updates/check", "/pricing/refresh",
                        "/pricing/mapping", "/settings/save",
                        "/catalog/refresh")
@@ -149,15 +129,15 @@ class BoundaryCase(unittest.TestCase):
         request = DispatchRequest(path, headers=headers, command=command, body=body)
         with mock.patch.multiple(proxy, ACCOUNTS_DIR=self.directory, API_KEY=None,
                                  POOL=None, PRICING=None, UPDATES=self.updates,
-                                 SCHEDULER=None, fetch_models=injected_models):
+                                 SCHEDULER=None), \
+                mock.patch.multiple(H, fetch_models=injected_models):
             return request.dispatch()
 
     def assert_refused(self, path, headers, command="GET", body=b""):
         status, payload, _raw = self.dispatch(path, headers, command, body)
         self.assertEqual(status, 401, "%s %s answered %s" % (command, path, status))
         self.assertIn(PANEL_ONLY_MESSAGE, payload["error"]["message"])
-        # The refusal is the whole reply: nothing the route would have reported
-        # may ride along with it.
+        # 拒绝本身就是完整回复：路由本会报告的内容不得随行泄露。
         self.assertEqual(list(payload), ["error"],
                          "%s %s leaked a payload with its refusal" % (command, path))
         return payload
@@ -178,7 +158,7 @@ class BoundaryCase(unittest.TestCase):
 
 
 class PanelOnlyGetTests(BoundaryCase):
-    """Every management read is closed to everything but a panel session."""
+    """每个管理读取路由只对面板会话开放。"""
 
     def test_an_anonymous_caller_is_refused(self):
         for path in self.PANEL_ONLY_GET:
@@ -201,8 +181,7 @@ class PanelOnlyGetTests(BoundaryCase):
                 self.assert_reached(path)
 
     def test_the_log_export_is_on_the_same_boundary(self):
-        # A reply that is a file rather than a document still carries the same
-        # four answers.
+        # 返回文件的路由也带同样四种回答。
         path = self.PANEL_ONLY_DOWNLOAD[0]
         self.assert_refused(path, {})
         self.assert_refused(path, self.key_only())
@@ -210,8 +189,7 @@ class PanelOnlyGetTests(BoundaryCase):
         self.assert_reached(path)
 
     def test_the_update_status_is_not_readable_with_a_key(self):
-        # The incident this contract comes from, asserted on the payload rather
-        # than the code: the release status must not appear in a refusal.
+        # 契约对应的事故在载荷上断言：拒绝回复里不得出现发布状态。
         payload = self.assert_refused("/updates", self.key_only())
         self.assertNotIn("current_version", json.dumps(payload))
         body = self.assert_reached("/updates")
@@ -219,7 +197,7 @@ class PanelOnlyGetTests(BoundaryCase):
 
 
 class PanelOnlyPostTests(BoundaryCase):
-    """The management writes are on the same boundary, not a special case."""
+    """管理写入在同一道边界上，没有特例。"""
 
     def test_an_anonymous_caller_is_refused(self):
         for path in self.PANEL_ONLY_POST:
@@ -243,8 +221,7 @@ class PanelOnlyPostTests(BoundaryCase):
                 self.assert_reached(path, command="POST", body=b"{}")
 
     def test_the_manual_update_check_is_panel_only_too(self):
-        # The other half of the update pair. It takes no body, so it is also the
-        # case that proves the refusal happens before any body is read.
+        # 更新一对的另一半。它不带请求体，也证明拒绝发生在读请求体之前。
         self.assert_refused("/updates/check", self.key_only(), command="POST")
         body = self.assert_reached("/updates/check", command="POST")
         self.assertIs(body["ok"], True)
@@ -316,7 +293,7 @@ class RemoteAgentsTests(BoundaryCase):
 
 
 class ApiKeySurfaceTests(BoundaryCase):
-    """The key boundary is unchanged, and it is a different check."""
+    """key 边界保持不变，它是另一道检查。"""
 
     def test_an_api_key_still_reaches_the_model_listing(self):
         status, body, _raw = self.dispatch("/v1/models", self.key_only())
@@ -324,18 +301,17 @@ class ApiKeySurfaceTests(BoundaryCase):
         self.assertEqual([m["id"] for m in body["data"]], [MODEL_ID])
 
     def test_an_anonymous_api_call_is_refused_as_a_key_problem(self):
-        # Not the panel message: the model APIs never moved onto the session
-        # boundary, and a caller who forgot a key must be told that.
+        # 不给面板提示语：模型 API 从未迁到会话边界，忘带 key 的调用方要收到
+        # key 相关的错误。
         status, body, _raw = self.dispatch("/v1/models")
         self.assertEqual(status, 401)
         self.assertIn("invalid api key", body["error"]["message"])
         self.assertNotIn(PANEL_ONLY_MESSAGE, body["error"]["message"])
 
     def test_a_panel_session_also_satisfies_the_key_check(self):
-        # Why the panel boundary cannot be `_authorized()`: a session passes that
-        # check too, so it cannot tell a session from a key. This is the property
-        # that made the update-status mistake possible, and it is documented
-        # behaviour rather than something this suite introduces.
+        # 面板边界不能用 `_authorized()` 的原因：会话也能通过该检查，它分不出
+        # 会话与 key。更新状态读错边界靠的正是这个性质；这是已记录的行为，
+        # 本套件只是把它固定下来。
         status, _body, _raw = self.dispatch("/v1/models", self.session())
         self.assertEqual(status, 200)
 

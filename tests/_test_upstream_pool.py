@@ -36,7 +36,7 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402
 _TMP = isolated_data_dirs("wb-upstream-pool-")
 
 import wb_accounts            # noqa: E402
-import wb_proxy               # noqa: E402  (_apply_stream_idle_timeout 的对齐)
+import wb_proxy               # noqa: E402  （调用其 _apply_stream_idle_timeout）
 import wb_settings            # noqa: E402
 import wb_upstream_pool as pool  # noqa: E402
 
@@ -182,18 +182,20 @@ class FakeUpstream(object):
                     break
                 method, target = parts[0], parts[1]
                 headers = {}
+                names = []
                 while True:
                     h = fh.readline(65536)
                     if h in (b"\r\n", b"\n", b""):
                         break
                     name, _, value = h.decode("latin-1").partition(":")
                     headers[name.strip().lower()] = value.strip()
+                    names.append(name.strip())
                 length = int(headers.get("content-length") or 0)
                 if length:
                     fh.read(length)
                 with self.lock:
                     self.requests.append({"method": method, "target": target,
-                                          "headers": headers})
+                                          "headers": headers, "names": names})
                 if not self._respond(conn, method, target):
                     break
         except Exception:
@@ -267,7 +269,7 @@ class FakeUpstream(object):
 
 
 def fetch(url, timeout=5, proxy="", data=None, headers=None, method=None):
-    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    req = pool.Request(url, data=data, method=method, headers=headers or {})
     return wb_accounts.urlopen(req, timeout=timeout, proxy=proxy)
 
 
@@ -693,13 +695,15 @@ try:
               sdelta(before))
         check("走的是原来的 urllib 路径（Connection: close）",
               all(q["headers"].get("connection") == "close" for q in srv14.requests))
-        # 同一条请求，两种路径各发一次：除 Connection 外，线上头完全一致
+        # 同一条请求，两种路径各发一次：除 Connection 外，线上头完全一致，头名保持调用方写法
         def post_once():
             body = b'{"model":"x","messages":[]}'
             resp = fetch(srv14.base() + "/echo", data=body, method="POST", headers={
                 "Content-Type": "application/json",
                 "Authorization": "Bearer t",
                 "X-User-Id": "u1",
+                "X-API-Key": "ck_test.secret",
+                "x-client-platform": "web",
                 "User-Agent": "WorkBuddy/5.5.2",
             })
             resp.read()
@@ -723,6 +727,10 @@ try:
     check("POST 的 Content-Length 一致",
           h_pool.get("content-length") == h_urllib.get("content-length")
           == "27", (h_pool.get("content-length"), h_urllib.get("content-length")))
+    for side, request in (("池路径", srv14.requests[-2]), ("原路径", srv14.requests[-1])):
+        check("%s按调用方写法发送头名" % side,
+              {"X-API-Key", "x-client-platform", "Content-Type", "X-User-Id"}
+              <= set(request["names"]), request["names"])
 
     # ------------------------------------------------------------------
     print("[15] 系统代理旁路：命中旁路清单时直连（与 urllib 的 proxy_bypass 一致）")

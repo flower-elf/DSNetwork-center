@@ -8,6 +8,8 @@ import { initTheme, themeMode, setThemeMode } from './core/theme.js';
 import { mountDock, setDockActive, dockMode, setDockMode } from './ui/dock.js';
 import { installPaletteShortcut, paletteTrigger } from './ui/palette.js';
 import { openDialog } from './ui/dialog.js';
+import { updateAvailable } from './core/update.js';
+import { openUpdateDialog } from './ui/update.js';
 import { toast, toastError } from './ui/toast.js';
 import { showLogin } from './pages/login.js';
 
@@ -67,6 +69,33 @@ async function pollGateway() {
   drawTopbar();
 }
 
+// 每次打开面板最多提示一次新版本；登录成功与恢复会话都走这里。
+let updatePrompted = false;
+const UPDATE_POLL_MS = 500;
+const UPDATE_POLL_TRIES = 20;
+
+async function promptUpdateIfAny() {
+  if (updatePrompted) return;
+  // 启动检查可能在登录时还没跑完（checking=true）：有界等它，别就此放弃。
+  for (let attempt = 0; attempt < UPDATE_POLL_TRIES; attempt += 1) {
+    let status;
+    try {
+      status = await getJSON('/updates');
+    } catch {
+      return;
+    }
+    if (status && status.checking && attempt + 1 < UPDATE_POLL_TRIES) {
+      await new Promise((resolve) => setTimeout(resolve, UPDATE_POLL_MS));
+      continue;
+    }
+    // 自动检查关闭时不打扰：旧结果可能是关闭前留下的。
+    if (!status || !status.enabled || !updateAvailable(status)) return;
+    updatePrompted = true;
+    openUpdateDialog(status);
+    return;
+  }
+}
+
 function openPanelOptions() {
   const status = getState().panelStatus;
   const ctl = openDialog({
@@ -108,7 +137,7 @@ function openPanelOptions() {
       <div class="col">
         <span class="section-label">链接</span>
         <div class="pill-group">
-          <a class="pill-btn" href="https://github.com/flower-elf/workbuddy2api-center" target="_blank" rel="noopener noreferrer">${icon('Github')}GitHub 项目仓库</a>
+          <a class="pill-btn" href="https://github.com/flower-elf/DSNetwork-center" target="_blank" rel="noopener noreferrer">${icon('Github')}GitHub 项目仓库</a>
           <button type="button" class="pill-btn" @click=${() => { ctl.close(); navigate('keys'); }}>${icon('KeyRound')}客户端接入</button>
         </div>
       </div>
@@ -129,7 +158,7 @@ async function logout() {
 async function onDockAction(id) {
   if (id === 'panel') openPanelOptions();
   if (id === 'add-account') {
-    const dialogs = await import('./pages/accounts/dialogs.js');
+    const dialogs = await import('./pages/accounts/dialogs/add.js');
     dialogs.openAddAccountDialog();
   }
 }
@@ -156,6 +185,7 @@ async function startShell() {
     setDockActive(currentRoute().path);
     pollGateway();
     armGatewayTimer();
+    promptUpdateIfAny();
   } catch (err) {
     // 失败必须放开这把锁：否则登录成功后 startShell 直接返回，面板永远停在
     // 禁用的登录框上。

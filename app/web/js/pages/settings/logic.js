@@ -102,7 +102,6 @@ export function parseHours(text, { label = '时段' } = {}) {
   return { ok: true, value: out.sort((a, b) => a - b) };
 }
 
-/** 时段数组的展示文本。 */
 export function hoursText(hours) {
   return (hours || []).map((hour) => String(hour)).join(', ');
 }
@@ -150,7 +149,6 @@ function costEstimateShape(form) {
   });
 }
 
-/** 表单草稿有没有未保存的改动。 */
 export function costEstimateDirty(form, baseline) {
   if (!baseline) return false;
   return costEstimateShape(form) !== costEstimateShape(baseline);
@@ -213,6 +211,27 @@ export function validatePasswordChange(current, next) {
   if (!String(next == null ? '' : next)) return '请填写新密码。';
   if (String(next).length < 4) return '新密码至少 4 位。';
   return '';
+}
+
+/** 更新状态的一行说明：当前版本、最新版本与上次检查的结果。 */
+export function updateStatusHint(status) {
+  if (!status) return { text: '正在读取更新状态…', warn: false };
+  if (status.error) return { text: '读取更新状态失败：' + status.error, warn: true };
+  const parts = [];
+  if (status.current_version) parts.push('当前 v' + status.current_version);
+  if (status.latest_version) parts.push('最新 v' + status.latest_version);
+  if (status.update_available) {
+    parts.push('有新版本');
+    return { text: parts.join(' · '), warn: true };
+  }
+  if (status.last_error) {
+    parts.push('上次检查失败：' + status.last_error);
+    return { text: parts.join(' · '), warn: true };
+  }
+  if (status.latest_version) parts.push('已是最新');
+  else parts.push(status.enabled ? '尚未检查' : '自动检查已关闭');
+  if (status.last_attempt) parts.push('上次检查 ' + status.last_attempt);
+  return { text: parts.join(' · '), warn: false };
 }
 
 // ---------------------------------------------------------------------------

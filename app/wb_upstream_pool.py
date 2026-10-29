@@ -1,30 +1,15 @@
 # -*- coding: utf-8 -*-
 """上游连接复用池：按 (scheme, host, port, 代理串) 复用 http.client 的 keep-alive 连接。
 
-为什么要自建池：CPython 的 urllib.request.AbstractHTTPHandler.do_open 会写死
-headers["Connection"] = "close"（它担心 addinfourl 读不干净持久连接），所以在
-urllib 这条路上连接**不可能**复用——每个出站请求都要重新走一次 TCP+TLS 握手。
-真机（OpenWrt / Celeron N2840）裸握手实测：TCP connect 55.5ms、TCP+TLS 118.0ms
-（4 次取最小），是请求路径上最大的一笔开销，比全部本地 CPU 项之和还大；多轮对话
-每轮都要付一遍。这里绕开 do_open，直接拿 http.client 的连接来复用，其余语义
-（代理 CONNECT、Proxy-Authorization、Host / Content-Length / Accept-Encoding 头、
-HTTPError / URLError 的映射、重定向跟随）逐条与 urllib 一致，差别只有
-Connection: keep-alive 这一处，见下面各函数的注释。
-
-什么时候**不**走池（抛 PoolBypass，由 wb_accounts.urlopen 回退到 urllib 原路径，
-行为与改动前完全一致）：
-  - URL scheme 不是 http(s)；
-  - 代理串不是 HTTP 代理（socks5:// 等，urllib 的 ProxyHandler 本来也不支持）；
-  - 上游回了 3xx：重定向跟随（含相对 Location、换主机、POST 降级 GET）是
-    urllib 一整条 HTTPRedirectHandler 的职责，不在这里重写，交回原路径处理。
-
-总开关：面板「高级」设置里的「上游连接复用」，默认开启。
-容量/回收：WB_UPSTREAM_POOL_SIZE（默认每键 2 条）、WB_UPSTREAM_POOL_IDLE（空闲
-秒数，默认 90）。超龄回收在每次取用/归还时对**所有**池键各扫一遍（见
-_KeepAlivePool._sweep_locked）：只回收被碰到过的那个键的话，一个之后再没人用过
-的键（比如某个代理出口的账号被禁用）会把连接一直留到进程退出。
+urllib 的 do_open 强制 Connection: close，每次出站都要重走 TCP+TLS 握手，所以这里
+直接取 http.client 的连接复用，其余语义逐条与 urllib 一致。URL 不是 http(s)、
+代理不是 HTTP 代理、上游回 3xx 时抛 PoolBypass，回退到 urllib。
+开关在面板「高级」的「上游连接复用」（默认开启）；容量与空闲秒数见
+WB_UPSTREAM_POOL_SIZE、WB_UPSTREAM_POOL_IDLE（每键 2 条、空闲 90 秒）。超龄回收要扫
+所有池键，否则冷键的连接会留到进程退出。
 """
 import base64
+import functools
 import http.client
 import io
 import os
@@ -113,18 +98,12 @@ def _resolve_ssl_factory():
 def shared_ssl_context():
     """进程级共享的出站 TLS context（懒建，只建一次）。
 
-    http.client 在 context=None 时**每建一条连接就调一次**
-    ssl._create_default_https_context()。真机实测 create_default_context()
-    单次 20.4ms（要解析 121 张 CA 证书），而 45 个账号各走自己的代理就是 45 个
-    池键，连接来回过期重连时这笔开销按次付。更要紧的是 OpenSSL 的客户端会话
-    缓存挂在 SSLContext 上：每换一个新 context 就等于放弃 TLS session
-    resumption，每次握手都退化成完整握手。
-
-    一份进程级 context 同时省掉这两笔。校验设置完全由 stdlib 那条工厂决定
-    （默认 check_hostname=True、verify_mode=CERT_REQUIRED、走系统 CA 库），
-    **不放松任何校验**；工厂被换掉时缓存自动作废，所以那条接缝仍然有效。
-
-    懒建而不是导入时建：测试与只跑面板的进程根本不出站，不该为它们白付 20ms。
+    http.client 在 context=None 时每建一条连接就调一次 create_default_context，
+    池里的连接反复过期重连时这笔开销按次付。更要紧的是 OpenSSL 的客户端会话
+    缓存挂在 SSLContext 上，每换一个新 context 就放弃 TLS session resumption。
+    校验设置完全由 stdlib 那条工厂决定（默认 check_hostname=True、
+    verify_mode=CERT_REQUIRED、走系统 CA 库），不放松任何校验；工厂被换掉时缓存自动
+    作废。懒建是因为测试与只跑面板的进程不出站，不该为此白付建 context 的开销。
     """
     global _SSL_CONTEXT, _SSL_CONTEXT_FACTORY
     ident, build = _resolve_ssl_factory()
@@ -137,11 +116,79 @@ def shared_ssl_context():
     return _SSL_CONTEXT
 
 
+class Request(urllib.request.Request):
+    """按调用方给出的写法发送头名。
+
+    urllib 存头时把头名改成首字母大写，发送前再逐段首字母大写，X-API-Key 会变成
+    X-Api-Key。官方客户端按原样发送，身份模块给出的写法就是线上写法。
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.wire_names = {}
+        super().__init__(*args, **kwargs)
+
+    def add_header(self, key, val):
+        super().add_header(key, val)
+        self.wire_names[key.capitalize()] = key
+
+
+def _wire_name(req, name):
+    """头名的线上写法；普通 urllib Request 保持 urllib 的写法。"""
+    return getattr(req, "wire_names", {}).get(name.capitalize()) or name.title()
+
+
+class _WireNames:
+    """把 urllib do_open 改写过的头名换回调用方的写法。"""
+
+    def __init__(self, *args, wire_names, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._wire_names = wire_names
+
+    def putheader(self, header, *values):
+        super().putheader(self._wire_names.get(header, header), *values)
+
+
+class _WireHTTPConnection(_WireNames, http.client.HTTPConnection):
+    pass
+
+
+class _WireHTTPSConnection(_WireNames, http.client.HTTPSConnection):
+    pass
+
+
+_WIRE_CONNECTIONS = {
+    http.client.HTTPConnection: _WireHTTPConnection,
+    http.client.HTTPSConnection: _WireHTTPSConnection,
+}
+
+
+class _WireHandler:
+    def do_open(self, http_class, req, **http_conn_args):
+        names = {name.title(): name
+                 for name in getattr(req, "wire_names", {}).values()}
+        factory = functools.partial(_WIRE_CONNECTIONS[http_class], wire_names=names)
+        return super().do_open(factory, req, **http_conn_args)
+
+
+class _WireHTTPHandler(_WireHandler, urllib.request.HTTPHandler):
+    pass
+
+
+class _WireHTTPSHandler(_WireHandler, urllib.request.HTTPSHandler):
+    pass
+
+
+def build_opener(*handlers):
+    """urllib opener，发送头名的写法与连接池一致。"""
+    return urllib.request.build_opener(*handlers, _WireHTTPHandler(), _WireHTTPSHandler())
+
+
 class PoolBypass(Exception):
     """这个请求不走连接池，调用方回退到 urllib 原路径。
 
     只用于「还没发出去」的情形（URL/代理不受支持）和「收到 3xx 需要跟随」的情形。
-    调用方（wb_accounts.urlopen）捕获后原样走原来的 opener，行为与改动前一致。
+    调用方（wb_accounts.urlopen）捕获后原样走原来的 opener，错误与重定向语义都
+    交回 urllib。
     """
 
 
@@ -168,11 +215,11 @@ class _TransportFailure(Exception):
 
 
 def _stale_connection_error(exc):
-    """这条失败是不是「对端已经把关掉的连接交还给我们」的典型形状。
+    """这条失败是否属于「对端把关掉的连接交还给我们」的典型形状。
 
     只认连接级错误：写失败（EPIPE/ECONNRESET）或状态行都没读到就 EOF
-    （RemoteDisconnected，ConnectionResetError 的子类）。超时不算——那是对端
-    还活着但没按时回答，重试语义由上层原有的逻辑决定，不在这里插手。
+    （RemoteDisconnected，ConnectionResetError 的子类）。超时不算，那是对端还
+    活着但没按时回答，重试语义由上层原有逻辑决定。
     """
     if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
         return True
@@ -188,17 +235,10 @@ def _stale_connection_error(exc):
 def _connection_looks_alive(conn):
     """空闲连接是否还干净、可用。
 
-    探活是必需的：空闲连接被 CDN/网关按自己的空闲超时单方面关掉是常态，而 TCP
-    要到下一次写才可能发现（写进本地缓冲会“成功”，读响应时才看到 RST）。把
-    「发现」提前到发送之前，请求就不会被发上一条已死的连接，也就轮不到重试。
-
-    判据：把 socket 切成非阻塞试读一个字节——
-      - BlockingIOError / SSLWantReadError：对端什么都没发，干净的空闲连接；
-      - 读到 b""（FIN / close_notify）、抛连接错误、或读到数据（协议已污染）：
-        都不能复用，判死。读到的那一个字节反正属于要丢弃的连接，无所谓。
-    不用 select：交付运行时是精简过的 CPython，import 面越小越好；这里只需要
-    「有数据没有」这一个事实，非阻塞试读就是最短路径。TLS 缓冲里还压着没读走的
-    数据同样不干净，先查 pending()。
+    必需探活：空闲连接被 CDN/网关按自己的超时单方面关掉是常态，TCP 要到下一次
+    写才可能发现。判据是在发送前把 socket 切成非阻塞试读一个字节：BlockingIOError
+    或 SSLWantReadError 为干净；读到 b""、抛连接错误、读到数据都判死。不用 select
+    是为了缩小 import 面；TLS 缓冲里还压着数据同样不干净。
     """
     sock = getattr(conn, "sock", None)
     if sock is None:
@@ -307,7 +347,7 @@ class _KeepAlivePool(object):
         now = time.monotonic()
         ttl = _idle_ttl()
         with self._lock:
-            self._sweep_locked(now)
+            self._sweep_locked(now, ttl)
             entries = self._idle.get(key)
             while entries:
                 cand, ts = entries.pop()      # LIFO：最近用过的优先复用
@@ -345,24 +385,26 @@ class _KeepAlivePool(object):
     def release(self, key, conn):
         """把读完的连接放回池；已满就关掉最旧的一条腾位置。"""
         cap = _pool_size()
+        ttl = _idle_ttl()
+        now = time.monotonic()
         with self._lock:
-            self._sweep_locked(time.monotonic())
+            self._sweep_locked(now, ttl)
             entries = self._idle.setdefault(key, [])
             while len(entries) >= cap:
                 oldest, _ts = entries.pop(0)
                 self.stats["evicted"] += 1
                 self._close(oldest)
-            entries.append((conn, time.monotonic()))
+            entries.append((conn, now))
 
-    def _sweep_locked(self, now):
+    def _sweep_locked(self, now, ttl):
         """把所有池键里超龄的空闲连接关掉（调用方必须持有 self._lock）。
 
         每次取用/归还都扫一遍全部键，而不是只扫本次碰到的那个：否则一条连接
         所属的键之后再没人用过时（账号被禁用、代理被换掉），它会一直占着
         socket 直到进程退出。池键数就是「目标 × 代理出口」的组合数，量级是
-        个位数，全扫一遍是几次 dict 遍历，热路径上可以忽略。
+        个位数，全扫一遍是几次 dict 遍历，热路径上可以忽略。ttl 由调用方读好
+        传入：_idle_ttl 每次要解析环境变量，一次取用/归还不必读两遍。
         """
-        ttl = _idle_ttl()
         for key in list(self._idle):
             alive = []
             for conn, ts in self._idle[key]:
@@ -413,12 +455,10 @@ _POOL = _KeepAlivePool()
 
 
 def stats():
-    """池的累计计数快照。"""
     return dict(_POOL.stats)
 
 
 def idle_counts():
-    """每个池键的空闲连接数快照。"""
     return _POOL.idle_counts()
 
 
@@ -479,7 +519,7 @@ def _split_proxy(proxy):
         return None
     if port and not port.isdigit():
         # 非数字端口：urllib 的 HTTPConnection 会抛 InvalidURL。这里当作「池处理
-        # 不了」，回退原路径，错误形状与改动前完全一致。
+        # 不了」，回退原路径，错误形状仍由 urllib 决定。
         return None
     return {"scheme": "http", "user": user or "", "password": password or "",
             "host": host, "port": port}
@@ -502,9 +542,9 @@ def _proxy_bypassed(host):
 
     urllib 的 proxy_open 在套用代理前会先问 proxy_bypass(host)：Windows 看注册表
     的 ProxyOverride（默认常含 <local> / 127.*），Linux 看 no_proxy 环境变量。
-    池这边必须做同样的判断，否则同一份配置下「改动前直连、改动后走代理」——
-    出站路径变了，而这不是本 PR 要改的东西。旁路命中时按直连处理，连接也归到
-    直连那个池键，与不配代理的账号共用。
+    池这边必须做同样的判断，否则同一份配置下会出现一处直连、一处走代理，出站
+    路径就分成两条了。旁路命中时按直连处理，连接也归到直连那个池键，与不配代理
+    的账号共用。
     """
     try:
         return bool(urllib.request.proxy_bypass(host))
@@ -555,11 +595,10 @@ def _request_headers(req, scheme, proxy_info):
     """按 urllib AbstractHTTPHandler.do_open 的规则拼请求头。
 
     唯一的差别是 Connection: keep-alive（do_open 写死 close，那正是连接没法复用
-    的原因）。头名与**顺序**都按 do_open 的方式排：unredirected 侧先（自动
+    的原因）。头的**顺序**按 do_open 的方式排：unredirected 侧先（自动
     Content-type、Host、默认 User-agent——Content-Length 由 http.client 自动补在
     最前，恰好就是 urllib 里它的位置），再是调用方给的头，最后 Connection。
-    这样线上字节与改动前逐字节相同（除了 Connection 的值），上游若对头顺序有
-    讲究也不会踩到。
+    头名按 _wire_name 取线上写法，与 build_opener 的回退路径一致。
     """
     headers = dict(req.unredirected_hdrs)
     data = req.data
@@ -581,7 +620,7 @@ def _request_headers(req, scheme, proxy_info):
         if auth:
             headers["Proxy-authorization"] = auth
     headers["Connection"] = "keep-alive"
-    return {name.title(): value for name, value in headers.items()}
+    return {_wire_name(req, name): value for name, value in headers.items()}
 
 
 def _exchange(conn, req, selector, scheme, proxy_info, key, reused):
@@ -659,13 +698,9 @@ def urlopen(req, timeout=30, proxy=""):
     """连接池版 urlopen。签名与 wb_accounts.urlopen 一致。
 
     失败语义与 urllib 一致：HTTP >= 400 抛 HTTPError（body 已读好，挂在 BytesIO
-    上，exc.read()/read(n)/fp 的行为不变）；发送阶段的 OSError 抛 URLError；
-    其余 http.client 异常原样上抛。
-
-    复用连接被对端关掉时重试一次（仅此一次，且用新连接重试）：
-    发送阶段失败时请求体没有发完，对端不可能执行一个完整请求，任意方法都可重试；
-    状态行阶段失败意味着请求已完整发出，只有 GET/HEAD 允许重试，POST 直接上抛，
-    避免重复计费或重复签到。
+    上），发送阶段的 OSError 抛 URLError，其余 http.client 异常原样上抛。
+    复用连接被对端关掉时只重试一次，且改用新连接：发送阶段失败时请求体没有发完，
+    任意方法都可重试；状态行阶段失败说明请求已完整发出，只有 GET/HEAD 允许重试。
     """
     scheme, host, port, selector = _target_parts(req.full_url)
     proxy_raw = str(proxy or "").strip()

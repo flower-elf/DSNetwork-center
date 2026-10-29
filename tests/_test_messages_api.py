@@ -1,6 +1,4 @@
-"""The Anthropic Messages endpoint (/v1/messages): the request/reply converters, both streaming pipelines and the pipeline the setting selects.
-
-Everything runs offline: the upstream is a fake iterable, the handler is a stub carrying the real methods.
+"""测 Anthropic Messages 接口 /v1/messages：请求与应答的转换、两条流式管线，以及设置选中的管线。全程离线，上游是假的可迭代对象，handler 是带真实方法的桩。用 python tests/run_all.py _test_messages_api 运行。
 """
 
 import json
@@ -16,6 +14,8 @@ _TMP = tempfile.mkdtemp(prefix="wb-messages-")
 os.environ["ACCOUNTS_DIR"] = os.path.join(_TMP, "accounts")
 os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 
+
+import wb_usage as U
 import wb_proxy as proxy
 import wb_settings as settings
 
@@ -53,7 +53,7 @@ class FakeAccount(object):
 
 
 class ChatChunks(object):
-    """A chat stream that thinks, talks and then calls one tool."""
+    """一条先思考、再说话、最后调用工具的聊天流。"""
 
     @staticmethod
     def tool_call():
@@ -80,7 +80,7 @@ class ChatChunks(object):
 
 
 class MessagesHandler(object):
-    """Enough of the real Handler to drive /v1/messages offline."""
+    """够离线驱动 /v1/messages 的最小真实 Handler。"""
 
     _handle_messages = proxy.Handler._handle_messages
     _anthropic_error = proxy.Handler._anthropic_error
@@ -151,7 +151,7 @@ class MessagesHandler(object):
 
 
 def frames_of(handler):
-    """The SSE frames the handler wrote, as (event, payload) pairs."""
+    """把 handler 写出的 SSE 帧解析成 (event, payload) 对。"""
     out = []
     text = b"".join(handler.written).decode("utf-8", "replace")
     for block in text.split("\n\n"):
@@ -179,15 +179,15 @@ def base_request(**overrides):
 
 
 def run_handler(payload, chunks, mode="openai-completions"):
-    """Drive one full request through the stub handler against fake chunks."""
+    """用假数据块驱动桩 handler 跑完整个请求。"""
     with tempfile.TemporaryDirectory(prefix="wb-messages-dir-") as directory:
         settings.set_messages_format(directory, mode)
         handler = MessagesHandler(payload)
         with mock.patch.multiple(proxy, ACCOUNTS_DIR=directory,
                                  open_upstream=lambda body, session_key=None, target_realm=None, lease=None:
-                                     (FakeUpstream(sse(chunks)), FakeAccount(), None),
-                                 record_usage=lambda *a, **k: None,
-                                 record_error=lambda *a, **k: None):
+                                     (FakeUpstream(sse(chunks)), FakeAccount(), None)), \
+                mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                                    record_error=lambda *a, **k: None):
             handler._handle_messages(payload)
         return handler
 
@@ -260,7 +260,7 @@ class ConvertersTest(unittest.TestCase):
         self.assertEqual(kinds, ["message", "message", "function_call",
                                  "function_call_output"])
         self.assertEqual(responses["tools"][0]["name"], "get_weather")
-        # the Responses pipeline turns it into the chat body the upstream gets
+        # Responses 管线把它转成上游收到的 chat 请求体
         chat = proxy.responses_to_chat(responses)
         self.assertEqual(chat["messages"][-1]["role"], "tool")
         self.assertEqual(chat["messages"][-1]["content"], "18C")
@@ -359,8 +359,8 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(frames[0][0], "message_start")
         self.assertEqual(frames[-1][0], "message_stop")
         self.assertEqual(frames[0][1]["message"]["role"], "assistant")
-        # message_start carries no token estimate; the real counts arrive in
-        # message_delta, which is what Anthropic clients render.
+        # message_start 不带 token 估计，真实计数在 message_delta 里，
+        # Anthropic 客户端渲染的就是它。
         self.assertEqual(frames[0][1]["message"]["usage"]["input_tokens"], 0)
         text = "".join(p["delta"]["text"] for _, p in frames
                        if p and p.get("type") == "content_block_delta")
@@ -419,9 +419,9 @@ class EndpointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="wb-messages-dir-") as directory:
             settings.set_messages_format(directory, "openai-completions")
             with mock.patch.multiple(proxy, ACCOUNTS_DIR=directory,
-                                     open_upstream=refuse,
-                                     record_usage=lambda *a, **k: None,
-                                     record_error=lambda *a, **k: None):
+                                     open_upstream=refuse), \
+                    mock.patch.multiple(U, record_usage=lambda *a, **k: None,
+                                        record_error=lambda *a, **k: None):
                 handler._handle_messages(payload)
         self.assertEqual(handler.status[0], ("status", 429))
         self.assertIn(("Retry-After", "42"), handler.status)

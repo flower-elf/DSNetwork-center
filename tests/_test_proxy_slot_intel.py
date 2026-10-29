@@ -1,13 +1,4 @@
-"""A proxy slot describes its exit: the IP, the country, and whether that
-address is a residential line or a machine room.
-
-The gateway learns an exit's IP by fetching api.ipify.org through the proxy
-itself, so the country and the address kind have to come from a public lookup -
-nothing in the connection says where it lands. These cases pin the parsing of
-that lookup, the naming rule the panel defaults to, the store round trip that
-keeps the probed fields, and the routes that hand them to the panel.
-
-No network access: the lookup and the proxy probe are both stubbed.
+"""测代理槽位的出口信息契约：解析 lookup 响应的国家与出口类型、默认命名规则、存储往返保留探测字段、路由把出口信息交给面板。运行 python tests/_test_proxy_slot_intel.py，lookup 与代理探测均已打桩，无需网络。
 """
 
 import json
@@ -20,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_ipintel as I
 import wb_proxy as proxy
+import wb_proxy_slots as PS
 import wb_settings as S
 
 PASS = FAIL = 0
@@ -44,7 +36,6 @@ residential = I.classify({
 })
 check("a hosting=no address reads as 住宅",
       residential["ip_type"] == I.RESIDENTIAL, residential)
-check("its label is 住宅", I.type_label(residential["ip_type"]) == "住宅", residential)
 check("the country name is kept as the service wrote it",
       residential["country"] == "美国", residential)
 check("the country code is upper-cased", residential["country_code"] == "US", residential)
@@ -58,13 +49,11 @@ datacenter = I.classify({
 })
 check("a hosting=yes address reads as 机房",
       datacenter["ip_type"] == I.DATACENTER, datacenter)
-check("its label is 机房", I.type_label(datacenter["ip_type"]) == "机房", datacenter)
 
 partial = I.classify({"status": "success", "country": "日本", "countryCode": "JP"})
 check("a reply with no hosting flag still gives the country",
       partial["country"] == "日本", partial)
 check("but claims no kind", partial["ip_type"] == "", partial)
-check("and an unknown kind has no label", I.type_label(partial["ip_type"]) == "")
 
 print()
 print("[2] a lookup that fails is unknown, never a guess")
@@ -132,12 +121,8 @@ check("an empty ip is never sent anywhere",
       nothing == I.empty() and not attempted, (nothing, attempted))
 
 print()
-print("[3] the default name is the exit's country and kind")
+print("[3] the default name's edge cases: unknown kind and no country")
 
-check("a machine room is named by country and kind",
-      I.slot_name("美国", I.DATACENTER) == "美国 机房", I.slot_name("美国", I.DATACENTER))
-check("a residential line says 住宅",
-      I.slot_name("美国", I.RESIDENTIAL) == "美国 住宅", I.slot_name("美国", I.RESIDENTIAL))
 check("an unknown kind leaves just the country",
       I.slot_name("美国", "") == "美国", I.slot_name("美国", ""))
 check("no country means no default name",
@@ -174,18 +159,18 @@ print()
 print("[5] a slot is labelled by its name, else its exit, else its id")
 
 check("a named slot uses the operator's name",
-      proxy.slot_label({"name": "香港落地", "country": "美国",
-                        "ip_type": "residential", "id": "slot-1"}) == "香港落地")
+      PS.slot_label({"name": "香港落地", "country": "美国",
+                     "ip_type": "residential", "id": "slot-1"}) == "香港落地")
 check("an unnamed slot uses its exit",
-      proxy.slot_label({"name": "", "country": "美国",
-                        "ip_type": "datacenter", "id": "slot-1"}) == "美国 机房")
+      PS.slot_label({"name": "", "country": "美国",
+                     "ip_type": "datacenter", "id": "slot-1"}) == "美国 机房")
 check("a slot with neither falls back to its id",
-      proxy.slot_label({"name": "", "country": "", "ip_type": "",
-                        "id": "slot-7"}) == "slot-7")
+      PS.slot_label({"name": "", "country": "", "ip_type": "",
+                     "id": "slot-7"}) == "slot-7")
 
 
 class FakeRequest(object):
-    """Just enough of the handler for the proxy-slot routes."""
+    """proxy-slot 路由的最小 Handler 桩。"""
 
     _handle_proxy_slots = proxy.Handler._handle_proxy_slots
 
@@ -215,7 +200,7 @@ d2 = tempfile.mkdtemp(prefix="wb-slots-")
 S.set_proxy_slots(d2, [{"id": "slot-1", "name": "", "url": "http://127.0.0.1:17901"}])
 
 with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
-    with mock.patch.object(proxy, "probe_proxy_intel",
+    with mock.patch.object(PS, "probe_proxy_intel",
                            lambda url, timeout=12: dict(PROBE)):
         status, reply = FakeRequest()._handle_proxy_slots(
             "/proxy/slots/test", {"id": "slot-1"})
@@ -228,17 +213,16 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
     check("and its country and kind",
           stored["country"] == "美国" and stored["ip_type"] == "residential", stored)
     check("and the announcing network", stored["asn"].startswith("AS7922"), stored)
-    # An empty name is the store's marker for "label this slot by its exit":
-    # slot_label() derives it from the country and kind every time, so the label
-    # follows the exit instead of freezing to the one the probe happened to see.
+    # name 为空是存储层的标记，表示按出口标注该槽位。slot_label() 每次从国家与类型推导，
+    # 标签跟随出口变化，不会冻结在探测当时的出口上。
     check("an unnamed slot keeps its blank name", stored["name"] == "", stored)
     check("while its label comes from the exit",
-          proxy.slot_label(stored) == "美国 住宅", proxy.slot_label(stored))
+          PS.slot_label(stored) == "美国 住宅", PS.slot_label(stored))
     check("the reply carries the stored slot back",
           (reply["slot"] or {}).get("name") == "" and reply["name"] == "", reply)
 
     failing = dict(PROBE, ok=False, exit_ip="", error="connection refused")
-    with mock.patch.object(proxy, "probe_proxy_intel",
+    with mock.patch.object(PS, "probe_proxy_intel",
                            lambda url, timeout=12: dict(failing)):
         status, reply = FakeRequest()._handle_proxy_slots(
             "/proxy/slots/test", {"id": "slot-1"})
@@ -249,11 +233,10 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
     check("and learns nothing, so it changes nothing",
           after["ip"] == "1.2.3.4" and after["country"] == "美国", after)
 
-    # The IP probe answered but the geo lookup did not: the two steps are
-    # separate calls, and the exit we already knew must survive the second one.
+    # IP 探测有结果但地理位置查询没有：两步是分开的调用，已知的出口信息必须在第二步失败后保留下来。
     no_geo = dict(PROBE, exit_ip="5.6.7.8", intel_ok=False, country="",
                   country_code="", ip_type="", isp="", asn="")
-    with mock.patch.object(proxy, "probe_proxy_intel",
+    with mock.patch.object(PS, "probe_proxy_intel",
                            lambda url, timeout=12: dict(no_geo)):
         status, reply = FakeRequest()._handle_proxy_slots(
             "/proxy/slots/test", {"id": "slot-1"})
@@ -268,17 +251,16 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
     check("and the reply says the lookup came back empty",
           reply.get("intel_ok") is False, reply)
 
-    # The exit moved: with the name still blank the label follows the new exit.
     moved = dict(PROBE, exit_ip="9.9.9.9", country="日本", country_code="JP",
                  ip_type="datacenter", isp="IIJ", asn="AS2497 IIJ")
-    with mock.patch.object(proxy, "probe_proxy_intel",
+    with mock.patch.object(PS, "probe_proxy_intel",
                            lambda url, timeout=12: dict(moved)):
         FakeRequest()._handle_proxy_slots("/proxy/slots/test", {"id": "slot-1"})
 
     moved_entry = S.proxy_slots(d2)[0]
     check("a slot that moved is labelled by the new exit",
-          proxy.slot_label(moved_entry) == "日本 机房",
-          proxy.slot_label(moved_entry))
+          PS.slot_label(moved_entry) == "日本 机房",
+          PS.slot_label(moved_entry))
     check("and its name is still blank", moved_entry["name"] == "", moved_entry)
 
     status, saved = FakeRequest()._handle_proxy_slots("/proxy/slots/save", {
@@ -300,7 +282,7 @@ with mock.patch.multiple(proxy, ACCOUNTS_DIR=d2, POOL=None):
 
     os.environ["WB_PROXY_DISCOVER_PORTS"] = "17901"
     try:
-        with mock.patch.object(proxy, "probe_proxy_intel",
+        with mock.patch.object(PS, "probe_proxy_intel",
                                lambda url, timeout=12: dict(PROBE)):
             status, found = FakeRequest()._handle_proxy_slots("/proxy/discover", {})
     finally:

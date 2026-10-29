@@ -1,27 +1,26 @@
 # 便携版 ZIP 的受管文件清单（issue #28，供 #29 的自更新消费）。
 #
-# 每行一个仓库相对路径，`#` 起头的行与空行忽略。**不要写通配符**：
-# 这份清单是"这个 release 拥有哪些文件"的权威答案，#29 只会替换/删除
-# 这里列出的文件，没列出来的用户文件一律不动。
+# 每行一个仓库相对路径，`#` 起头的行与空行忽略。**不要写通配符**：这份清单是
+# 「这个 release 拥有哪些文件」的权威答案，#29 只替换或删除这里列出的文件，
+# 没列出的用户文件一律不动。
 #
-# 本仓库把网关放在 app/ 下：启动脚本跑 app/wb_proxy.py，看板静态资源由
-# app/wb_proxy.py 的 WEB_DIR（app/web）提供，所以这两部分都必须随包。
-#
-# 除这些文件之外，打包器还会放进两样东西（都不是本清单的行）：
-#   python/                精简 CPython 运行时，见 release/portable_runtime.py；
-#                          release_tools.py portable --runtime 强制要求它存在，
-#                          缺了它就不是便携包而是源码包了
-#   release-manifest.json  包内标记文件，写死版本、root、受管文件与受保护目录
+# 网关与看板都在 app/ 下（启动脚本跑 app/wb_proxy.py，看板静态资源由它的
+# WEB_DIR 即 app/web 提供），两者都必须随包。清单之外打包器还放两样东西，都
+# 不是本清单的行：
+#   python/                精简 CPython 运行时，见 release/portable_runtime.py，
+#                          release_tools.py portable --runtime 强制要求存在，
+#                          缺了它产出的只是源码包
+#   release-manifest.json  包内标记文件，写明版本、root、受管文件与受保护目录
 # 整包放在 root 目录（默认 wb-proxy-center/）下，与绿色包同名。
 #
 # 刻意不包含：
-#   accounts/  usage/      —— 用户数据，属于受保护路径，永不作为替换目标
-#                            （程序启动时自己 os.makedirs，不需要占位文件）
-#   Dockerfile / docker-compose* / quick-deploy.sh —— Docker 部署路径，不进便携包
-#   tests/  .github/  release/  wrt/  scripts/ —— 开发与发布工具，不进便携包
+#   accounts/  usage/      用户数据，属于受保护路径，永不作为替换目标，程序启动
+#                          时自己 os.makedirs，不需要占位文件
+#   Dockerfile / docker-compose* / quick-deploy.sh   Docker 部署路径
+#   tests/  .github/  release/  wrt/  scripts/       开发与发布工具
 #
-# tests/_test_release_assets.py 会断言：app/ 下的每个源码/看板文件都在这份
-# 清单里（新增模块或静态资源忘了登记会直接红），且清单里的路径都存在。
+# tests/_test_release_assets.py 断言 app/ 下每个源码与看板文件都在清单里
+# （忘了登记会直接红），且清单里的路径都存在。
 
 LICENSE
 
@@ -44,21 +43,37 @@ app/wb_activity.py
 app/wb_agents.py
 app/wb_atrest.py
 app/wb_catalog.py
+app/wb_chat_routes.py
 app/wb_cost.py
 app/wb_egress.py
 app/wb_fingerprint.py
+app/wb_host.py
+app/wb_http.py
 app/wb_identity.py
+app/wb_ids.py
 app/wb_ipintel.py
 app/wb_logstore.py
 app/wb_messages_responses.py
+app/wb_models.py
 app/wb_modelsdev.py
+app/wb_panel_routes.py
 app/wb_pricing.py
 app/wb_probes.py
 app/wb_prompt.py
 app/wb_proxy.py
+app/wb_proxy_slots.py
+app/wb_sanitize.py
 app/wb_scheduler.py
 app/wb_settings.py
+app/wb_startup.py
 app/wb_tasks.py
+app/wb_translate.py
+app/wb_usage.py
+app/wb_usage_cache.py
+app/wb_usage_perf.py
+app/wb_usage_recent.py
+app/wb_usage_remaining.py
+app/wb_usage_trend.py
 app/wb_updates.py
 app/wb_upstream_pool.py
 app/wb_webagent.py
@@ -91,12 +106,19 @@ app/web/js/core/routes.js
 app/web/js/core/storage.js
 app/web/js/core/store.js
 app/web/js/core/theme.js
+app/web/js/core/update.js
 app/web/js/main.js
 app/web/js/pages/accounts.js
 app/web/js/pages/accounts/actions.js
 app/web/js/pages/accounts/activity.js
-app/web/js/pages/accounts/dialogs.js
+app/web/js/pages/accounts/dialogs/add.js
+app/web/js/pages/accounts/dialogs/desktop.js
+app/web/js/pages/accounts/dialogs/exclude.js
+app/web/js/pages/accounts/dialogs/import.js
+app/web/js/pages/accounts/dialogs/note.js
+app/web/js/pages/accounts/flows.js
 app/web/js/pages/accounts/logic.js
+app/web/js/pages/accounts/view.js
 app/web/js/pages/credits.js
 app/web/js/pages/credits/logic.js
 app/web/js/pages/dashboard.js
@@ -123,9 +145,13 @@ app/web/js/pages/settings/gateway.js
 app/web/js/pages/settings/logic.js
 app/web/js/pages/settings/maintenance.js
 app/web/js/pages/settings/proxy.js
+app/web/js/pages/settings/rows.js
 app/web/js/pages/settings/security.js
+app/web/js/pages/settings/update.js
 app/web/js/pages/stats.js
 app/web/js/pages/stats/logic.js
+app/web/js/pages/stats/range.js
+app/web/js/pages/stats/tables.js
 app/web/js/pages/tasks.js
 app/web/js/pages/tasks/logic.js
 app/web/js/theme-boot.js
@@ -136,6 +162,7 @@ app/web/js/ui/dock.js
 app/web/js/ui/palette-logic.js
 app/web/js/ui/palette.js
 app/web/js/ui/toast.js
+app/web/js/ui/update.js
 app/web/js/ui/widgets.js
 app/web/vendor/chart-4.5.1.umd.min.js
 app/web/vendor/chart.js.LICENSE.md

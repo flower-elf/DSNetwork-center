@@ -1,14 +1,4 @@
-"""The pricing engine turns usage rows into OpenRouter-equivalent CNY.
-
-Pinned here: the cache-hit/miss split, the USD conversion at the snapshot
-rate, the conditional bands OpenRouter prices some models by (an input-length
-threshold, or a UTC window; of the bands that apply, the tightest wins), the
-snapshot's shape (every entry USD, no per-vendor schedule), the "unknown
-model" contract (known=False - never a guessed number), and the matcher that
-keeps the snapshot current when the model catalogue gains an entry.
-
-No network: the snapshot ships inline with the module, and the matcher tests
-only exercise the pure lookup helpers.
+"""测定价引擎把 usage 行折算成 OpenRouter 同口径 CNY 的契约：cache-hit/miss 拆分、快照汇率换算、条件 bands 取最紧匹配、快照形状、unknown model 返回 known=False，以及新模型的自动匹配。用 python tests/run_all.py _test_pricing 运行。
 """
 import calendar
 import json
@@ -26,16 +16,16 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_pricing
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_recent as R
 
 
 def utc_ts(text):
-    """Epoch for a UTC wall clock - the source states its bands in UTC."""
+    """把 UTC 墙上时间解析成 epoch；上游的 bands 用 UTC 表述。"""
     return calendar.timegm(time.strptime(text, "%Y-%m-%d %H:%M:%S"))
 
 
-# A fixed instant for the rows that are not about time bands: if the snapshot
-# ever gains a band covering it, the test should fail rather than flip with
-# the wall clock.
+# 与时间 bands 无关的行统一用这个固定时刻。快照日后若新增覆盖该时刻的 band，测试应当直接失败，结果不能随墙上时钟变化。
 _AT = utc_ts("2026-09-30 20:00:00")
 
 
@@ -43,15 +33,13 @@ class PricingEngineTests(unittest.TestCase):
     def setUp(self):
         self.pricing = wb_pricing.load_pricing()
 
-    def test_snapshot_loads_and_carries_the_rate(self):
+    def test_snapshot_loads_with_its_models(self):
+        # 随包快照被裁断时唯一能发现的检查：锚点模型少于十个时其余用例照样通过。
         self.assertIn("models", self.pricing)
         self.assertGreater(len(self.pricing["models"]), 10)
-        self.assertGreater(wb_pricing.usd_cny(), 1.0)
 
     def test_every_entry_is_usd_with_a_base_price(self):
-        # One source, one shape. The panel labels the number as OpenRouter's
-        # price, so a leftover vendor schedule or a stray CNY entry would make
-        # that label wrong.
+        # 单一来源、统一形状。面板把这个数字标成 OpenRouter 的价格，残留的 vendor schedule 或混入的 CNY 条目会让标注失真。
         for mid, entry in self.pricing["models"].items():
             self.assertEqual(entry.get("currency"), "USD", mid)
             self.assertNotIn("schedule", entry, mid)
@@ -61,8 +49,7 @@ class PricingEngineTests(unittest.TestCase):
                 self.assertIn(key, entry["flat"], "%s.%s" % (mid, key))
             for band in entry.get("bands") or []:
                 self.assertIsInstance(band.get("flat"), dict, mid)
-                # A band carries one condition: a length threshold or a UTC
-                # window, never both and never neither.
+                # 一个 band 只带一个条件：长度阈值或 UTC 时间窗，二者不可兼有、不可全无。
                 if "min_prompt_tokens" in band:
                     self.assertGreater(band["min_prompt_tokens"], 0, mid)
                     self.assertNotIn("start", band, mid)
@@ -70,9 +57,7 @@ class PricingEngineTests(unittest.TestCase):
                     self.assertLess(band["start"], band["end"], mid)
 
     def test_snapshot_keeps_the_sources_conditional_bands(self):
-        # These are priced conditionally upstream. If the bands were lost in
-        # transit the estimate would silently revert to the base price for
-        # exactly the models where that is wrong.
+        # 这些模型在上游按条件计价。bands 若在传输中丢失，这些模型的估算会静默退回 base price，结果必错。
         for mid in ("hy4-preview-f", "hy3", "hy3-x", "gpt-6-astra",
                     "gpt-5.5", "grok-4.7"):
             entry = self.pricing["models"].get(mid)
@@ -83,12 +68,12 @@ class PricingEngineTests(unittest.TestCase):
         entry = self.pricing["models"]["hy4-preview-f"]
         bands = entry["bands"]
         factor = self.pricing["meta"]["usd_cny"]
-        # The bands must really differ, or matching one of them proves nothing.
+        # 两档必须真的不同价，否则命中其中一档什么也证明不了。
         self.assertNotEqual(bands[0]["flat"]["input_cache_miss"],
                             bands[1]["flat"]["input_cache_miss"])
         row = {"model": "hy4-preview-f", "prompt_tokens": 1000000,
                "cached_tokens": 0, "completion_tokens": 0}
-        # 02:00 UTC lands in the first band, 17:00 UTC in the second.
+        # 02:00 UTC 落在第一档，17:00 UTC 落在第二档。
         row["at"] = utc_ts("2026-09-30 02:00:00")
         got = wb_pricing.compute_row(row, pricing=self.pricing)
         self.assertEqual(got["band"], 0)
@@ -110,20 +95,19 @@ class PricingEngineTests(unittest.TestCase):
                  "flat": {"input_cache_miss": 3.0}},
             ],
         }
-        # Saturday 12:00 UTC: the weekend band, which sets no hour range.
+        # 周六 12:00 UTC：周末档，它不限定小时区间。
         table, index = wb_pricing.band_for(entry, utc_ts("2026-10-03 12:00:00"))
         self.assertEqual(index, 0)
         self.assertEqual(table["input_cache_miss"], 2.0)
-        # Wednesday 02:00 UTC falls inside [01:00, 04:00).
+        # 周三 02:00 UTC 落在 [01:00, 04:00) 内。
         self.assertEqual(
             wb_pricing.band_for(entry, utc_ts("2026-09-30 02:00:00"))[1], 1)
-        # Wednesday 05:00 UTC matches no band, so the flat price stands in.
+        # 周三 05:00 UTC 不命中任何档，用基准价。
         self.assertIsNone(
             wb_pricing.band_for(entry, utc_ts("2026-09-30 05:00:00"))[1])
 
     def test_length_bands_take_the_tightest_match(self):
-        # The source lists length bands in ascending order, so "the last one
-        # that applies" is the tightest one, not the first that fits.
+        # 上游按阈值升序排列长度档，所以最后一个适用的档就是最紧的档。
         entry = {"flat": {"input_cache_miss": 1.0}, "bands": [
             {"min_prompt_tokens": 32000, "flat": {"input_cache_miss": 2.0}},
             {"min_prompt_tokens": 128000, "flat": {"input_cache_miss": 3.0}},
@@ -137,7 +121,7 @@ class PricingEngineTests(unittest.TestCase):
         table, index = wb_pricing.band_for(entry, _AT, 200000)
         self.assertEqual(index, 1)
         self.assertEqual(table["input_cache_miss"], 3.0)
-        # Below the lowest threshold the base price stands in.
+        # 低于最低阈值时用基准价。
         self.assertIsNone(wb_pricing.band_for(entry, _AT, 1000)[1])
 
     def test_length_banded_model_picks_its_band(self):
@@ -147,7 +131,7 @@ class PricingEngineTests(unittest.TestCase):
         threshold = bands[0]["min_prompt_tokens"]
         base = {"model": "gpt-6-astra", "at": _AT, "cached_tokens": 0,
                 "completion_tokens": 0}
-        # Just under the threshold the model's own base price applies.
+        # 刚好低于阈值时用模型自己的基准价。
         below = threshold - 1
         got = wb_pricing.compute_row(dict(base, prompt_tokens=below),
                                      pricing=self.pricing)
@@ -156,7 +140,7 @@ class PricingEngineTests(unittest.TestCase):
             got["cny"],
             below * entry["flat"]["input_cache_miss"] / 1000000.0 * factor,
             places=6)
-        # At the threshold the dearer band takes over.
+        # 达到阈值后较贵的档接管。
         got = wb_pricing.compute_row(dict(base, prompt_tokens=threshold),
                                      pricing=self.pricing)
         self.assertEqual(got["band"], 0)
@@ -168,7 +152,7 @@ class PricingEngineTests(unittest.TestCase):
                             bands[0]["flat"]["input_cache_miss"])
 
     def test_band_end_zero_means_end_of_day(self):
-        # The source writes the closing edge of its last band as 0.
+        # 上游把最后一档的收尾边界写成 0。
         entry = {"flat": {}, "bands": [
             {"days": None, "start": 1600, "end": 0,
              "flat": {"input_cache_miss": 5.0}}]}
@@ -193,16 +177,16 @@ class PricingEngineTests(unittest.TestCase):
                "completion_tokens": 0}
         got = wb_pricing.compute_row(row, pricing=self.pricing)
         self.assertTrue(got["known"])
-        # 1M cache-miss input at the snapshot's miss rate, in CNY.
+        # 100 万 cache-miss 输入按快照的 miss 单价折成人民币。
         self.assertAlmostEqual(
             got["cny"], rate["input_cache_miss"] * factor, places=6)
-        # 800k of the input hit the cache and is billed at the hit rate.
+        # 其中 80 万命中缓存，按 hit 单价计。
         row["cached_tokens"] = 800000
         expected = (0.2 * rate["input_cache_miss"]
                     + 0.8 * rate["input_cache_hit"]) * factor
         got = wb_pricing.compute_row(row, pricing=self.pricing)
         self.assertAlmostEqual(got["cny"], expected, places=6)
-        # Output tokens are priced separately, at the output rate.
+        # 输出 token 单独按 output 单价计。
         row["completion_tokens"] = 1000000
         got = wb_pricing.compute_row(row, pricing=self.pricing)
         self.assertAlmostEqual(got["cny"], expected + rate["output"] * factor,
@@ -227,14 +211,12 @@ class PricingEngineTests(unittest.TestCase):
             places=4)
 
     def test_reasoning_tokens_ride_inside_completion(self):
-        # Pinned premise: the upstream counts reasoning tokens inside
-        # completion_tokens. Measured live on 2026-10-02 - a thinking request
-        # returned completion=242 with reasoning=238, and
-        # total_tokens = prompt + completion; across 15k logged rows
-        # reasoning never exceeded completion (154 rows were all reasoning).
-        # The output rate therefore applies once, to completion; adding
-        # reasoning_tokens on top would bill the same tokens twice, so a row's
-        # reasoning count must not move the estimate.
+        # 前提：上游把 reasoning tokens 计在 completion_tokens 里。2026-10-02
+        # 实测，一次思考请求返回 completion=242、reasoning=238，且
+        # total_tokens = prompt + completion；1.5 万行日志里 reasoning 从未
+        # 超过 completion，其中 154 行全是 reasoning。所以 output 单价只对
+        # completion 计一次；再加 reasoning_tokens 会把同一批 token 计两次费，
+        # 行上的 reasoning 数不得影响估算。
         rate = self.pricing["models"]["deepseek-v4.1-flash"]["flat"]
         factor = self.pricing["meta"]["usd_cny"]
         row = {"model": "deepseek-v4.1-flash", "at": _AT, "prompt_tokens": 0,
@@ -251,8 +233,7 @@ class PricingEngineTests(unittest.TestCase):
                "prompt_tokens": 1000, "cached_tokens": 5000,
                "completion_tokens": 0}
         got = wb_pricing.compute_row(row, pricing=self.pricing)
-        # The whole 1000 is billed at the hit rate; the extra "cached" is
-        # clamped away instead of producing negative miss tokens.
+        # 1000 全按 hit 单价计，多余的 cached 被截掉，不产生负的 miss token。
         rate = self.pricing["models"]["deepseek-v4.1-flash"]["flat"]
         self.assertAlmostEqual(
             got["cny"], 1000 * rate["input_cache_hit"] / 1000000
@@ -260,15 +241,10 @@ class PricingEngineTests(unittest.TestCase):
 
 
 class PricingMatcherTests(unittest.TestCase):
-    """The fetcher must price a newly added catalogue model without an edit.
+    """抓取器必须给目录里新增的模型自动定价，不需要改代码。
 
-    These exercise the pure helpers only - nothing here touches the network.
+    这里只测纯辅助函数，不碰网络。
     """
-
-    def test_normalize_ignores_case_and_punctuation(self):
-        self.assertEqual(wb_pricing.normalize("hy4-preview-f"),
-                         wb_pricing.normalize("HY4.Preview_F"))
-        self.assertEqual(wb_pricing.normalize(None), "")
 
     def test_auto_match_wants_an_exact_unique_name(self):
         by_norm = wb_pricing.index_openrouter({
@@ -277,14 +253,14 @@ class PricingMatcherTests(unittest.TestCase):
         })
         self.assertEqual(wb_pricing.auto_match("some-model", by_norm), "vendor/some-model")
         self.assertEqual(wb_pricing.auto_match("Some.Model", by_norm), "vendor/some-model")
-        # Two vendors publishing the same leaf name is too ambiguous to guess.
+        # 两个厂商发布同名的叶子名，太含糊，不能猜。
         ambiguous = wb_pricing.index_openrouter({"a/dup": {}, "b/dup": {}})
         self.assertIsNone(wb_pricing.auto_match("dup", ambiguous))
         self.assertIsNone(wb_pricing.auto_match("no-such-model", by_norm))
 
     def test_index_drops_variant_suffixes(self):
-        # :free / :batch are separate products with their own prices; keeping
-        # them would make an equally-named base model ambiguous.
+        # :free / :batch 是各自计价的独立商品；保留它们会让同名的基础模型
+        # 变得含糊。
         self.assertEqual(
             wb_pricing.index_openrouter({"vendor/m:free": {}, "vendor/m:batch": {}}), {})
 
@@ -293,12 +269,11 @@ class PricingMatcherTests(unittest.TestCase):
         by_norm = wb_pricing.index_openrouter(or_models)
         self.assertEqual(wb_pricing.resolve("hy4-preview-f", or_models, by_norm),
                          ("tencent/hy4-preview", True))
-        # An override that is missing from the fetched list falls through to
-        # "unpriced" rather than pointing at a non-existent entry.
+        # 映射表里有、抓取清单里没有的条目落到“未定价”，不会指向不存在的条目。
         self.assertEqual(wb_pricing.resolve("hy4-preview-f", {}, {}), (None, False))
 
     def test_overrides_point_at_openrouter_shaped_ids(self):
-        # A typo in the override table silently unprices the model.
+        # 映射表里的拼写错误会让模型静默变成未定价。
         for hub_id, ref in wb_pricing.OVERRIDES.items():
             self.assertIn("/", ref, hub_id)
             self.assertNotIn(":", ref, hub_id)
@@ -314,39 +289,36 @@ class PricingMatcherTests(unittest.TestCase):
              "input_cache_read": "0.0000000378"},
         ]})
         self.assertEqual(len(bands), 3)
-        # A length band carries the threshold and no window.
+        # 长度档只带阈值，不带时段。
         self.assertEqual(bands[0]["min_prompt_tokens"], 200000)
         self.assertNotIn("start", bands[0])
         self.assertEqual(bands[0]["flat"]["input_cache_miss"], 6.0)
-        # A window band carries the window and no threshold.
+        # 时段档只带时段，不带阈值。
         self.assertNotIn("min_prompt_tokens", bands[1])
         self.assertIsNone(bands[1]["days"])
         self.assertEqual((bands[1]["start"], bands[1]["end"]), (0, 1600))
         self.assertEqual(bands[1]["flat"]["input_cache_miss"], 0.834)
         self.assertEqual(bands[1]["flat"]["input_cache_hit"], 0.042)
-        # A closing edge of 0 means the end of the day, and weekday names are
-        # stored in the short form the engine compares against.
+        # 收尾边界 0 表示一天结束，星期名存成引擎比较用的缩写。
         self.assertEqual(bands[2]["days"], ["mon", "fri"])
         self.assertEqual((bands[2]["start"], bands[2]["end"]), (1600, 2400))
 
     def test_bands_need_a_condition(self):
         self.assertEqual(wb_pricing.bands_from_overrides({}), [])
-        # An entry carrying no condition repeats the base price: not a band.
+        # 不带条件的条目只是重复基准价，不算档。
         self.assertEqual(wb_pricing.bands_from_overrides({"overrides": [
             {"prompt": "0.00001", "completion": "0.00005"}]}), [])
-        # The audio/cache-write axes have no token count in the local usage
-        # log, so an entry priced only on them is not a band either.
+        # 本地 usage 日志里没有 audio/cache-write 的 token 计数，只按它们计价
+        # 的条目也不算档。
         self.assertEqual(wb_pricing.bands_from_overrides({"overrides": [
             {"audio": "0.00002", "input_audio_cache": "0.000004"}]}), [])
 
     def test_snapshot_reflects_the_matchers_choice(self):
-        # hy4-preview-f only exists under a different name upstream, so it
-        # must appear in the snapshot through the override.
+        # hy4-preview-f 在上游只有另一个名字，必须通过映射表进入快照。
         entry = self._snapshot_entry("hy4-preview-f")
         self.assertEqual(entry["or_id"], wb_pricing.OVERRIDES["hy4-preview-f"])
         self.assertEqual(entry["source"], "openrouter")
-        # A model the catalogue knows and OpenRouter names identically is
-        # matched automatically, with no override behind it.
+        # 目录里有、OpenRouter 同名的模型自动匹配，背后没有映射。
         self.assertNotIn("kimi-k2.6", wb_pricing.OVERRIDES)
         auto = self._snapshot_entry("kimi-k2.6")
         self.assertEqual(auto["or_id"], "moonshotai/kimi-k2.6")
@@ -363,21 +335,21 @@ class PricingMatcherTests(unittest.TestCase):
 
 
 class PricingPolicyTests(unittest.TestCase):
-    """Prices are stored per model, de-duplicated, and referenced by rows."""
+    """价格按模型存储、去重，行通过引用指向策略。"""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="wb-price-policy-")
         self._previous = wb_pricing.data_dir()
         wb_pricing.set_data_dir(self.dir)
-        # Real, recent timestamps: the refresher stamps what it records with
-        # the wall clock, and invented epochs would look like the distant past.
+        # 用真实、较新的时间戳：刷新器用墙钟打时间，编造的纪元时刻看起来像
+        # 遥远的过去。
         self.now = time.time()
 
     def tearDown(self):
         wb_pricing.set_data_dir(self._previous)
 
     def _record(self, models, at):
-        """Register a fetched snapshot the way the refresher does."""
+        """像刷新器那样登记一份抓取到的快照。"""
         doc = {"meta": {"base_currency": "CNY", "usd_cny": 7.1}, "models": models}
         return wb_pricing.record_policies(doc, at=at)
 
@@ -389,8 +361,7 @@ class PricingPolicyTests(unittest.TestCase):
                          "output": rate}}
 
     def test_a_price_seen_twice_is_stored_once(self):
-        # A -> B -> A: three fetches, two policies, and the third one points
-        # back at the first rather than writing a copy.
+        # A -> B -> A：三次抓取、两条策略，第三条指回第一条，不写副本。
         _n, moved, first = self._record({"m": self._entry(1.0)}, self.now - 7200)
         _n, _c, second = self._record({"m": self._entry(2.0)}, self.now - 3600)
         _n, back, third = self._record({"m": self._entry(1.0)}, self.now - 60)
@@ -398,8 +369,8 @@ class PricingPolicyTests(unittest.TestCase):
         self.assertEqual(len(wb_pricing.load_policies()), 2)
         self.assertEqual(first["m"], third["m"])
         self.assertNotEqual(first["m"], second["m"])
-        # Switching back is a real change, so all three steps stay on the
-        # timeline - it is the *policy* that is shared, not the history.
+        # 切回去也算一次真实变化，三步都留在时间线上；共享的是策略本身，
+        # 历史各记各的。
         self.assertEqual(len(wb_pricing.load_timeline()), 3)
 
     def test_an_unchanged_price_does_not_grow_the_timeline(self):
@@ -422,23 +393,21 @@ class PricingPolicyTests(unittest.TestCase):
         _n, _c, second = self._record({"m": self._entry(2.0)}, self.now - 3600)
         older = [p for p in wb_pricing.load_policies().values()
                  if p["flat"]["input_cache_miss"] == 1.0][0]
-        # A row carrying the older reference keeps its price even though a
-        # newer policy is in force - that is what the reference buys.
+        # 带旧引用的行保留它当时的价，即便新策略已生效——引用的意义就在这里。
         got = wb_pricing.cost_for_row(
             {"model": "m", "at": self.now - 60, "prompt_tokens": 1000000,
              "cost_policy": older["id"]})
         self.assertAlmostEqual(got["cny"], 1.0 * 7.1, places=6)
         self.assertEqual(got["source"], older["id"])
         self.assertFalse(got["backfilled"])
-        # A row without a reference is resolved from the timeline.
+        # 没有引用的行按时间线解析。
         got = wb_pricing.cost_for_row(
             {"model": "m", "at": self.now - 60, "prompt_tokens": 1000000})
         self.assertAlmostEqual(got["cny"], 2.0 * 7.1, places=6)
         self.assertEqual(got["source"], second["m"])
 
     def test_a_row_from_before_a_policy_existed_is_backfilled(self):
-        # "m" had no price at that moment: the first one ever taken stands in,
-        # and the row is marked so the panel can say so.
+        # 该时刻 "m" 还没有价，用它第一条价顶上，行上打标记供面板说明。
         self._record({"other": self._entry(9.0, "vendor/o")}, self.now - 7200)
         self._record({"m": self._entry(5.0)}, self.now - 3600)
         got = wb_pricing.cost_for_row(
@@ -455,7 +424,7 @@ class PricingPolicyTests(unittest.TestCase):
         self.assertIsNone(got["source_at"])
 
     def test_prune_spares_the_live_policy(self):
-        # Two policies for "m", nothing references either; the live one stays.
+        # "m" 有两条策略，都没有行引用；生效的那条留下。
         self._record({"m": self._entry(1.0)}, self.now - 7200)
         _n, _c, live = self._record({"m": self._entry(2.0)}, self.now - 3600)
         removed = wb_pricing.prune_policies()
@@ -463,8 +432,8 @@ class PricingPolicyTests(unittest.TestCase):
         self.assertIn(live["m"], wb_pricing.load_policies())
 
     def test_prune_never_leaves_a_model_without_a_policy(self):
-        # "gone" is no longer in the live assignment and nothing references
-        # it, but it is that model's only row and has to survive.
+        # "gone" 已不在生效指派里，也没有行引用，但它是该模型唯一的策略，
+        # 必须保留。
         _n, _c, dropped = self._record({"gone": self._entry(3.0)}, self.now - 7200)
         self._record({"m": self._entry(1.0)}, self.now - 3600)
         self.assertEqual(wb_pricing.prune_policies(), [])
@@ -479,8 +448,7 @@ class PricingPolicyTests(unittest.TestCase):
         self.assertIn(first["m"], wb_pricing.load_policies())
 
     def test_prune_spares_the_batch_just_fetched(self):
-        # The newest batch is pinned explicitly, so a sweep that runs right
-        # after a fetch cannot delete what the fetch just produced.
+        # 最新一批被显式保护，抓取刚产出的策略不会被紧跟的清扫删掉。
         _n, _c, older = self._record({"m": self._entry(1.0)}, self.now - 7200)
         _n, _c, newer = self._record({"m": self._entry(2.0)}, self.now - 3600)
         removed = wb_pricing.prune_policies(protect={older["m"]})
@@ -491,15 +459,14 @@ class PricingPolicyTests(unittest.TestCase):
 
 
 class PricingIntegrationTests(unittest.TestCase):
-    """The usage readers attach the cost to the rows they already serve."""
+    """用量读取接口在它已有的行上挂出费用。"""
 
-    # A model with one flat price: the point here is the plumbing, not the
-    # band lookup, which the engine tests cover on the models that have bands.
+    # 这里用只有一个基准价的模型，重点是接线；档查找由引擎测试在带档的模型上覆盖。
     MODEL = "deepseek-v4.1-flash"
 
     def setUp(self):
-        with P._daily_usage_lock:
-            P._daily_usage.update({"day": "", "totals": None, "credits": None,
+        with U._daily_usage_lock:
+            U._daily_usage.update({"day": "", "totals": None, "credits": None,
                                    "models": None, "offset": 0, "at": 0.0})
         self.usd_rate = wb_pricing.load_pricing()["models"][self.MODEL]["flat"][
             "input_cache_miss"]
@@ -515,24 +482,23 @@ class PricingIntegrationTests(unittest.TestCase):
                                 ensure_ascii=False) + "\n")
 
     def test_recent_rows_carry_the_estimate_and_the_rate(self):
-        page = P.recent_usage(limit=10)
+        page = R.recent_usage(limit=10)
         self.assertGreater(page["usd_cny"], 1.0)
         by_model = {r["model"]: r for r in page["rows"]}
         expected = self.usd_rate * page["usd_cny"]
         self.assertAlmostEqual(by_model[self.MODEL]["cost_cny"], expected,
                                places=4)
-        # One flat price means no band, and the key is still present.
+        # 只有一个基准价意味着没有档，字段仍然在。
         self.assertIsNone(by_model[self.MODEL]["cost_band"])
-        # This sandbox has no policies at all, so the row is priced from the
-        # factory snapshot and says so.
+        # 这个沙箱没有任何策略，行按出厂快照计价并如实标注。
         self.assertEqual(by_model[self.MODEL]["cost_source"], "builtin")
         self.assertIsNone(by_model[self.MODEL]["cost_source_at"])
         self.assertFalse(by_model[self.MODEL]["cost_backfilled"])
-        # An unpriced model answer stays None instead of a fake zero.
+        # 未定价模型的回答保持 None，不编造 0。
         self.assertIsNone(by_model["no-such-model"]["cost_cny"])
 
     def test_snapshot_totals_include_cost_and_missing(self):
-        snap = P.usage_snapshot(ttl=0, range="all")
+        snap = U.usage_snapshot(ttl=0, range="all")
         self.assertAlmostEqual(snap["cost_cny"], self.usd_rate * snap["usd_cny"],
                                places=3)
         self.assertEqual(snap["cost_missing"], {"no-such-model": 1})

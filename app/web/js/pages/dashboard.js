@@ -4,11 +4,11 @@ import { html, render, nothing, ref, createRef } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { getJSON } from '../core/api.js';
 import { getState, subscribe, switchActiveRealm } from '../core/store.js';
-import { fmtNumber, fmtCompact, fmtRemain, realmLabel } from '../core/format.js';
+import { fmtNumber, fmtCompact, fmtNumberDash, fmtRemain, realmLabel } from '../core/format.js';
 import { hrefFor } from '../core/router.js';
 import { pageHeader, statCard, badge, emptyState, loadErrorPage, loadErrorInline, skeletonStats, skeletonBlock, progressBar, copyButton, busyClick, segmented } from '../ui/widgets.js';
 import { confirmDialog } from '../ui/dialog.js';
-import { createTrendChart, ensureChart } from '../ui/chart.js';
+import { createChartHost } from '../ui/chart.js';
 import { toastError, toast } from '../ui/toast.js';
 import {
   realmAccounts, accountSummary, readyHint, creditsSummary, creditsHint, snapshotAccounts,
@@ -23,10 +23,7 @@ const DASH = 'dashboard';
 
 export function mount(host) {
   const chartCanvas = createRef();
-  let chart = null;
-  let chartCanvasEl = null; // 建图时用的画布节点，用于识别节点被重建的情况
-  let chartPending = false;
-  let chartErrorShown = false;
+  const chartHost = createChartHost(chartCanvas, chartPoints);
   let accounts = null;     // GET /accounts?realm=all，按查看版本在前端筛选
   let usage = null;        // GET /usage?realm=<查看版本>&range=today
   let trend = null;        // GET /usage/trend?realm=<查看版本>&days=14
@@ -36,14 +33,11 @@ export function mount(host) {
   let missing = [];        // 本次没有取到的数据名称
   let fatal = '';          // 首屏整体失败的原因
   let phase = 'loading';    // loading 首屏骨架、error 整页失败、ready 正常
+  let seq = 0;
 
   function draw() {
     render(view(), host);
-    syncChart().catch((err) => {
-      if (chartErrorShown) return;
-      chartErrorShown = true;
-      toastError('趋势图渲染失败', err);
-    });
+    chartHost.sync();
   }
 
   function apply(key, value) {
@@ -55,6 +49,8 @@ export function mount(host) {
   }
 
   async function load() {
+    // 与用量页同一口径：晚发出的读取先作废旧一轮在途结果，避免旧数据盖掉新数据。
+    const mine = ++seq;
     const realm = getState().viewRealm;
     const jobs = [
       { key: 'accounts', label: '账号', url: '/accounts?realm=all' },
@@ -64,6 +60,7 @@ export function mount(host) {
       { key: 'scheduler', label: '调度器状态', url: '/scheduler' },
     ];
     const settled = await Promise.allSettled(jobs.map((job) => getJSON(job.url)));
+    if (mine !== seq) return;
     const failed = [];
     settled.forEach((result, i) => {
       if (result.status === 'fulfilled') apply(jobs[i].key, result.value);
@@ -91,46 +88,6 @@ export function mount(host) {
     return trend ? trendSeries(trendMode, trend.buckets, fmtNumber, fmtCompact, { errors: true }) : null;
   }
 
-  /** 趋势图：数据到齐后建图，之后只换数据，轮询刷新不会让整张图重新动画。 */
-  async function syncChart() {
-    const canvas = chartCanvas.value;
-    if (!canvas) return;
-    // 首屏失败视图上没有画布；恢复后 lit-html 会新建一个节点，旧的图表必须重建。
-    if (chart && chartCanvasEl !== canvas) {
-      chart.destroy();
-      chart = null;
-    }
-    const points = chartPoints();
-    if (!points) {
-      if (chart) { chart.destroy(); chart = null; }
-      return;
-    }
-    if (chart) {
-      chart.update({ labels: points.labels, series: points.series });
-      return;
-    }
-    if (chartPending) return;
-    chartPending = true;
-    try {
-      await ensureChart();
-    } catch (err) {
-      if (!chartErrorShown) {
-        chartErrorShown = true;
-        toastError('图表库加载失败', err);
-      }
-      return;
-    } finally {
-      chartPending = false;
-    }
-    // 等加载期间页面可能已经卸载，或数据又换了一轮；用当前节点与当前数据建图。
-    const current = chartCanvas.value;
-    if (!current || !current.isConnected) return;
-    const latest = chartPoints();
-    if (!latest) return;
-    chart = createTrendChart(current, { labels: latest.labels, series: latest.series });
-    chartCanvasEl = current;
-  }
-
   function selectTrendMode(id) {
     if (trendMode === id) return;
     trendMode = id;
@@ -153,7 +110,7 @@ export function mount(host) {
 
   async function addAccount() {
     try {
-      const mod = await import('./accounts/dialogs.js');
+      const mod = await import('./accounts/dialogs/add.js');
       await mod.openAddAccountDialog();
     } catch (err) {
       toastError('打开「添加账号」失败', err);
@@ -257,10 +214,6 @@ export function mount(host) {
       </div>`;
   }
 
-  function numberOrDash(value) {
-    return Number.isFinite(Number(value)) ? fmtNumber(value) : '—';
-  }
-
   function view() {
     if (phase === 'loading') {
       return html`
@@ -291,7 +244,7 @@ export function mount(host) {
           ${statCard({ label: '账号总数', value: fmtNumber(summary.total), icon: 'Users', hint: '启用 ' + summary.enabled + ' 个', delay: 0 })}
           ${statCard({ label: '可用账号', value: fmtNumber(summary.ready), icon: 'CircleCheck', tone: summary.attention ? 'warning' : 'success', hint: readyHint(summary), delay: 0.05 })}
           ${statCard({ label: '积分余额', value: credits.known ? fmtNumber(Math.round(credits.total)) : '—', icon: 'Coins', hint: creditHint, delay: 0.1 })}
-          ${statCard({ label: '今日请求', value: usage ? numberOrDash(usage.requests) : '—', icon: 'Activity', hint: usage ? hints.requestHint : '今日用量未读取到', delay: 0.15 })}
+          ${statCard({ label: '今日请求', value: usage ? fmtNumberDash(usage.requests) : '—', icon: 'Activity', hint: usage ? hints.requestHint : '今日用量未读取到', delay: 0.15 })}
           ${statCard({ label: '今日 Token', value: usage ? fmtCompact(usage.total_tokens || 0) : '—', icon: 'Zap', hint: usage ? hints.tokenHint : '今日用量未读取到', delay: 0.2 })}
         </div>
         <div class="grid-3">
@@ -317,8 +270,9 @@ export function mount(host) {
   return {
     refresh: () => load(),
     unmount() {
+      seq += 1;
       off();
-      if (chart) { chart.destroy(); chart = null; }
+      chartHost.destroy();
     },
   };
 }

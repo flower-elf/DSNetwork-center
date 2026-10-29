@@ -2,9 +2,10 @@
 import assert from 'node:assert/strict';
 
 import * as activity from '../../app/web/js/pages/accounts/activity.js';
+import { fmtDate } from '../../app/web/js/core/format.js';
 
 const now = new Date(2026, 9, 18, 12, 0, 0).getTime();
-const stamp = activity.localStamp(now);
+const stamp = fmtDate(now);
 assert.equal(stamp, '2026-10-18');
 
 const cn = (over = {}) => Object.assign({ uid: 'cn-1', realm: 'cn', enabled: true, nickname: '甲' }, over);
@@ -32,7 +33,7 @@ assert.equal(view.streak.text, '已签到');
 assert.equal(activity.isDone(view), true);
 
 const yesterday = new Date(now - 86400 * 1000);
-view = activity.activityView(cn({ lastCheckin: activity.localStamp(yesterday) + ' 09:30:00' }), {}, now);
+view = activity.activityView(cn({ lastCheckin: fmtDate(yesterday) + ' 09:30:00' }), {}, now);
 assert.equal(view.gas.kind, 'none', '昨天的记录不算今天');
 assert.equal(view.gas.text, '未领');
 
@@ -54,7 +55,7 @@ view = activity.activityView(intl({ lastDailyChat: stamp + ' 10:05:00' }), {}, n
 assert.equal(view.daily.kind, 'done');
 assert.equal(view.daily.text, '已完成');
 
-view = activity.activityView(intl({ lastDailyChat: activity.localStamp(yesterday) + ' 10:05:00' }), {}, now);
+view = activity.activityView(intl({ lastDailyChat: fmtDate(yesterday) + ' 10:05:00' }), {}, now);
 assert.equal(view.daily.kind, 'none');
 assert.equal(view.daily.text, '未打卡');
 
@@ -81,6 +82,14 @@ const allDone = activity.todaySummary([
 ], {}, 'intl', now);
 assert.equal(activity.summaryText(allDone, '已打卡', '未打卡'), '今日已打卡 (1/1)');
 assert.equal(activity.summaryText({ total: 0, done: 0, pending: [] }, '已打卡', '未打卡'), '无账号');
+
+// 汇总卡：数值、色调与待处理名单沿用同一套口径
+assert.deepEqual(activity.summaryStat(summary, { doneWord: '已打卡', pendingWord: '未打卡' }), {
+  value: '部分已打卡 (1/2)', tone: 'warning', hint: '待处理：甲',
+});
+assert.deepEqual(activity.summaryStat(allDone, { doneWord: '已打卡', pendingWord: '未打卡' }), {
+  value: '今日已打卡 (1/1)', tone: 'success', hint: '今天全部完成',
+});
 
 const streak = activity.streakSummary([
   cn({ uid: 'a', lastActivityReport: stamp + ' 09:00:00' }),

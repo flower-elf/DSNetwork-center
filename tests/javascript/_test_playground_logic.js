@@ -3,8 +3,8 @@
 import assert from 'node:assert/strict';
 import {
   accountHeader, accountOptions, applyChunk, buildChatBody, canSend, chunkError,
-  cleanErrorMessage, emptyAnswer, hasCreditRecord, normalizeUsage, responseError,
-  sessionCredit, usageParts,
+  cleanErrorMessage, emptyAnswer, hasCreditRecord, normalizeUsage, parseJson,
+  responseError, sessionCredit, usageParts, withAnswer,
 } from '../../app/web/js/pages/playground/logic.js';
 
 // 请求体：系统提示词可选，空内容消息不发送
@@ -129,6 +129,22 @@ assert.deepEqual(options.map((o) => o.value).sort(), ['a1b2c3d4-2222', 'b2c3d4e5
 assert.equal(options.find((o) => o.value === 'a1b2c3d4-2222').label, 'a1b2c3d4');
 assert.equal(options.find((o) => o.value === 'b2c3d4e5-1111').label, '测试二 · b2c3d4e5');
 assert.deepEqual(accountOptions(null, now), []);
+
+// 宽松解析：不是 JSON 时把原文交回
+assert.deepEqual(parseJson('{"a":1}'), { a: 1 });
+assert.equal(parseJson('plain text'), 'plain text');
+
+// 流式增量只改目标消息，其余消息不动
+{
+  const messages = [
+    { id: 1, role: 'user', content: 'hi' },
+    { id: 2, role: 'assistant', content: '' },
+  ];
+  const next = withAnswer(messages, 1, { content: '你好' }, 12);
+  assert.deepEqual(next[0], messages[0]);
+  assert.deepEqual(next[1], { id: 2, role: 'assistant', content: '你好', elapsedMs: 12 });
+  assert.equal(messages[1].content, '', '不修改传入的数组与消息');
+}
 
 // 固定账号才带调试头；空值交给账号池调度
 assert.deepEqual(accountHeader(''), {});

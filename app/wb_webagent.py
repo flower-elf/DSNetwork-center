@@ -33,8 +33,7 @@ def _proxy_parts(proxy_url):
     host, port = parsed.hostname, parsed.port
     user, password = parsed.username, parsed.password
     if not host:
-        # 无 scheme 的写法 urlparse 认不出来，`user:pass@h:p` 会被当成 scheme，
-        # 这里手动切出 authority。
+        # 无 scheme 的写法 urlparse 认不出来，`user:pass@h:p` 会被当成 scheme。
         authority = raw.split("://")[-1].split("/")[0]
         userinfo, _, hostport = authority.rpartition("@")
         host, _, port_text = hostport.rpartition(":")

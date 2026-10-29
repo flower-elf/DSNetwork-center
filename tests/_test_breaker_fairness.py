@@ -1,17 +1,17 @@
-"""熔断要「连续」才算数，本机断网不能算在账号头上。
+"""熔断要「连续」才算数，本机断网不计账号失败。
 
 线上两个现象，一个比一个难解释：
 
-  1. 「明明测了能用，它还熔断」——`fails` 老实现只加不减（只有成功才归零），于是
+  1. 「明明测了能用，它还熔断」——`fails` 只加不减（只有成功才归零），于是
      几小时前的一次 502 + 昨天的一次超时 + 刚才一次抖动凑成「连续 3 次」，账号被
      关 30 分钟；而且下一个窗口按 1800 → 3600 → 7200… 翻倍，越关越久。
   2. 「主机没网当成上游出问题」——DNS 解析不了 / 路由不可达也会逐账号记一笔并冷却
      60 秒；断网那一分钟里池子被逐个走一遍，等网络恢复，账号全在冷却里。
 
-这个套件钉住修法：失败只在 FAIL_WINDOW 内才算连续；「本机没网」这一类失败单独
+这个套件固定契约：失败只在 FAIL_WINDOW 内才算连续；「本机没网」这一类失败单独
 识别、一个账号都不记，并按「本机网络不可用」上报（附 gateway_hint）。
 
-    python tests/_test_breaker_fairness.py
+用 python tests/_test_breaker_fairness.py 运行。
 """
 import io
 import os
@@ -30,6 +30,7 @@ from _isolated_dirs import isolated_data_dirs    # noqa: E402
 _TMP = isolated_data_dirs("wb-breaker-fair-")
 
 import wb_accounts as A        # noqa: E402
+import wb_panel_routes as panel  # noqa: E402
 import wb_proxy as P           # noqa: E402
 
 
@@ -269,7 +270,7 @@ class ChatPathTests(unittest.TestCase):
                            "凭据型 401 仍然冷却账号")
 
     def test_generic_failure_is_logged_with_the_account(self):
-        """通用失败分支以前不写日志：账号被冷却，可事后查不到是谁、为什么。"""
+        """通用失败分支必须写日志：账号被冷却后，事后要能查到是谁、为什么。"""
         lines = []
         with mock.patch.object(P, "log", lambda msg, **kw: lines.append(str(msg))):
             with self.assertRaises(Exception):
@@ -287,7 +288,7 @@ class ProbeTests(unittest.TestCase):
         cfg = dict(A.get_realm_config("intl"))
         cfg["chat_upstream"] = "http://insecure.example.com"
         with mock.patch.object(A, "get_realm_config", lambda realm: cfg):
-            info = P.probe_local_network("intl")
+            info = panel.probe_local_network("intl")
         self.assertFalse(info["ok"])
         self.assertIn("https", info["error"])
 
@@ -298,7 +299,7 @@ class ProbeTests(unittest.TestCase):
         with mock.patch.object(A, "get_realm_config", lambda realm: cfg), \
                 mock.patch.object(P.socket, "getaddrinfo", lambda *a, **k: fake), \
                 mock.patch.object(P.socket, "socket") as sock:
-            info = P.probe_local_network("intl")
+            info = panel.probe_local_network("intl")
         self.assertFalse(info["ok"])
         self.assertIn("非公网地址", info["error"])
         self.assertFalse(sock.called, "校验没过就不该去连")
@@ -309,7 +310,7 @@ class ProbeTests(unittest.TestCase):
         with mock.patch.object(A, "get_realm_config", lambda realm: cfg), \
                 mock.patch.object(P.socket, "getaddrinfo",
                                   side_effect=socket.gaierror(-3, "Temporary failure in name resolution")):
-            info = P.probe_local_network("intl")
+            info = panel.probe_local_network("intl")
         self.assertFalse(info["ok"])
         self.assertIn("DNS", info["error"])
 
@@ -329,8 +330,8 @@ class TestAllRouteTests(unittest.TestCase):
     def _call(self, payload, rows, network):
         handler = types.SimpleNamespace(
             _json=lambda code, body: {"code": code, "body": body})
-        with mock.patch.object(P, "probe_account", lambda acc, model=None, timeout=30: dict(rows[0])), \
-                mock.patch.object(P, "probe_local_network", lambda realm: dict(network)):
+        with mock.patch.object(panel, "probe_account", lambda acc, model=None, timeout=30: dict(rows[0])), \
+                mock.patch.object(panel, "probe_local_network", lambda realm: dict(network)):
             return P.Handler._route_accounts_test_all(handler, payload)
 
     def test_summary_and_rows(self):
@@ -370,7 +371,7 @@ class TestAllRouteTests(unittest.TestCase):
 
 
 class SoftLadderTests(unittest.TestCase):
-    """软限流的两条阶梯同样要有时间窗（老实现只加不减、只有成功才归零）。"""
+    """软限流的两条阶梯同样要有时间窗：只加不减、只有成功归零的计数必须按窗口收敛。"""
 
     def setUp(self):
         self.window = A.FAIL_WINDOW

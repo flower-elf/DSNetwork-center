@@ -6,10 +6,10 @@
 少了熔断与降权，而看板上那些账号仍显示绿色「可用」。于是「明明有 9 个账号」和
 「报没有可用账号」看起来自相矛盾，只能靠猜。
 
-这里钉住三件事：每个账号的一句话原因、拼进报错的那段明细、以及没账号/全可用时
+这里固定三件事：每个账号的一句话原因、拼进报错的那段明细、以及没账号/全可用时
 不硬编一个假原因。
 
-    python tests/_test_pool_diagnostics.py
+用 python tests/_test_pool_diagnostics.py 运行。
 """
 import os
 import sys
@@ -57,7 +57,7 @@ class UnavailableReasonTests(unittest.TestCase):
             self.assertIn(label, reason, field)
             # 只断言「带上了剩余时间」，不断言具体分钟数：_human_delta 是
             # int(秒/60)，而 Windows 的时钟精度是毫秒级、Linux 是纳秒级——
-            # 同一份代码在两边会差一分钟，钉死分钟数就是在钉运行环境。
+            # 同一份代码在两边会差一分钟，把分钟数写死就是在依赖运行环境。
             self.assertIn("剩余", reason, field)
 
     def test_farthest_penalty_wins(self):

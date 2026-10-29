@@ -1,4 +1,4 @@
-"""请求体解析与几个管理接口的输入校验,对真实 Handler 发原始字节;无网络访问,只连本机临时端口。
+"""请求体解析与几个管理接口的输入校验，对真实 Handler 发原始字节；无网络访问，只连本机临时端口。
 """
 import json
 import os
@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 _TMP = tempfile.mkdtemp(prefix="wb-body-limits-")
@@ -28,7 +29,7 @@ class BodyLimitTests(unittest.TestCase):
         proxy.log = lambda *a, **k: None
         proxy.POOL = wb_accounts.AccountPool(proxy.ACCOUNTS_DIR)
         proxy.POOL.load()
-        cls.server = proxy.ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.Handler)
         cls.server.daemon_threads = True
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.port = cls.server.server_address[1]
@@ -39,7 +40,7 @@ class BodyLimitTests(unittest.TestCase):
         cls.server.server_close()
 
     def exchange(self, raw, wait=5):
-        """发原始请求，返回 (状态行, 正文 JSON 或 None)；对端不回则状态行为空。"""
+        """发原始请求，返回（状态行，正文 JSON 或 None）；对端不回则状态行为空。"""
         sock = socket.create_connection(("127.0.0.1", self.port))
         sock.settimeout(wait)
         sock.sendall(raw)

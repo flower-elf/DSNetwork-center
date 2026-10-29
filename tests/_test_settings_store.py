@@ -5,6 +5,7 @@
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -341,5 +342,20 @@ finally:
         os.environ["WB_RECENT_INDEX"] = _old_recent
 
 print()
+print()
+print("[重建] 目录被外部删除后，下一次保存要自己把目录建回来")
+_tmp_dir = tempfile.mkdtemp(prefix="wb-settings-rebuild-")
+try:
+    _path = S.save(_tmp_dir, {"probe": 1})
+    check("首次保存成功", os.path.isfile(_path), _path)
+    shutil.rmtree(_tmp_dir)
+    _path2 = S.save(_tmp_dir, {"probe": 2})
+    check("删除目录后仍能保存", os.path.isfile(_path2), _path2)
+    check("重读拿到新值", S.load(_tmp_dir).get("probe") == 2, S.load(_tmp_dir))
+    leftovers = [n for n in os.listdir(_tmp_dir) if n.endswith(".tmp")]
+    check("失败路径不留下临时文件", leftovers == [], leftovers)
+finally:
+    shutil.rmtree(_tmp_dir, ignore_errors=True)
+
 print("PASS=%d FAIL=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

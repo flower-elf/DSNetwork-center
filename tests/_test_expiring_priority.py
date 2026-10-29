@@ -36,9 +36,9 @@ def make_account(uid, realm="cn", credits=None, **extra):
 
 
 def credits(*days, package_code="package", remain=100, no_expiry=False):
-    """A credits blob whose packages expire in the given days.
+    """按给定天数到期的额度包余额数据。
 
-    A None day stands for a package the upstream gave no end date for.
+    None 表示上游没有给结束日期的包。
     """
     packages = []
     for index, day in enumerate(days):
@@ -79,7 +79,7 @@ def raw_package(cycle_end, deduction_end=None, size=100, remain=100, code="pkg")
 
 
 def built_package(cycle_end, deduction_end):
-    """A package the way _parse_package_account would have built it."""
+    """按 _parse_package_account 的产出形状造一个包。"""
     return make_account("helper")._parse_package_account(
         raw_package(cycle_end=cycle_end, deduction_end=deduction_end))
 

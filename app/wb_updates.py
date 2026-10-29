@@ -1,20 +1,16 @@
 # -*- coding: utf-8 -*-
-"""wb_updates.py — 更新发现（只发现，不安装）。
+"""更新发现（只发现，不安装）。
 
-这个模块回答一个问题：官方仓库有没有比当前运行版本更新的稳定版？
+这个模块回答一个问题：官方仓库有没有比当前运行版本更新的稳定版？它拉一次
+GitHub releases 元数据（API 拿不到就退回网页端点），比较版本号，把结论交给面板；
+不下载、不解包、不替换文件、不重启进程。
 
-它**只做发现**：拉一次 GitHub 的 releases 元数据（API 拿不到就退回网页端点）、
-比较版本号、把结论交给面板。不下载、不解包、不替换文件、不重启进程——那些属于
-后续阶段。
-
-三条硬约束：
-
-1. **默认关闭**。每日检查是 operator 显式打开的偏好；缺键、false 都是关闭，
-   关闭时后台一个请求都不发。
-2. **失败不致命**。网络超时、HTTP 错误、JSON 坏了都只记一行短原因，网关照常
-   服务；后台检查永远不挡请求路径。
-3. **只留安全运维字段**。落盘的只有「上次尝试时间 / 上次成功时间 / 见过的版本
-   号」；URL、请求头、响应体一律不落。
+1. 默认关闭。每日检查是 operator 显式打开的偏好；缺键、false 都是关闭，关闭时
+   后台一个请求都不发。
+2. 失败不致命。网络超时、HTTP 错误、JSON 坏了都只记一行短原因，网关照常服务；
+   后台检查永远不挡请求路径。
+3. 只留安全运维字段。落盘的只有上次尝试时间、上次成功时间、见过的版本号、
+   发布页链接与发布时间；请求地址、请求头、响应体一律不落。
 
 纯标准库，Python 3.9 兼容。
 """
@@ -29,11 +25,15 @@ import urllib.request
 
 import wb_settings
 
-# 官方仓库的 releases 接口——主路径。走 API 不抓 HTML：页面结构变了不该让检查失效。
-RELEASES_URL = "https://api.github.com/repos/ardeyouxipianyi/workbuddy2api-hub/releases"
+# 本项目的 releases 接口——主路径。走 API 不抓 HTML：页面结构变了不该让检查失效。
+# 检查的是本仓库（来源仓库的上游是另一个项目，版本号互不相干）。
+REPO = "flower-elf/DSNetwork-center"
+RELEASES_URL = "https://api.github.com/repos/%s/releases" % REPO
 # 回退路径：网页端点的 302 Location 末尾就是最新稳定版 tag。它按网页计流量，
 # 不受 API 那 60 次/小时/出口 IP 的匿名配额限制，也不需要凭据。
-LATEST_RELEASE_URL = "https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases/latest"
+LATEST_RELEASE_URL = "https://github.com/%s/releases/latest" % REPO
+# 发布页总入口：面板的「打开发布页」在没有单条发布链接时用它，按钮始终可点。
+RELEASES_PAGE = "https://github.com/%s/releases" % REPO
 TAG_RE = re.compile(r"/releases/tag/([^/?#]+)")
 # 可选凭据：认证请求的配额是 5000 次/小时。只从环境变量读，绝不落盘
 # （模块头第 3 条）。
@@ -85,8 +85,8 @@ def safe_url(value):
 def pick_latest(releases, current_version):
     """从一份 releases 文档里挑出最新的稳定版，没有就返回 None。
 
-    草稿与预发布跳过；tag 不是纯 vX.Y.Z 的跳过；取版本号最大的那个而不是列表
-    里第一个——重新发布的旧 tag 不能靠排序取胜。
+    草稿与预发布跳过；tag 不是纯 vX.Y.Z 的跳过；取版本号最大的那个，列表顺序
+    不决定结果，重新发布的旧 tag 不能靠排序取胜。
     """
     best = None
     for entry in releases if isinstance(releases, list) else []:
@@ -222,20 +222,30 @@ class UpdateChecker(threading.Thread):
             state = wb_settings.update_check_state(self.settings_dir)
         except Exception:
             return
+        if (state.get("repo") or "") != REPO:
+            # 旧记录来自别的仓库（或旧版本没有来源标记）：版本号与链接不能
+            # 继续当成这个仓库的结果。清掉节奏时间，让启动检查立刻按新目标
+            # 查一次；之后照常按间隔节流。
+            return
         self._last_attempt = state.get("last_attempt") or 0.0
         self._last_success = state.get("last_success") or 0.0
         version = state.get("latest_version") or ""
         if version:
             self._latest = {
-                "version": version, "tag": "", "url": "", "published_at": "",
+                "version": version, "tag": "",
+                # 发布页链接与发布时间跟着版本一起落盘：重启后还没重新检查时，
+                # 弹窗与状态行也能给出可点的发布页链接。
+                "url": state.get("latest_url") or "",
+                "published_at": state.get("published_at") or "",
                 "newer": is_newer(version, self.current_version),
             }
 
-    def _remember(self, success, version=""):
+    def _remember(self, success, version="", url="", published_at=""):
         try:
             wb_settings.record_update_check(
                 self.settings_dir, at=self._last_attempt,
-                success=success, latest_version=version)
+                success=success, latest_version=version,
+                latest_url=url, published_at=published_at, repo=REPO)
         except Exception:
             # 记账失败不该影响一次已经完成的检查：内存里的结论照样能用。
             pass
@@ -276,6 +286,8 @@ class UpdateChecker(threading.Thread):
             "last_success": _stamp(self._last_success),
             "last_error": self._last_error,
             "release_url": picked.get("url") or "",
+            # 面板的跳转按钮兜底：没有单条发布链接时也能打开发布页。
+            "releases_url": RELEASES_PAGE,
             "published_at": picked.get("published_at") or "",
         }
 
@@ -334,7 +346,9 @@ class UpdateChecker(threading.Thread):
         self._latest = picked
         self._last_success = self._last_attempt
         version = (picked or {}).get("version") or ""
-        self._remember(success=True, version=version)
+        self._remember(success=True, version=version,
+                       url=(picked or {}).get("url") or "",
+                       published_at=(picked or {}).get("published_at") or "")
         if picked and picked.get("newer"):
             self.log("发现新版本 %s（当前 %s）" % (picked["version"], self.current_version))
         elif picked:
@@ -355,7 +369,14 @@ class UpdateChecker(threading.Thread):
         self._wake.clear()
 
     def run(self):
-        # 先让监听端口和账号池就绪，再花掉第一个请求。
+        # 开关打开时启动即查一次：面板登录后要能立刻提示新版本，不必等首个
+        # 延迟。节流窗口照旧生效——刚查过就跳过，不会因为重启而变频繁。
+        if self.enabled() and not self._stop_event.is_set():
+            try:
+                self.check(manual=False)
+            except Exception as exc:
+                self.log("更新检查异常：%s" % describe_failure(exc))
+        # 再让监听端口和账号池就绪，然后进入常规轮询。
         if self._stop_event.wait(self._first_delay):
             return
         while not self._stop_event.is_set():

@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The portable runtime the release ZIP ships (issue #28).
+"""发布 ZIP 里的便携运行时：一份裁剪过的 CPython 3.12 Windows 运行时（issue #28）。
 
-The existing portable asset is not a source archive: it carries a trimmed
-CPython 3.12 Windows runtime under ``python/``, and the launchers pick that up
-before falling back to a system interpreter (``%HERE%python\\python.exe`` in
-``start-wb-proxy.bat``). The repository cannot rebuild it - it is gitignored
-precisely because it is a build input - so CI fetches it from a pinned
-python-build-standalone release and trims it with the rules below.
+绿色包在 ``python/`` 下带这份运行时，启动脚本优先使用它，找不到才退回系统
+解释器（``start-wb-proxy.bat`` 里是 ``%HERE%python\\python.exe``）。仓库无法
+重建它，它被 .gitignore 忽略，本身就是构建输入，所以 CI 从版本固定的
+python-build-standalone 下载，再按下面的规则裁剪。
 
-Those rules are not invented. The ``python/`` tree of the previously shipped
-package is a strict subset of the pinned build, and the sets below are exactly
-the difference between the two: same ``Lib/`` top level, same ``DLLs/``, same
-root files. ``Lib/multiprocessing`` is part of that difference, and the README
-documents the consequence ("绿色包那份精简 Python 里根本没有这个模块，用它会直接
-报错"), so dropping it is the shipped behaviour rather than an accident.
+规则取自实测差集：已发布包的 ``python/`` 树是该构建的严格子集，下面几组常量
+正好是两者的差集，``Lib/`` 顶层、``DLLs/`` 与根文件都一致。``Lib/multiprocessing``
+也在差集里，README 记录了后果（绿色包那份精简 Python 里根本没有这个模块，用它
+会直接报错），裁掉它是既定发布行为。
 
     python release/portable_runtime.py download --out runtime.tar.gz
     python release/portable_runtime.py prepare --tarball <tar.gz> --dest python
@@ -30,12 +26,10 @@ import sys
 import tarfile
 import urllib.request
 
-# ---- pinned release input -------------------------------------------------
+# ---- 固定的发布输入 ---------------------------------------------------------
 #
-# A release asset must be reproducible from the tag alone, so the runtime is a
-# pinned download with a checksum, not "whatever the maintainer had locally".
-# Bumping it means bumping all four constants together; `prepare` refuses a
-# tarball whose sha256 does not match.
+# 发布资产必须只凭 tag 就能复现：运行时是带校验和的固定下载，与维护者本机装了
+# 什么无关。升版本时四个常量一起改；prepare 拒绝 sha256 对不上的 tar 包。
 RUNTIME_VERSION = "3.12.15"
 RUNTIME_RELEASE = "20261003"
 RUNTIME_ASSET = "cpython-3.12.15+20261003-x86_64-pc-windows-msvc-install_only.tar.gz"
@@ -43,20 +37,19 @@ RUNTIME_SHA256 = "4b6f0beebbb695a0f3ea237b8c3eaa5bd424f47a7bc25b2fbe3a43390c770f
 RUNTIME_URL = ("https://github.com/astral-sh/python-build-standalone/releases/download/"
                "%s/%s" % (RUNTIME_RELEASE, RUNTIME_ASSET))
 
-# ---- trim rules -----------------------------------------------------------
+# ---- 裁剪规则 ---------------------------------------------------------------
 
-# Directories next to python.exe that the shipped package does not carry:
-# headers, import libs, the tcl/tk runtime and the pip entry-point scripts.
+# python.exe 旁边的、绿色包不带的目录：头文件、导入库、tcl/tk 运行时和 pip
+# 入口脚本。
 DROP_TOP_DIRS = ("Scripts", "include", "libs", "tcl")
 
-# Stdlib packages the shipped package does not carry. multiprocessing is
-# deliberate (see the module docstring); the rest are development extras.
+# 绿色包不带的标准库包。multiprocessing 是有意裁掉的，见模块 docstring；
+# 其余是开发期附加组件。
 DROP_LIB_DIRS = ("__pycache__", "ensurepip", "idlelib", "lib2to3", "multiprocessing",
                  "pydoc_data", "site-packages", "tkinter", "turtledemo", "venv")
 
-# Extension modules the shipped package does not carry: the CPython test
-# extensions, the tk bindings, their tcl/tk DLLs, and zlib1.dll (CPython 3.12
-# links zlib into python312.dll, so the DLL is a leftover of the build).
+# 绿色包不带的扩展模块：CPython 测试扩展、tk 绑定及其 tcl/tk DLL，还有
+# zlib1.dll。CPython 3.12 把 zlib 链进 python312.dll，这个 DLL 是构建残留。
 DROP_DLLS = ("_ctypes_test.pyd", "_testbuffer.pyd", "_testcapi.pyd", "_testclinic.pyd",
              "_testconsole.pyd", "_testimportmultiple.pyd", "_testinternalcapi.pyd",
              "_testmultiphase.pyd", "_testsinglephase.pyd", "_tkinter.pyd",
@@ -64,15 +57,14 @@ DROP_DLLS = ("_ctypes_test.pyd", "_testbuffer.pyd", "_testcapi.pyd", "_testclini
 
 DROP_ROOT_FILES = ("pythonw.exe",)
 
-# Everything with these extensions goes, wherever it lives: the build ships
-# debug symbols for every binary, and stale bytecode caches.
+# 这些后缀一律裁掉，不论在哪：构建给每个二进制都带调试符号，还有过期的
+# 字节码缓存。
 DROP_SUFFIXES = (".pdb", ".pyc")
 
-# ---- what the package must be able to do ----------------------------------
+# ---- 绿色包必须具备的能力 ---------------------------------------------------
 #
-# The launchers look for python/python.exe, and the gateway imports these
-# modules (ast-walked from wb_*.py) - so the trim may not take any of them,
-# and their extension modules have to survive with them.
+# 启动脚本找 python/python.exe；网关 import 的模块（从 wb_*.py 做 AST 遍历
+# 得出）都在这里，裁剪不能带走它们，它们的扩展模块也必须留下。
 REQUIRED_FILES = (
     "python.exe", "python3.dll", "python312.dll",
     "vcruntime140.dll", "vcruntime140_1.dll", "LICENSE.txt",
@@ -95,7 +87,7 @@ REQUIRED_FILES = (
     "DLLs/libffi-8.dll", "DLLs/libssl-3-x64.dll", "DLLs/libcrypto-3-x64.dll",
 )
 
-# Absent from the shipped package, so they must stay absent here too.
+# 绿色包里没有这些路径，这里也必须保持没有。
 FORBIDDEN_PATHS = (
     "Scripts", "include", "libs", "tcl", "pythonw.exe",
     "Lib/multiprocessing", "Lib/tkinter", "Lib/idlelib", "Lib/lib2to3",
@@ -114,10 +106,7 @@ def sha256(path, chunk=1 << 20):
 
 
 def keep(rel):
-    """Should this member of the pinned build survive the trim?
-
-    `rel` is relative to the runtime root and uses forward slashes.
-    """
+    """固定构建里的这个成员是否该活过裁剪；rel 相对运行时根目录，用正斜杠。"""
     parts = rel.split("/")
     if len(parts) > 1 and parts[0] in DROP_TOP_DIRS:
         return False
@@ -131,10 +120,9 @@ def keep(rel):
 
 
 def prepare(tarball, dest, expect_sha=RUNTIME_SHA256):
-    """Extract the pinned build into `dest`, dropping what the trim removes.
+    """把固定构建解到 dest，裁剪规则要丢的成员直接跳过。
 
-    Members are filtered while reading, so the dropped ~110 MB never lands on
-    disk. Returns (kept_files, kept_dirs).
+    边读边过滤，被裁掉的约 110 MB 不落盘。返回 (kept_files, kept_dirs)。
     """
     got = sha256(tarball)
     if expect_sha and got != expect_sha:
@@ -159,7 +147,7 @@ def prepare(tarball, dest, expect_sha=RUNTIME_SHA256):
                 dirs += 1
                 continue
             if not member.isfile():
-                continue  # symlinks do not exist in the Windows build
+                continue  # Windows 构建里没有符号链接
             os.makedirs(os.path.dirname(target), exist_ok=True)
             src = tf.extractfile(member)
             with open(target, "wb") as fh:
@@ -170,7 +158,7 @@ def prepare(tarball, dest, expect_sha=RUNTIME_SHA256):
 
 
 def verify(root):
-    """Raise SystemExit unless `root` is a runtime the launchers can use."""
+    """root 不是启动脚本可用的运行时就抛 SystemExit。"""
     problems = []
     for rel in REQUIRED_FILES:
         if not os.path.isfile(os.path.join(root, *rel.split("/"))):
@@ -193,11 +181,10 @@ def verify(root):
 
 
 def _utf8_stdio():
-    """Let the progress lines survive a non-UTF-8 console.
+    """把标准输出与标准错误固定为 UTF-8，让进度行在非 UTF-8 控制台下也能打印。
 
-    Windows runners hand Python a cp1252 stdout, and the first Chinese summary
-    line then dies with UnicodeEncodeError. The repository already paid for this
-    once in tests/run_all.py; the same two lines fix it here.
+    Windows runner 给 Python 的 stdout 是 cp1252，第一条中文摘要就会抛
+    UnicodeEncodeError。
     """
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -207,7 +194,7 @@ def _utf8_stdio():
 
 
 def download(out, expect_sha=RUNTIME_SHA256):
-    """Fetch the pinned tarball and refuse a checksum mismatch."""
+    """下载固定 tar 包，校验和不符就拒绝。"""
     with urllib.request.urlopen(RUNTIME_URL, timeout=120) as resp:
         with open(out, "wb") as fh:
             shutil.copyfileobj(resp, fh)

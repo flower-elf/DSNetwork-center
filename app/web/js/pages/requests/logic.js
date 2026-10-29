@@ -1,10 +1,10 @@
 // 请求日志页的纯逻辑：筛选状态、查询串组装、行内容与详情字段；任何 UI 模板都放在 requests.js 里，只允许 import core/format.js，方便在 Node 里直接测试。
-import { fmtCredit, fmtDateTime, fmtLatency, fmtNumber, fmtPercent, realmLabel } from '../../core/format.js';
+import { fmtCredit, fmtDateTime, fmtLatency, fmtNumber, fmtNumberDash, fmtPercent, realmLabel } from '../../core/format.js';
 
 export const PAGE_SIZES = [20, 50, 100];
 export const LIMIT_STORE_KEY = 'wb-requests-limit';
 
-export const DEFAULT_FILTERS = Object.freeze({
+const DEFAULT_FILTERS = Object.freeze({
   range: '7d',
   realm: 'all',
   key: '',
@@ -48,6 +48,7 @@ const OUTCOME_LABELS = Object.freeze({
   completed: '完成',
   client_aborted: '客户端取消',
   upstream_aborted: '上游中断',
+  rate_limited: '限流',
   failed: '失败',
 });
 
@@ -234,17 +235,11 @@ export function effortText(row) {
 }
 
 /** 结果：结果说明在前，HTTP 状态码在后；旧记录没有状态码时注明是按结果推断的。 */
-export function resultText(row) {
+function resultText(row) {
   const status = statusInfo(row);
   const outcome = outcomeLabel(rowOutcome(row));
   const recorded = Number(row.status) > 0;
   return `${outcome} · HTTP ${status.code}${recorded ? '' : '（旧记录没有状态码，按结果推断）'}`;
-}
-
-function numberText(value) {
-  if (value === null || value === undefined || value === '') return '—';
-  const n = Number(value);
-  return Number.isFinite(n) ? fmtNumber(n) : '—';
 }
 
 /** 页码列表：首尾固定在两端，中间最多显示当前页前后两页。 */
@@ -295,12 +290,12 @@ export function requestDetail(row, ctx = {}) {
     { label: '输出耗时', value: fmtLatency(row.gen_ms), title: '从第一个字到最后一个字的时间' },
     { label: '总耗时', value: fmtLatency(row.elapsed_ms), title: '从收到请求到请求结束的时间' },
     { label: '输出速度', value: Number.isFinite(speed) && speed > 0 ? speed.toFixed(1) + ' Token/秒' : '—' },
-    { label: '输入 Token', value: numberText(row.prompt_tokens) },
-    { label: '缓存命中 Token', value: numberText(row.cached_tokens), title: cache.title },
+    { label: '输入 Token', value: fmtNumberDash(row.prompt_tokens) },
+    { label: '缓存命中 Token', value: fmtNumberDash(row.cached_tokens), title: cache.title },
     { label: '缓存命中率', value: hasPct ? fmtPercent(pct) : '—', title: cache.title },
-    { label: '输出 Token', value: numberText(row.completion_tokens) },
-    { label: '思考 Token', value: numberText(row.reasoning_tokens), title: '输出 Token 里模型用于思考的部分' },
-    { label: '合计', value: numberText(row.total_tokens) },
+    { label: '输出 Token', value: fmtNumberDash(row.completion_tokens) },
+    { label: '思考 Token', value: fmtNumberDash(row.reasoning_tokens), title: '输出 Token 里模型用于思考的部分' },
+    { label: '合计', value: fmtNumberDash(row.total_tokens) },
     { label: '积分消耗', value: credit.text, title: credit.title },
   );
   if (row.error) rows.push({ label: '错误原因', value: String(row.error) });

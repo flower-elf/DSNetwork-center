@@ -6,11 +6,11 @@ import { paletteEntries, searchPalette } from './palette-logic.js';
 
 // 命令面板：Ctrl+K / ⌘K 打开；只做跳转，不执行任何操作。
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-export const PALETTE_SHORTCUT = isMac ? '⌘K' : 'Ctrl K';
+const PALETTE_SHORTCUT = isMac ? '⌘K' : 'Ctrl K';
 
 let ctl = null;
 
-export function openPalette() {
+function openPalette() {
   if (ctl) return;
   const entries = paletteEntries();
   let query = '';

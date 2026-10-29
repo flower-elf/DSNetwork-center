@@ -8,7 +8,7 @@ import { readStore, writeStore } from '../core/storage.js';
 import { fmtDateTime, fmtDateTimeMarked, fmtLatency, fmtNumber } from '../core/format.js';
 import {
   pageHeader, emptyState, loadErrorPage, loadErrorInline, badge, copyButton,
-  busyClick, skeletonBlock, skeletonRows, realmBadge,
+  busyClick, pager, skeletonBlock, skeletonRows, realmBadge,
 } from '../ui/widgets.js';
 import { openDialog } from '../ui/dialog.js';
 import {
@@ -131,7 +131,6 @@ export function mount(host) {
     loadRows();
   }
 
-  /** 输入框停止输入 300 毫秒后取数。 */
   function onTextInput(name, value) {
     clearTimeout(inputTimer);
     inputTimer = setTimeout(() => setFilter(name, value), 300);
@@ -305,26 +304,13 @@ export function mount(host) {
             title: '没有匹配的请求记录',
             desc: '换一个关键词，或者点击「重置」清空筛选条件。',
           })}
-        ${pagerFooter()}
-      </div>`;
-  }
-
-  function pagerFooter() {
-    const pages = Math.max(1, state.pages);
-    return html`
-      <div class="pager">
-        <span class="nums">共 ${fmtNumber(state.total)} 条 · 第 ${state.page} / ${pages} 页</span>
-        <span class="pager-buttons">
-          <button class="btn btn-outline btn-icon btn-xs" aria-label="上一页" ?disabled=${state.page <= 1}
-                  @click=${() => gotoPage(state.page - 1)}>${icon('ChevronLeft')}</button>
-          ${pageList(state.page, pages).map((item) => item === '...'
-            ? html`<span class="pager-gap">…</span>`
-            : html`
-              <button class="btn btn-xs ${item === state.page ? 'btn-primary' : 'btn-outline'}"
-                      @click=${() => gotoPage(item)}>${item}</button>`)}
-          <button class="btn btn-outline btn-icon btn-xs" aria-label="下一页" ?disabled=${state.page >= pages}
-                  @click=${() => gotoPage(state.page + 1)}>${icon('ChevronRight')}</button>
-        </span>
+        ${pager({
+          page: state.page,
+          pages: state.pages,
+          total: fmtNumber(state.total),
+          onPage: gotoPage,
+          numbers: pageList(state.page, state.pages),
+        })}
       </div>`;
   }
 

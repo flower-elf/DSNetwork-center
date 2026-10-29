@@ -1,6 +1,6 @@
 """单账号单模型的并发上限：同一账号的不同模型各自计数，名额满时报 429，续写轮复用调用方的名额；不联网。
 
-Run with: python _test_concurrency_limits.py
+用 python _test_concurrency_limits.py 运行。
 """
 import io
 import json

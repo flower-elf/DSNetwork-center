@@ -418,8 +418,11 @@ class HuntTests(unittest.TestCase):
         self.assertNotIn(self.key.hex(), json.dumps(A.status()))   # 状态里不带密钥
 
     def test_unknown_keyid_raises(self):
-        """四档全试完都不命中时必须报错，而不是返回一个假密钥。"""
-        pid = self._holder("secret", self.secret, noise_mb=16)
+        """四档全试完都不命中时必须报错，而不是返回一个假密钥。
+
+        这里验的是不命中的收尾，不是大内存下的吞吐：小噪声即可走完四档。
+        """
+        pid = self._holder("secret", self.secret, noise_mb=1)
         with mock.patch.object(A, "_main_pids", lambda *a, **k: [pid]):
             with self.assertRaises(A.AtRestError):
                 A.hunt_key(key_id="0" * 16, workers=1)

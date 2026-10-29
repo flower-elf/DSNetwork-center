@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 
 import * as logic from '../../app/web/js/pages/accounts/logic.js';
+import { fmtClock } from '../../app/web/js/core/format.js';
 
 const now = new Date(2026, 9, 3, 12, 0, 0).getTime();
 const sec = (ms) => Math.floor(ms / 1000);
@@ -62,7 +63,7 @@ const pills = logic.cooldownPills(base({
 }), now);
 assert.equal(pills.length, 2);
 assert.equal(pills[0].model, 'glm-5.3', '恢复早的排前面');
-assert.equal(pills[0].text, 'glm-5.3 · ' + logic.fmtClock((sec(now) + 600) * 1000) + ' 恢复');
+assert.equal(pills[0].text, 'glm-5.3 · ' + fmtClock((sec(now) + 600) * 1000) + ' 恢复');
 const raw = logic.cooldownPills(base({ modelCooldowns: [{ model: '"><img src=x>', expiresAt: sec(now) + 60 }] }), now);
 assert.equal(raw[0].model, '"><img src=x>', '模型名原样返回，转义由模板负责');
 

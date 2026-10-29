@@ -20,6 +20,8 @@ os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_proxy as proxy
+import wb_usage as U
+import wb_translate as T
 import wb_messages_responses
 
 MODEL = "deepseek-v4.1-flash"
@@ -38,7 +40,7 @@ def finish(reason="stop"):
 
 
 class FakeUpstream(object):
-    """An upstream body: a list of raw SSE lines, optionally ending in a bang."""
+    """上游响应体：一列原始 SSE 行，可以一个感叹号收尾。"""
 
     def __init__(self, lines, raises=None):
         self.lines = lines
@@ -67,11 +69,12 @@ class FakeAccount(object):
 
 
 class HandlerStub(object):
-    """Enough of the real Handler to drive the relays offline."""
+    """真实 Handler 的最小骨架，离线驱动各转发路径。"""
 
     _chat_stream_response = proxy.Handler._chat_stream_response
     _chat_nonstream_response = proxy.Handler._chat_nonstream_response
     _responses_stream_response = proxy.Handler._responses_stream_response
+    _responses_nonstream_response = proxy.Handler._responses_nonstream_response
     _messages_stream_response = proxy.Handler._messages_stream_response
 
     def _key_id(self):
@@ -130,7 +133,7 @@ class HandlerStub(object):
         return b"".join(self.written).decode("utf-8", "replace")
 
     def events(self):
-        """(event, payload-text) pairs, in the order they were written."""
+        """(event, payload-text) 对，按写入顺序排列。"""
         out = []
         for block in self.body().split("\n\n"):
             if not block.strip():
@@ -145,12 +148,12 @@ class HandlerStub(object):
         return out
 
     def comments(self):
-        """SSE comment lines (the forwarded upstream heartbeats)."""
+        """SSE 注释行，也就是转发的上游心跳。"""
         return [line for line in self.body().split("\n") if line.startswith(":")]
 
 
 def run(method, upstream, *args, **kwargs):
-    """Call one relay on a stub handler with the accounting calls captured."""
+    """在桩 handler 上调用一条转发路径，拦截计费与错误调用。"""
     handler = HandlerStub()
     usage_rows, error_rows = [], []
 
@@ -160,7 +163,7 @@ def run(method, upstream, *args, **kwargs):
     def capture_error(model, status=None, message=None, **kw):
         error_rows.append(dict(kw, model=model, status=status, message=message))
 
-    with mock.patch.multiple(proxy, record_usage=capture_usage, record_error=capture_error):
+    with mock.patch.multiple(U, record_usage=capture_usage, record_error=capture_error):
         getattr(handler, method)(upstream, *args, **kwargs)
     return handler, usage_rows, error_rows
 
@@ -339,6 +342,33 @@ class ResponsesStreamTests(unittest.TestCase):
         self.assertEqual(usage[0]["outcome"], "completed")
 
 
+class ResponsesNonstreamRecordingTests(unittest.TestCase):
+    """整段 Responses 请求也要记下首字时间和生成耗时，吞吐才算得出来。"""
+
+    def test_record_carries_ttft_and_generation_time(self):
+        class PacedUpstream(FakeUpstream):
+            def __iter__(self):
+                for index, line in enumerate(self.lines):
+                    if index == 1:
+                        time.sleep(0.02)
+                    yield line
+
+        upstream = PacedUpstream(data_lines(
+            text_delta("hi"),
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 4,
+                                      "total_tokens": 14}},
+            finish()) + [b"data: [DONE]\n"])
+        handler = HandlerStub()
+        handler._responses_nonstream_response(upstream, MODEL, None, {}, None,
+                                              FakeAccount(), time.time())
+        self.assertIn(("status", 200), handler.status)
+        with open(proxy.USAGE_LOG, encoding="utf-8") as fh:
+            row = json.loads([line for line in fh if line.strip()][-1])
+        self.assertIsNotNone(row.get("ttft_ms"), row)
+        self.assertIsNotNone(row.get("gen_ms"), row)
+        self.assertIsInstance(row.get("tokens_per_sec"), float, row)
+
+
 class MessagesStreamTests(unittest.TestCase):
     """Messages 两条管线：截断时发 error 事件，不发 message_stop。"""
 
@@ -408,12 +438,12 @@ class AggregateStreamTests(unittest.TestCase):
 
     def test_truncated_stream_raises(self):
         upstream = FakeUpstream(data_lines(text_delta("hi")))
-        with self.assertRaises(proxy.UpstreamStreamError):
+        with self.assertRaises(T.UpstreamStreamError):
             proxy.aggregate_stream(upstream, MODEL, None)
 
     def test_error_frame_raises(self):
         upstream = FakeUpstream(data_lines(text_delta("hi"), {"code": 11140, "msg": "rejected"}))
-        with self.assertRaises(proxy.UpstreamStreamError):
+        with self.assertRaises(T.UpstreamStreamError):
             proxy.aggregate_stream(upstream, MODEL, None)
 
     def test_finish_reason_alone_counts_as_complete(self):
@@ -428,7 +458,7 @@ class AggregateStreamTests(unittest.TestCase):
         second = {"choices": [{"delta": {"function_call": {"arguments": "{\"q\":"}}}]}
         third = {"choices": [{"delta": {"function_call": {"arguments": "\"x\"}"}}}]}
         tail = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
-        cleaned = json.loads(proxy.clean_chunk(json.dumps(second)))
+        cleaned = json.loads(T.clean_chunk(json.dumps(second)))
         self.assertIn("function_call", cleaned["choices"][0]["delta"])
         out = proxy.aggregate_stream(
             FakeUpstream(data_lines(first, second, third, tail) + [b"data: [DONE]\n"]),

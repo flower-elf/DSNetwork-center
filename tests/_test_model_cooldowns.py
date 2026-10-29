@@ -1,6 +1,4 @@
-"""Account and panel state after a model-scoped upstream 429.
-
-Run with: python _test_model_cooldowns.py - no credentials or outbound network are used.
+"""模型级上游 429 之后的账号与面板状态。用 python _test_model_cooldowns.py 直接运行，不需要凭证，也不联网。
 """
 import atexit
 import calendar
@@ -20,9 +18,8 @@ import urllib.error
 _startup_dir = tempfile.TemporaryDirectory(prefix="model-cooldowns-")
 atexit.register(_startup_dir.cleanup)
 os.environ["ACCOUNTS_DIR"] = _startup_dir.name
-# The 429 path now journals a limit event (usage/limit-events.jsonl, the
-# remaining-usage estimate's samples), so the usage dir has to be isolated too
-# or this suite would write that journal into the checkout.
+# 429 路径会往 usage 目录写限额事件与剩余用量样本，这里也要隔离该目录，
+# 否则本套件会把记录写进 checkout。
 os.environ["WB_PROXY_USAGE_DIR"] = _startup_dir.name
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -30,19 +27,17 @@ import wb_accounts as accounts
 import wb_proxy as proxy
 import wb_settings as settings
 
-# The real 429 shapes from the incident environment (issue #70, sanitized).
-# S1 is 229 of the 263 recorded 429s and carries no reset information at all;
-# S2 is the one provably intl body with no reset field (the log keeps only the
-# first 200 characters, so the JSON below is that prefix closed into valid
-# JSON); S3 is a parsed control that names its reset instant.
+# 事故环境里的真实 429 形态，来自 issue #70，已脱敏。S1 占记录的 263 条 429 中的
+# 229 条，完全不带恢复信息；S2 是唯一可确认为 intl 的无恢复字段正文，日志只保留
+# 前 200 字符，下面的 JSON 是把该前缀补成合法 JSON；S3 作为对照，正文写明了恢复
+# 时刻。
 S1_BARE = "usage exceeds frequency limit"
 S2_INTL_14003 = ('{"code":14003,"msg":"too many requests",'
                  '"retry_policy":{"retry":true},'
                  '"displayMsg":{"en":"Too many requests. Please retry later.",'
                  '"zh":"请求过于频繁，请稍后重试。"}}')
-# The same body as the gateway sees it: it reads up to 600 characters while the
-# log kept 200, so the real body carries a metadata tail. accountId and
-# credentialId are field names, not scope statements.
+# 同一正文在网关侧的形态：网关最多读 600 字符，日志只留了 200，真实正文因此多一
+# 段元数据尾巴。accountId 与 credentialId 只是字段名，不构成作用域依据。
 S2_INTL_FULL = ('{"code":14003,"msg":"too many requests",'
                 '"accountId":"<redacted>","credentialId":"<redacted>",'
                 '"requestId":"<redacted>","retry_policy":{"retry":true},'
@@ -155,15 +150,17 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertEqual(failures, [])
 
     def drive_one_429(self, account, detail="usage exceeds frequency limit",
-                      stub_parser=True, model="glm-5.3", target_realm="cn"):
-        """Drive open_upstream into an upstream 429 with a stubbed urlopen.
+                      stub_parser=True, model="glm-5.3", target_realm="cn",
+                      retry_after=None):
+        """用桩 urlopen 让 open_upstream 撞上上游 429。
 
-        Returns the reset instant the stubbed parser reported, so callers can
-        assert the cooldown the gateway recorded. `stub_parser=False` leaves the
-        real parser in place, which is what the unparsed-body case needs.
+        返回桩解析器给出的恢复时刻，调用方据此断言网关记录的冷却。stub_parser=False
+        保留真实解析器，未解析正文的用例需要它。retry_after 以秒为单位，经响应头给出
+        恢复时刻，对应正文不带时间戳的 429 形态。
         """
         reset = time.time() + 600
-        error = urllib.error.HTTPError("https://upstream.invalid", 429, "rate limit", {},
+        headers = {} if retry_after is None else {"Retry-After": str(int(retry_after))}
+        error = urllib.error.HTTPError("https://upstream.invalid", 429, "rate limit", headers,
                                        io.BytesIO(detail.encode("utf-8")))
 
         class Pool(object):
@@ -184,8 +181,7 @@ class ModelCooldownTests(unittest.TestCase):
                 return [a.public() for a in self.accounts]
 
             def apply_daily_token_limit(self, value=None, usage=None):
-                # The production path pushes the daily guard into the pool before
-                # picking; this stub only needs to answer the call.
+                # 生产路径在挑选账号前把日额度守卫推进池；这个桩接住调用即可。
                 return value or 0
 
             def apply_daily_credit_limit(self, value=None, credits=None,
@@ -204,8 +200,7 @@ class ModelCooldownTests(unittest.TestCase):
         proxy.POOL = stub_pool(account)
         accounts.urlopen = lambda *args, **kwargs: (_ for _ in ()).throw(error)
         if stub_parser:
-            # Keep these tests on the model-cooldown path, independent of the
-            # existing parser's timezone handling.
+            # 固定解析结果，让用例只走模型冷却路径，避开真实解析器的时区处理。
             proxy.parse_rate_limit_reset = lambda _detail: reset
         try:
             with self.assertRaises(proxy.RateLimited) as caught:
@@ -219,14 +214,12 @@ class ModelCooldownTests(unittest.TestCase):
         return reset
 
     def cap_body(self, reset_wall, code=6004):
-        """A 429 body whose reset clock resolves back to `reset_wall`.
+        """构造恢复时刻解析为 reset_wall 的 429 正文。
 
-        The stamp is the instant's UTC+8 wall clock (gmtime), so the shipped
-        parser resolves it to the same instant on any host timezone - the same
-        recipe the remaining-usage suite uses (cap_detail). In a DST zone the
-        parser converts with the standard offset while mktime uses the summer
-        one, so the stamp is corrected against the shipped parser before
-        returning (the mapping is piecewise linear; one correction hits).
+        时间戳用该时刻 UTC+8 的墙上时钟表示，以 gmtime 生成，随附解析器在任何主机
+        时区都解析回同一时刻，配方与剩余用量套件里的 cap_detail 相同。夏令时区里
+        解析器按标准偏移换算而 mktime 用夏令时偏移，所以返回前用随附解析器校正一次
+        时间戳；映射是分段线性的，一次校正即可命中。
         """
         reset = int(reset_wall)
         offset = reset + 8 * 3600
@@ -245,7 +238,7 @@ class ModelCooldownTests(unittest.TestCase):
 
     def test_upstream_429_reaches_accounts_payload(self):
         account = self.account()
-        # 429 会把撞线时刻持久化进凭证档（_save_account_caps），而这条用例的
+        # 429 会把恢复时刻持久化进凭证档（_save_account_window），而这条用例的
         # 合成账号没有自己的文件——不隔离账号目录，它会往 checkout 的 accounts/
         # 落一份 synthetic-cn.json，并污染并行跑的 checkpoint 套件（那些套件的
         # 子进程按硬编码路径读到它，realm 指纹就和父进程对不上了）。
@@ -289,11 +282,11 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertIsNone(proxy.parse_rate_limit_reset('{"code": 6004, "msg": "busy"}'))
 
     def test_a_model_429_records_the_moment_it_started(self):
-        """面板要如实说「限流时刻 + 恢复时间」。
+        """面板要如实显示「限流时刻 + 恢复时间」。
 
-        model_cooldowns 只留恢复时刻，起始时刻以前被丢掉，禁用总览因此只能用
-        「—」占位——把 60s 的短时 parking 和几小时的 6004 撞线画成同一副样子。
-        这里钉住：非 6004 的模型级 429 也要记下起始时刻，并且冷却清掉后不留残影。
+        60s 的短时限流和几小时的 6004 撞线都要带起始时刻，「开始时间」列才不会用
+        「—」占位。这里断言非 6004 的模型级 429 同样记下起始时刻，并且冷却清掉后
+        不留残影。
         """
         before = time.time()
         account = self._drive_unparsed(S1_BARE, "started-at")
@@ -335,12 +328,7 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertNotIn("deepseek-v4.1-flash", account.model_cooldowns_at)
 
     def test_the_real_bare_429_parks_only_the_model(self):
-        """S1 - 87% of the recorded 429s, no reset information at all.
-
-        It used to be read as an account-level soft limit purely because there
-        was no timestamp, which is how a realm ended up fully cooling while the
-        panel test kept reporting every account healthy.
-        """
+        """S1：占已记录 429 的 87%，完全不带恢复信息，只停模型，不动账号级阶梯。"""
         account = self._drive_unparsed(S1_BARE, "bare-shape")
         row = account.public()
         self.assertEqual(account.unscoped_streak, 1,
@@ -355,12 +343,9 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertTrue(account.ready(model="another-model"))
 
     def test_the_full_intl_14003_body_with_metadata_parks_only_the_model(self):
-        """S2 as the gateway really sees it: the recorded prefix plus the
-        metadata tail the log truncated (accountId / credentialId).
-
-        Field names are not scope evidence - reading them as such put the
-        600s -> 7200s credential ladder back on the most common intl shape.
-        """
+        """S2 在网关侧的形态：日志记录的前缀加上被截断的元数据尾巴，即 accountId
+        与 credentialId 字段。字段名不构成作用域依据，否则最常见的 intl 形态会走
+        600s 到 7200s 的账号级阶梯。"""
         self.assertIn('"accountId"', S2_INTL_FULL)
         self.assertIn('"credentialId"', S2_INTL_FULL)
         account = self._drive_unparsed(S2_INTL_FULL, "intl-14003-full")
@@ -372,7 +357,7 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertTrue(account.ready(model="another-model"))
 
     def test_the_real_intl_14003_429_parks_only_the_model(self):
-        """S2 - the intl body, recognised by code 14003 (and by its message)."""
+        """S2 的 intl 正文：按 code 14003 识别，也按消息文本识别。"""
         account = self._drive_unparsed(S2_INTL_14003, "intl-14003")
         row = account.public()
         self.assertEqual(account.soft_streak, 0)
@@ -382,7 +367,7 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertTrue(account.ready(model="another-model"))
 
     def test_a_parsed_intl_429_still_parks_until_its_clock(self):
-        """S3 - the control: a named reset instant still drives a model park."""
+        """S3 对照组：正文写明恢复时刻时，仍按该时刻停模型。"""
         expected = proxy.parse_rate_limit_reset(S3_INTL_6004)
         self.assertEqual(expected, 1791291609)
         account = self._drive_unparsed(S3_INTL_6004, "intl-6004")
@@ -390,13 +375,33 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertEqual(account.soft_streak, 0, "a parsed clock is not a streak")
         self.assertFalse(row["inCooldown"])
         self.assertEqual([item["model"] for item in row["modelCooldowns"]], ["glm-5.3"])
-        # The named instant is already past for this run, so the park is the 1s
-        # floor - which is what tells it apart from the 60s unparsed window and
-        # from the credential ladder.
+        # 正文给的时刻对本次运行已经过去，冷却落到 1s 下限；靠这一点与 60s 的未解析
+        # 窗口、账号级阶梯区分开。
         self.assertLessEqual(row["modelCooldowns"][0]["expiresAt"] - time.time(), 2)
 
+    def test_an_account_scope_429_with_a_header_clock_parks_the_model(self):
+        """正文像账号级、但响应头给了恢复时刻：按恢复时刻停这个模型，不走阶梯。"""
+        directory = tempfile.mkdtemp(prefix="cap-header-")
+        old_dir = proxy.ACCOUNTS_DIR
+        proxy.ACCOUNTS_DIR = directory
+        try:
+            account = self.account()
+            started = time.time()
+            self.drive_one_429(account, detail='{"msg": "this account is limited"}',
+                               stub_parser=False, retry_after=90)
+            self.assertEqual(account.soft_streak, 0, "有恢复时刻就不该走账号级阶梯")
+            self.assertIn("glm-5.3", account.model_holds)
+            row = account.public()["modelCooldowns"][0]
+            self.assertEqual(row["model"], "glm-5.3")
+            self.assertLessEqual(abs(row["expiresAt"] - (started + 90)), 3)
+            saved = json.load(open(os.path.join(directory, "synthetic-cn.json"),
+                                   encoding="utf-8"))
+            self.assertIn("glm-5.3", saved.get("modelHolds") or {})
+        finally:
+            proxy.ACCOUNTS_DIR = old_dir
+
     def _drive_unparsed(self, detail, tag):
-        """Feed one real 429 body through open_upstream, parser left in place."""
+        """把一条真实 429 正文送进 open_upstream，保留真实解析器。"""
         directory = tempfile.mkdtemp(prefix="real-429-%s-" % tag)
         old_dir = proxy.ACCOUNTS_DIR
         proxy.ACCOUNTS_DIR = directory
@@ -408,8 +413,8 @@ class ModelCooldownTests(unittest.TestCase):
             proxy.ACCOUNTS_DIR = old_dir
 
     def test_repeated_real_429s_do_not_amplify_into_an_account_park(self):
-        """S1 three times in a row used to mean 600 -> 1200 -> 2400s on the
-        whole credential. It has to stay three short windows on one model."""
+        """连着三次 S1 只能是同一个模型上的三个短窗口，不能放大成整个凭证的
+        600s、1200s、2400s 阶梯。"""
         directory = tempfile.mkdtemp(prefix="real-429-repeat-")
         old_dir = proxy.ACCOUNTS_DIR
         proxy.ACCOUNTS_DIR = directory
@@ -423,8 +428,7 @@ class ModelCooldownTests(unittest.TestCase):
                 self.assertTrue(account.ready(model="another-model"),
                                 "round %d took a sibling model down" % round_number)
                 windows.append(account.model_cooldowns["glm-5.3"] - time.time())
-                # Let the window lapse, the way it does in production when the
-                # same shape comes back; the streak is what must survive.
+                # 让窗口过期，模拟生产里同一形态再次到来；必须留下的是连续计数。
                 with account._throttle_lock:
                     account.model_cooldowns["glm-5.3"] = time.time() - 1
         finally:
@@ -437,11 +441,8 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertLessEqual(windows[2], 241, "and stays far below the 2h ceiling")
 
     def test_unscoped_hits_do_not_lift_the_credential_ladder(self):
-        """Four unscoped S1s, then one credential-scoped body, end to end.
-
-        Sharing one counter made this sequence start the credential ladder at
-        600 * 2**4 - the 7200s ceiling - instead of at 600s.
-        """
+        """端到端：先四次无作用域的 S1，再一条账号级正文。两条阶梯不共用计数，
+        否则账号级阶梯会从 600 * 2**4 即 7200s 上限起步，正确起点是 600s。"""
         directory = tempfile.mkdtemp(prefix="mixed-seq-")
         old_dir = proxy.ACCOUNTS_DIR
         proxy.ACCOUNTS_DIR = directory
@@ -468,7 +469,7 @@ class ModelCooldownTests(unittest.TestCase):
                          [], "and adds no model window")
 
     def test_the_auto_switch_setting_is_opt_in(self):
-        """Off on a fresh install, and only a real JSON boolean turns it on."""
+        """新装默认关闭，只有真正的 JSON 布尔值才会打开。"""
         directory = tempfile.mkdtemp(prefix="auto-switch-setting-")
         self.assertFalse(settings.auto_switch_product(directory))
         self.assertTrue(settings.set_auto_switch_product(directory, True))
@@ -500,7 +501,7 @@ class ModelCooldownTests(unittest.TestCase):
         old_dir = proxy.ACCOUNTS_DIR
         old_budget = proxy.MAX_PRODUCT_SWITCHES
         proxy.ACCOUNTS_DIR = directory
-        # One switch keeps the assertion exact regardless of the real budget; an even number of rotations ends back at workbuddy.
+        # 只允许切换一次，断言就不受真实预算影响；切换偶数次会回到 workbuddy。
         proxy.MAX_PRODUCT_SWITCHES = 1
         proxy._SWITCH_LOG.clear()
         try:
@@ -514,11 +515,11 @@ class ModelCooldownTests(unittest.TestCase):
             proxy._SWITCH_LOG.clear()
 
     def test_a_6004_keeps_the_disable_across_an_identity_switch(self):
-        """端到端：auto-switch 开着时，撞线后账号仍然处于禁用。
+        """端到端：auto-switch 开着时，撞线后账号仍处于禁用。
 
-        429 分支的顺序是「记 cap（挂模型冷却 + 写凭证档）→ 换身分」，换身分
-        会走 set_product/clear_error 的清理路径；这里钉住整条链结束时 cap 与
-        冷却都还在（真机 2026-10-10 的四个撞线账号在切换后都被清成了可用）。
+        429 分支先记 cap 并写凭证档、挂模型冷却，再换身份，换身份会走
+        set_product/clear_error 的清理路径。这里断言整条链结束时 cap 与冷却都还在，
+        真机 2026-10-10 的四个撞线账号在切换后都被清成了可用。
         """
         directory = tempfile.mkdtemp(prefix="cap-switch-")
         settings.set_auto_switch_product(directory, True)
@@ -532,10 +533,10 @@ class ModelCooldownTests(unittest.TestCase):
             reset = time.time() + 600
             self.drive_one_429(account, detail=self.cap_body(reset),
                                model="hy4-preview-f", target_realm="cn")
-            # 身分换了（auto-switch 生效）……
+            # 身份换了，auto-switch 生效⋯⋯
             self.assertEqual(account.product, "vscode")
             self.assertTrue(proxy._SWITCH_LOG)
-            # ……但禁用必须留下：cap 记录与模型冷却都还在。
+            # ⋯⋯但禁用必须留下：cap 记录与模型冷却都还在。
             self.assertIn("hy4-preview-f", account.model_caps)
             self.assertFalse(account.ready(model="hy4-preview-f"))
             self.assertEqual([c["model"] for c in account.public()["modelCooldowns"]],
@@ -548,8 +549,8 @@ class ModelCooldownTests(unittest.TestCase):
     def test_switching_the_identity_keeps_a_cap_backed_disable(self):
         """set_product 的清理不能把 6004 的禁用一起清掉。
 
-        这是真机 bug 的直接钉法：换身分（无论谁调）只清限流窗口，恢复期内
-        的 cap 禁用跨身分成立。
+        这条用例复现真机 bug：无论谁调用 set_product，换身份都只清限流窗口，
+        恢复期内的 cap 禁用跨身份成立。
         """
         account = self.account()
         account.note_model_cap("hy4-preview-f", time.time() + 600)
@@ -586,34 +587,18 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertFalse(account.ready(model="hy4-preview-f"))
 
     # ------------------------------------------------------------------
-    # 限额联动：6004 → 记录（撞线/恢复时刻）→ 跨重启禁用，仅限免费模型
+    # 限额联动：6004 → 记录（撞线/恢复时刻）→ 跨重启禁用，覆盖所有模型
     # ------------------------------------------------------------------
 
-    def test_the_free_cap_scope_is_the_confirmed_model_lists(self):
-        """范围是用户确认过的口径：intl 三个免费模型，cn 两个（deepseek 收费）。"""
-        self.assertEqual(sorted(accounts.FREE_CAP_MODELS["intl"]),
-                         ["deepseek-v4.1-flash", "hy3", "hy4-preview-f"])
-        self.assertEqual(sorted(accounts.FREE_CAP_MODELS["cn"]), ["hy3", "hy4-preview-f"])
-        self.assertTrue(accounts.is_free_cap_model("intl", "deepseek-v4.1-flash"))
-        self.assertTrue(accounts.is_free_cap_model("cn", "hy4-preview-f"))
-        self.assertFalse(accounts.is_free_cap_model("cn", "deepseek-v4.1-flash"),
-                         "国内版的 deepseek-v4.1-flash 是收费模型（x0.11）")
-        self.assertFalse(accounts.is_free_cap_model("intl", "hy4-preview"),
-                         "hy4-preview 是付费变体（x0.29）")
-        self.assertFalse(accounts.is_free_cap_model("intl", "glm-5.3"))
-        self.assertFalse(accounts.is_free_cap_model("", "hy3"), "未知区域失败关闭")
-        self.assertFalse(accounts.is_free_cap_model("intl", ""))
-
-    def test_note_model_cap_only_records_models_in_the_free_scope(self):
+    def test_note_model_cap_records_any_model(self):
         cn = self.account()
         intl = accounts.Account({"uid": "synthetic-intl", "realm": "intl",
                                  "accessToken": "token"})
         now = time.time()
-        # 范围外：付费模型、以及国内版不算免费的 deepseek
-        self.assertFalse(cn.note_model_cap("glm-5.3", now + 600))
-        self.assertFalse(cn.note_model_cap("deepseek-v4.1-flash", now + 600))
-        self.assertEqual(cn.model_caps, {})
-        # 范围内：两区都免费的两个 + intl 的 deepseek
+        # 付费模型与国内版的 deepseek 同样记 cap：上游给了恢复时刻就成立
+        self.assertTrue(cn.note_model_cap("glm-5.3", now + 600))
+        self.assertTrue(cn.note_model_cap("deepseek-v4.1-flash", now + 600))
+        self.assertEqual(sorted(cn.model_caps), ["deepseek-v4.1-flash", "glm-5.3"])
         self.assertTrue(cn.note_model_cap("hy3", now + 600))
         self.assertTrue(intl.note_model_cap("deepseek-v4.1-flash", now + 600))
         # 同一个窗口重复撞线不算新记录（避免每次都重写凭证档）
@@ -622,8 +607,8 @@ class ModelCooldownTests(unittest.TestCase):
         self.assertFalse(cn.note_model_cap("hy4-preview-f", 0))
         self.assertNotIn("hy4-preview-f", cn.model_caps)
 
-    def test_a_stored_out_of_scope_cap_is_dropped_and_not_restored(self):
-        """旧版本存下的范围外 cap 在加载时丢弃，也不会被 restore 重新挂上。"""
+    def test_a_stored_cap_for_any_model_is_restored(self):
+        """凭证档里的 cap 不分模型范围，加载后全部重新挂上。"""
         now = time.time()
         account = accounts.Account({
             "uid": "synthetic-cn", "realm": "cn", "accessToken": "token",
@@ -632,12 +617,10 @@ class ModelCooldownTests(unittest.TestCase):
                 "hy3": {"at": now, "reset": now + 600},
             },
         })
-        self.assertEqual(list(account.model_caps), ["hy3"])
-        self.assertEqual(account.restore_model_caps(), ["hy3"])
-        self.assertIn("hy3", account.model_cooldowns)
-        self.assertNotIn("glm-5.3", account.model_cooldowns)
+        self.assertEqual(sorted(account.model_caps), ["glm-5.3", "hy3"])
+        self.assertEqual(account.restore_model_caps(), ["glm-5.3", "hy3"])
+        self.assertFalse(account.ready(model="glm-5.3"))
         self.assertFalse(account.ready(model="hy3"))
-        self.assertTrue(account.ready(model="glm-5.3"))
         with mock.patch.object(accounts.time, "time", return_value=now + 601):
             self.assertTrue(account.ready(model="hy3"), "恢复时间过后自动解除")
 
@@ -688,7 +671,7 @@ class ModelCooldownTests(unittest.TestCase):
                                if item["model"] == "deepseek-v4.1-flash")
             self.assertIn("cappedAt", revived_row, "重启加载后面板仍能显示撞线时间")
             # 起始时刻是运行时态，重启即清零；撞线时刻另有持久化的 cap 兜底，
-            # 面板的「开始时间」列因此仍有值（这是刻意的分工，不是缺失）。
+            # 面板的「开始时间」列因此仍有值，这是刻意的分工。
             self.assertNotIn("startedAt", revived_row,
                              "startedAt 是运行时态，不该跨重启")
 
@@ -700,12 +683,8 @@ class ModelCooldownTests(unittest.TestCase):
         finally:
             proxy.ACCOUNTS_DIR = old_dir
 
-    def test_a_6004_outside_the_scope_is_never_recorded(self):
-        """范围外的模型（付费、或另一区域的免费模型）收到 6004 也不记 cap。
-
-        既有的运行时冷却不受影响：429 带时钟时仍停到时钟（这条语义有测试钉住，
-        不随限额联动改变）。
-        """
+    def test_a_6004_on_a_paid_model_is_recorded_and_survives_a_restart(self):
+        """付费模型（以及另一区域不算免费的模型）收到 6004 同样记 cap 并写盘。"""
         for realm, model in (("cn", "glm-5.3"), ("cn", "deepseek-v4.1-flash"),
                              ("intl", "glm-5.3")):
             directory = tempfile.mkdtemp(prefix="cap-scope-%s-" % realm)
@@ -718,16 +697,23 @@ class ModelCooldownTests(unittest.TestCase):
                                             "realm": realm, "accessToken": "token"})
                 self.drive_one_429(account, detail=detail, stub_parser=False,
                                    model=model, target_realm=realm)
-                self.assertEqual(account.model_caps, {},
-                                 "%s/%s 不在限额联动范围内" % (realm, model))
+                self.assertIn(model, account.model_caps,
+                              "%s/%s 的 6004 必须记 cap" % (realm, model))
                 row = account.public()["modelCooldowns"][0]
                 self.assertEqual(row["model"], model)
-                self.assertNotIn("cappedAt", row)
+                self.assertIn("cappedAt", row)
                 self.assertLessEqual(abs(row["expiresAt"] - reset), 2,
-                                     "运行时仍按上游时钟停到点")
-                self.assertFalse(os.path.exists(os.path.join(
-                    directory, "synthetic-%s.json" % realm)),
-                    "不写盘：重启后自动放开")
+                                     "按上游时钟停到点")
+                saved_path = os.path.join(directory, "synthetic-%s.json" % realm)
+                self.assertTrue(os.path.exists(saved_path), "cap 必须写盘")
+                with open(saved_path, encoding="utf-8") as fh:
+                    self.assertIn(model, json.load(fh).get("modelCaps") or {})
+                # 重启：新建池 + load，仍在恢复期内就不接单
+                pool = accounts.AccountPool(directory)
+                revived = pool.load()[0]
+                self.assertFalse(revived.ready(model=model))
+                with mock.patch.object(accounts.time, "time", return_value=reset + 1):
+                    self.assertTrue(revived.ready(model=model), "恢复时间过后自动解除")
             finally:
                 proxy.ACCOUNTS_DIR = old_dir
 
@@ -750,14 +736,25 @@ class ModelCooldownTests(unittest.TestCase):
             self.assertIsNotNone(reset, "夹具必须带可解析的重置时刻")
             account = accounts.Account({"uid": "synthetic-cn", "realm": "cn",
                                         "accessToken": "token"})
-            # hy3 在范围内——挡住这条记录的是 code 判据本身，不是范围。
             self.drive_one_429(account, detail=detail, stub_parser=False, model="hy3")
             self.assertEqual(account.model_caps, {}, "非 6004 不记 cap")
+            self.assertIn("hy3", account.model_holds, "带恢复时刻的 429 记窗口")
             row = account.public()["modelCooldowns"][0]
             self.assertEqual(row["model"], "hy3")
-            self.assertNotIn("cappedAt", row)
+            self.assertNotIn("cappedAt", row, "普通 429 不是「额度用满」")
             self.assertLessEqual(abs(row["expiresAt"] - reset), 2)
-            self.assertFalse(os.path.exists(os.path.join(directory, "synthetic-cn.json")))
+            saved_path = os.path.join(directory, "synthetic-cn.json")
+            self.assertTrue(os.path.exists(saved_path), "窗口必须写盘")
+            with open(saved_path, encoding="utf-8") as fh:
+                saved = json.load(fh)
+            self.assertEqual(saved.get("modelCaps"), {})
+            self.assertIn("hy3", saved.get("modelHolds") or {})
+            # 重启后仍然停在这个窗口上
+            pool = accounts.AccountPool(directory)
+            revived = pool.load()[0]
+            self.assertFalse(revived.ready(model="hy3"))
+            with mock.patch.object(accounts.time, "time", return_value=reset + 1):
+                self.assertTrue(revived.ready(model="hy3"), "恢复时间过后自动解除")
         finally:
             proxy.ACCOUNTS_DIR = old_dir
 

@@ -1,6 +1,9 @@
 """后台排程时段可配置：默认保持 09:00/21:00、22:00、01:00，面板保存后立即生效。
 
-不联网：调度器只做时段计算，不启动线程。
+总开关的运行时行为：开关关闭后排程周期不执行任务；面板切换路由翻转运行中的
+调度器并把开关写进设置。
+
+不联网：调度器只做时段计算与巡检循环推演，不启动线程。
 """
 import os
 import sys
@@ -15,6 +18,7 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402
 
 _TMP = isolated_data_dirs("wb-scheduler-hours-")
 
+import wb_proxy as P  # noqa: E402
 import wb_scheduler  # noqa: E402
 import wb_settings  # noqa: E402
 import wb_tasks  # noqa: E402
@@ -156,10 +160,6 @@ class _ScheduledAccount(object):
     def can_report_activity(self):
         return True
 
-    def report_activity(self):
-        self.reports += 1
-        return {"ok": True, "msg": "活跃上报完成"}
-
     def refresh(self):
         return True
 
@@ -180,7 +180,13 @@ class SchedulerGroupTests(unittest.TestCase):
         scheduler = wb_scheduler.Scheduler(pool)
         calls = calls if calls is not None else []
         stamp = time.struct_time((2026, 10, 20, hour, 0, 0, 0, 0, -1))
+
+        def fake_report(acc):
+            acc.reports += 1
+            return {"ok": True, "msg": "活跃上报完成"}
+
         with mock.patch.object(wb_scheduler.wb_tasks, "cst_now", return_value=stamp), \
+                mock.patch.object(wb_scheduler.wb_tasks, "report_activity", fake_report), \
                 mock.patch.object(wb_scheduler, "do_cat_travel",
                                   lambda acc: calls.append("travel") or
                                   {"ok": True, "msg": "猫猫状态正常"}), \
@@ -201,6 +207,118 @@ class SchedulerGroupTests(unittest.TestCase):
         account, calls = self._run(10, force=True)
         self.assertEqual(account.checkins, 1)
         self.assertEqual(calls, ["travel", "streak", "night"])
+
+
+class _RouteHandler(P.Handler):
+    """路由方法的替身：继承 Handler 只记录应答；不调用基类初始化，不走 HTTP。"""
+
+    def __init__(self):
+        self.code = None
+        self.payload = None
+
+    def _error(self, code, message, err_type="server_error"):
+        self.code = code
+        self.payload = message
+        return None
+
+    def _json(self, code, obj):
+        self.code = code
+        self.payload = obj
+        return None
+
+
+class _ScriptedStopEvent(object):
+    """停止信号替身：放行指定次数的等待后结束巡检循环，全程不启动线程。"""
+
+    def __init__(self, passes):
+        self._passes = passes
+        self._set = False
+
+    def wait(self, timeout):
+        if self._set:
+            return True
+        if self._passes <= 0:
+            self._set = True
+            return True
+        self._passes -= 1
+        return False
+
+    def is_set(self):
+        return self._set
+
+    def set(self):
+        self._set = True
+
+
+class SchedulerSwitchTests(unittest.TestCase):
+    """总开关关闭时排程周期不执行任务；面板切换翻转运行中的调度器并保存开关。"""
+
+    def setUp(self):
+        self.directory = os.environ["ACCOUNTS_DIR"]
+        wb_settings.set_scheduler_hours(self.directory, {
+            "checkin": [10], "travel": [9], "keepalive": [22], "cat": [1],
+        })
+        wb_settings.set_scheduler_enabled(self.directory, True)
+        self.account = _ScheduledAccount()
+        self.pool = FakePool(self.directory)
+        self.pool.accounts = [self.account]
+        self.scheduler = wb_scheduler.Scheduler(self.pool)
+        self.calls = []
+
+    def _toggle(self):
+        handler = _RouteHandler()
+        with mock.patch.object(P, "SCHEDULER", self.scheduler):
+            P.Handler._route_scheduler_toggle(handler, {})
+        self.assertEqual(handler.code, 200)
+        return handler.payload
+
+    def _run_one_loop_pass(self):
+        """巡检循环按脚本走一轮：整点停在 10:00，任务调用全部换成本地替身。"""
+        stamp = time.struct_time((2026, 10, 20, 10, 0, 0, 0, 0, -1))
+
+        def fake_report(acc):
+            self.calls.append("report")
+            return {"ok": True, "msg": "活跃上报完成"}
+
+        with mock.patch.object(wb_scheduler.wb_tasks, "cst_now",
+                               return_value=stamp), \
+                mock.patch.object(wb_scheduler.wb_tasks, "report_activity",
+                                  fake_report), \
+                mock.patch.object(wb_scheduler, "do_cat_travel",
+                                  lambda acc: self.calls.append("travel")
+                                  or {"ok": True, "msg": "猫猫状态正常"}), \
+                mock.patch.object(wb_scheduler.wb_tasks, "run_streak_bonus",
+                                  lambda acc: self.calls.append("streak")
+                                  or {"logs": []}), \
+                mock.patch.object(wb_scheduler.wb_tasks, "run_night_growth",
+                                  lambda acc: self.calls.append("night")
+                                  or {"logs": []}), \
+                mock.patch.object(wb_scheduler.time, "sleep",
+                                  lambda *args: None):
+            self.scheduler._run_loop(_ScriptedStopEvent(1))
+
+    def test_pausing_at_the_panel_keeps_the_cycle_from_running_tasks(self):
+        self._toggle()
+        self.assertFalse(self.scheduler.enabled)
+        self.assertFalse(wb_settings.scheduler_enabled(self.directory))
+        self._run_one_loop_pass()
+        self.assertEqual(self.account.checkins, 0)
+        self.assertEqual(self.calls, [])
+        self.assertIsNone(self.scheduler.last_run_time)
+
+    def test_the_switch_can_be_turned_back_on_at_the_panel(self):
+        self._toggle()
+        self._toggle()
+        self.assertTrue(self.scheduler.enabled)
+        self.assertTrue(wb_settings.scheduler_enabled(self.directory))
+        self._run_one_loop_pass()
+        self.assertGreaterEqual(self.account.checkins, 1)
+        self.assertIn("report", self.calls)
+
+    def test_toggle_response_reports_the_new_switch_state(self):
+        self.assertIs(self._toggle()["enabled"], False)
+        self.assertIs(self._toggle()["enabled"], True)
+        self.assertIs(self.scheduler.status()["enabled"], True)
 
 
 if __name__ == "__main__":

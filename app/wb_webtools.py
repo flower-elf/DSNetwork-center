@@ -1,18 +1,19 @@
 # -*- coding: utf-8 -*-
-# 反向代理代为执行 web_search 与 web_fetch，开关在 wb_proxy.LOCAL_WEB_TOOLS。
+# 反向代理代为执行 web_search 与 web_fetch，开关在 wb_settings.local_web_tools。
 #
-# 搜索按引擎链自动轮换：duckduckgo、bing 失败时依次换 wikipedia、
-# stackoverflow、news；非常规来源的结果会标明来源，全部失败时回明确的错误，
-# 不把失败伪装成查无结果。被限流的引擎进冷却，查询结果进 TTL 缓存，相同 key
-# 的并发查询合并成一次对外请求。
+# 搜索按引擎链轮换（duckduckgo、bing 优先，失败时换 wikipedia、stackoverflow、
+# news）；非常规来源的结果会标明来源，全部失败时返回明确的错误，不把失败伪装成
+# 查无结果。被限流的引擎进冷却，查询结果进 TTL 缓存，相同 key 的并发查询合并成
+# 一次对外请求。
 #
-# web_fetch 只收文本型内容，支持 gzip，读档上限 4 MB，charset 依标头与
-# <meta> 推断，结果同样进缓存。URL 守卫在 DNS 解析后逐一核对，必须都是公网
-# 地址，防止 DNS rebinding 把 fetch 指进内网。
-#
+# web_fetch 只收文本型内容，支持 gzip，读取上限 4 MB，charset 依标头与 <meta>
+# 推断，结果同样进缓存。URL 守卫在 DNS 解析后逐一核对，必须都是公网地址，防止
+# DNS rebinding 把 fetch 指进内网。
+
 # 环境变量：
 #   WB_WEB_ENGINES       覆盖引擎链与顺序，逗号分隔
 #   WB_WEB_COOLDOWN      被挡引擎的冷却秒数，默认 600，0 表示不冷却
+#   WB_WEB_COOLDOWN_ERROR  出错引擎的冷却秒数，默认 60，0 表示不冷却
 #   WB_WEB_CACHE_TTL     搜索与抓取缓存秒数，默认 600，0 表示关闭
 #   WB_WEB_MIN_INTERVAL  对外最小间隔秒数，默认 0.5，0 表示关闭
 #   WB_WEB_BUDGET        单次搜索所有引擎的总预算秒数，默认 25，0 表示不限
@@ -193,7 +194,7 @@ def _throttle():
 
 
 def reset_state():
-    """清空缓存与冷却状态，测试与面板重设时调用。"""
+    """清空缓存与冷却状态，供测试重设时调用。"""
     _CACHE.clear()
     with _ENGINE_STATE_LOCK:
         _ENGINE_STATE.clear()
@@ -599,7 +600,7 @@ ENGINE_NAMES_DEFAULT = ("duckduckgo", "bing", "wikipedia", "stackoverflow", "new
 
 
 def engine_names():
-    """设置里的引擎链；WB_WEB_ENGINES 可覆盖顺序与子集。"""
+    """默认引擎链与顺序；WB_WEB_ENGINES 可覆盖顺序与子集。"""
     raw = (os.environ.get("WB_WEB_ENGINES") or "").strip()
     if raw:
         picked = [x.strip().lower() for x in raw.split(",") if x.strip()]
@@ -610,7 +611,6 @@ def engine_names():
 
 
 def _chain_for(query):
-    """这一轮要试的引擎顺序；之后若按查询语言重排，只需要改这里。"""
     return engine_names()
 
 
@@ -698,11 +698,11 @@ def _format_results(query, results, note=""):
 
 
 def _search_fanout(query, n):
-    """依序打所有引擎；第一家成功的直接回报，只有全部失败才回错误。
+    """依次请求各引擎；第一家成功的直接回报，只有全部失败才回错误。
 
     常规引擎 DuckDuckGo 与 Bing 接手时结果与平常无异；换成 Wikipedia、
     Stack Overflow、Google News 这类非常规来源时，结果会带上 source_note，
-    让模型知道手上的不是一般网页搜索结果。
+    让模型知道这不是一般网页搜索结果。
     """
     names = _chain_for(query)
     if not names:

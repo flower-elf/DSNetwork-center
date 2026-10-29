@@ -1,29 +1,24 @@
-"""Outbound TLS must reuse one process-wide SSLContext.
+"""出站 TLS 必须复用同一个进程级 SSLContext。
 
-http.client builds a fresh default context on every HTTPSConnection when
-context=None: it calls ssl._create_default_https_context() ->
-create_default_context(), which re-parses the system CA bundle. Measured in the
-v1.7.2 container:
+http.client 在 context=None 时每个 HTTPSConnection 都新建默认上下文，每次都重新解析
+系统 CA 列表。v1.7.2 容器实测：
 
-    create_default_context() 平均 20.4 ms  (CA 憑證 121 張)
+    create_default_context() 平均 20.4 ms（CA 凭证 121 张）
 
-And because OpenSSL's client-side session cache lives on the SSLContext, a fresh
-context per connection also gives up TLS session resumption, so every handshake
-degrades into a full handshake. With 45 accounts each routed through its own
-proxy that is 45 pool keys, and the cost is paid again every time a connection
-expires and is rebuilt.
+OpenSSL 的客户端会话缓存挂在 SSLContext 上，每连接一个上下文也就放弃了 TLS 会话
+复用，每次握手都是完整握手。45 个账号各走自己的代理就是 45 个池键，连接过期重建时
+这笔开销再付一次。
 
-These tests pin two things: the context is built once and shared, and its
-verification settings are the ones create_default_context() ships - an
-optimisation here must not relax a single check.
+这些用例固定两件事：上下文只建一次并共享，校验设置与 create_default_context() 出厂
+一致；这里的任何优化都不得放松一项检查。
 """
 import os
 import ssl
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits.
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  独立数据根目录
+# 独立的数据目录，进程退出时删除。
 _TMP = isolated_data_dirs("wb-shared-ssl-")
 
 import wb_upstream_pool as U  # noqa: E402
@@ -44,8 +39,8 @@ def check(label, ok, detail=""):
 
 print("-- one context, built once --")
 
-# Lazy on purpose: a process that never makes an outbound call (the test
-# suites, a panel-only run) must not pay the 20ms CA parse at import time.
+# 刻意惰性：从不发起出站请求的进程（测试套件、只跑面板）不该在 import 时付
+# 20 ms 的 CA 解析。
 check("importing the module did not build the context yet",
       U._SSL_CONTEXT is None, "already built: %r" % (U._SSL_CONTEXT,))
 
@@ -66,8 +61,8 @@ check("verify_mode is CERT_REQUIRED",
 check("the system CA bundle is loaded", len(first.get_ca_certs()) > 10,
       "%d certs" % len(first.get_ca_certs()))
 
-# The settings must match a freshly built default context exactly, so a future
-# edit that "just shares a context" cannot quietly widen what is accepted.
+# 设置必须与新建的默认上下文完全一致，以后“只是共享一个上下文”的改动不得
+# 悄悄放宽接受范围。
 fresh = ssl.create_default_context()
 check("check_hostname matches a fresh default context",
       first.check_hostname == fresh.check_hostname)
@@ -116,12 +111,11 @@ print("-- the stdlib seam still works: a swapped factory invalidates the cache -
 before = U.shared_ssl_context()
 
 custom = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-custom.check_hostname = False          # must precede verify_mode: CERT_NONE
-custom.verify_mode = ssl.CERT_NONE     # is rejected while check_hostname is on
+custom.check_hostname = False          # 必须先于 verify_mode 关闭：check_hostname
+custom.verify_mode = ssl.CERT_NONE     # 开启时 CERT_NONE 会被拒绝
 
-# Patch both spellings, the way the pool suite does, so this is version-agnostic:
-# 3.13+ goes through http.client._create_https_context, 3.9-3.12 through
-# ssl._create_default_https_context.
+# 像池套件那样同时补丁两种拼写，跨版本都能用：3.13+ 走
+# http.client._create_https_context，3.9-3.12 走 ssl._create_default_https_context。
 saved = {}
 for module, name in ((http.client, "_create_https_context"),
                      (ssl, "_create_default_https_context")):
@@ -139,9 +133,8 @@ finally:
     for (module, name), fn in saved.items():
         setattr(module, name, fn)
 
-# Restoring the factory invalidates the cache again, so the next call rebuilds
-# - a fresh object, not the one from before the swap. What matters is that it
-# verifies again and is cached once more.
+# 恢复工厂函数会再次作废缓存，下次调用重建出新对象。重要的是它重新做校验并
+# 再次进缓存。
 restored = U.shared_ssl_context()
 check("restoring the factory brings back a verifying context",
       restored is not custom and restored.check_hostname is True

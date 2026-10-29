@@ -5,7 +5,6 @@ import { icon } from '../core/icons.js';
 import { getJSON, postJSON } from '../core/api.js';
 import { getState } from '../core/store.js';
 import { fmtNumber, realmLabel } from '../core/format.js';
-import { confirmDialog } from '../ui/dialog.js';
 import { toast, toastError } from '../ui/toast.js';
 import {
   badge, busyClick, emptyState, loadErrorInline, loadErrorPage, pageHeader, pager, segmented, skeletonBlock, skeletonRows, statCard,
@@ -13,7 +12,7 @@ import {
 import * as logic from './tasks/logic.js';
 import * as activity from './accounts/activity.js';
 import * as acct from './accounts/actions.js';
-import { anyOk, summarizeResults } from './accounts/logic.js';
+import { runCheckin, runDailyChatPending, runDailyChatWeb } from './accounts/flows.js';
 
 export const autoRefresh = true;
 
@@ -40,6 +39,8 @@ export function mount(host) {
   function draw() {
     render(view(), host);
   }
+
+  let refreshTimer = null;
 
   // ---------------------------------------------------------------- 数据
 
@@ -119,7 +120,8 @@ export function mount(host) {
     try {
       const result = await postJSON('/scheduler/trigger', {});
       toast.success(result.msg || '已经触发一次巡检');
-      setTimeout(refresh, 2000);
+      // 巡检有几秒延迟，两秒后回读一次结果；卸载时取消，不在已离开的页面上刷新。
+      refreshTimer = setTimeout(() => { refreshTimer = null; refresh(); }, 2000);
     } catch (err) {
       toastError('触发失败', err);
     }
@@ -140,8 +142,8 @@ export function mount(host) {
     S.runLogs = ['[task_runner] 正在接取任务、上报事件并领取奖励，请稍候'];
     draw();
     try {
-      const payload = {};
-      if (S.growthUid && S.growthUid !== 'all') payload.uid = S.growthUid;
+      const uid = logic.checkinSelection(S.growthUid);
+      const payload = uid ? { uid } : {};
       const result = await postJSON('/tasks/run', payload);
       S.runLogs = result.logs || [];
       if (result.ok === false) toast.warn('成长任务没有执行', result.msg || '目标账号正在执行其他任务');
@@ -161,8 +163,8 @@ export function mount(host) {
 
   async function triggerCatTravel() {
     try {
-      const payload = {};
-      if (S.growthUid && S.growthUid !== 'all') payload.uid = S.growthUid;
+      const uid = logic.checkinSelection(S.growthUid);
+      const payload = uid ? { uid } : {};
       const result = await postJSON('/tasks/travel', payload);
       if (result.busy_accounts && result.busy_accounts.length) {
         toast.warn('猫猫旅行部分跳过', result.msg || ('有 ' + result.busy_accounts.length + ' 个账号正在执行其他任务'));
@@ -174,60 +176,16 @@ export function mount(host) {
     }
   }
 
-  async function doCheckin(uid) {
-    try {
-      const result = await acct.checkin(uid || undefined);
-      const results = result.results || [];
-      if (!results.length) toast.warn('没有可领的国内版账号');
-      else if (anyOk(results)) toast.success(activity.BUDDY_LABEL + '签到', summarizeResults(results, { okText: '已领取' }));
-      else toast.warn(activity.BUDDY_LABEL + '签到', summarizeResults(results));
-      await refresh();
-    } catch (err) {
-      toastError('签到失败', err);
-    }
-  }
+  // 批量签到与打卡的流程和账号页共用 accounts/flows.js；apply 只负责把结果刷新回本页。
+  const doCheckin = (uid) => runCheckin({ uid, apply: () => refresh() });
 
-  function checkinSelection() {
-    return S.growthUid && S.growthUid !== 'all' ? S.growthUid : undefined;
-  }
+  const doDailyChatPending = () => runDailyChatPending({
+    accounts: S.accounts,
+    byUid: S.activity,
+    apply: () => refresh(),
+  });
 
-  async function doDailyChatPending() {
-    const pending = activity.pendingDailyChat(S.accounts, S.activity);
-    if (!pending.length) {
-      toast.success('国际版账号今天都已打卡');
-      return;
-    }
-    try {
-      const result = await acct.dailyChatPending(pending.map((account) => account.uid));
-      const results = result.results || [];
-      if (!results.length) toast.warn('名单里的账号没有执行');
-      else if (anyOk(results)) toast.success('未活跃账号打卡', summarizeResults(results, { okText: '打卡成功' }));
-      else toast.warn('未活跃账号打卡', summarizeResults(results));
-      await refresh();
-    } catch (err) {
-      toastError('打卡失败', err);
-    }
-  }
-
-  async function doDailyChatWeb() {
-    const go = await confirmDialog({
-      title: '确认网页通道打卡？',
-      desc: '会为每个已启用的国际版账号各建一个网页端会话。这会实际发起一次任务并消耗该账号少量积分，用于计入官方「每日活跃」。',
-      confirmText: '我已了解，继续',
-    });
-    if (!go) return;
-    try {
-      const result = await acct.dailyChatWeb();
-      const results = result.results || [];
-      if (!results.length) toast.warn('没有可打卡的国际版账号');
-      else if (anyOk(results)) {
-        toast.success('网页通道打卡', summarizeResults(results, { okText: '已建会话', withDetail: 'conversation' }));
-      } else toast.warn('网页通道打卡', summarizeResults(results));
-      await refresh();
-    } catch (err) {
-      toastError('网页通道打卡失败', err);
-    }
-  }
+  const doDailyChatWeb = () => runDailyChatWeb({ apply: () => refresh() });
 
   // ---------------------------------------------------------------- 片段
 
@@ -292,7 +250,7 @@ export function mount(host) {
               ${options.options.map((option) => html`<option value=${option.value} .selected=${option.value === options.selected}>${option.label}</option>`)}
             </select>
             <button class="btn btn-primary btn-sm" title="领取所选账号的 Buddy 加油站积分；选「全部」时逐个账号领取"
-                    @click=${busyClick(() => doCheckin(checkinSelection()))}>
+                    @click=${busyClick(() => doCheckin(logic.checkinSelection(S.growthUid)))}>
               ${icon('Fuel')}Buddy 加油站签到
             </button>
             <button class="btn btn-primary btn-sm" title="接取任务、上报事件并领取已经达成的奖励"
@@ -351,19 +309,14 @@ export function mount(host) {
 
   function activityStatCards(realm, compact = false, growth = null) {
     const summary = activity.todaySummary(S.accounts, S.activity, realm);
-    const hint = summary.pending.length
-      ? '待处理：' + activity.namesOf(summary.pending).join('、')
-      : '今天全部完成';
     if (realm === 'cn') {
       const days = Number(growth && growth.streak_days) || 0;
       return [
         statCard({
           label: '本期 Buddy 加油站活动',
-          value: activity.summaryText(summary, '已领', '未领'),
           icon: 'Fuel',
-          tone: summary.total && summary.done === summary.total ? 'success' : 'warning',
-          hint,
           compact,
+          ...activity.summaryStat(summary, { doneWord: '已领', pendingWord: '未领' }),
         }),
         statCard({
           label: '成长计划连登',
@@ -377,11 +330,9 @@ export function mount(host) {
     }
     return [statCard({
       label: '今日活跃打卡状态',
-      value: activity.summaryText(summary, '已打卡', '未打卡'),
       icon: 'CalendarCheck',
-      tone: summary.total && summary.done === summary.total ? 'success' : 'warning',
-      hint,
       compact,
+      ...activity.summaryStat(summary, { doneWord: '已打卡', pendingWord: '未打卡' }),
     })];
   }
 
@@ -503,6 +454,8 @@ export function mount(host) {
 
   return {
     refresh,
-    unmount() {},
+    unmount() {
+      clearTimeout(refreshTimer);
+    },
   };
 }

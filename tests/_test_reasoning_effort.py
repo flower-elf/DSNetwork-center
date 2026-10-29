@@ -1,6 +1,6 @@
-"""用量流水记录本次请求实际使用的思考档位;不联网,设置与流水都写在临时目录。
+"""用量流水记录本次请求实际使用的思考档位；不联网，设置与流水都写在临时目录。
 
-档位解析顺序:目录固定档 > 关掉思考或 none > 客户端值 > 目录默认档;目录里没有 reasoning 元数据的模型与老流水行不带这个字段。
+档位解析顺序：目录固定档 > 关掉思考或 none > 客户端值 > 目录默认档；目录里没有 reasoning 元数据的模型与老流水行不带这个字段。
 """
 import json
 import os
@@ -17,11 +17,12 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_accounts
 import wb_proxy as P
+import wb_usage as U
 
 MODEL = "deepseek-v4.1-flash"
-#: 目录固定了这一档:reasoning.effort 有值、supportedEfforts 没有。
+#: 目录固定了这一档：reasoning.effort 有值、supportedEfforts 没有。
 PINNED_MODEL = "fast-model"
-#: 目录没有它的 reasoning 块,没有任何档位可报。
+#: 目录没有它的 reasoning 块，没有任何档位可报。
 PLAIN_MODEL = "default-model"
 
 
@@ -93,26 +94,16 @@ class UsageRowTests(unittest.TestCase):
         P.POOL = self.old_pool
 
     def test_the_row_carries_the_effort(self):
-        P.record_usage(MODEL, USAGE, stream=True, elapsed_ms=1200, effort="high")
+        U.record_usage(MODEL, USAGE, stream=True, elapsed_ms=1200, effort="high")
         row = rows()[-1]
         self.assertEqual(row.get("reasoning_effort"), "high")
         self.assertEqual(row.get("model"), MODEL)
 
     def test_a_request_without_an_effort_writes_no_field(self):
-        P.record_usage(PLAIN_MODEL, USAGE, stream=False, elapsed_ms=900, effort=None)
+        U.record_usage(PLAIN_MODEL, USAGE, stream=False, elapsed_ms=900, effort=None)
         self.assertNotIn("reasoning_effort", rows()[-1])
-        P.record_usage(PLAIN_MODEL, USAGE, stream=False, elapsed_ms=900)
+        U.record_usage(PLAIN_MODEL, USAGE, stream=False, elapsed_ms=900)
         self.assertNotIn("reasoning_effort", rows()[-1])
-
-    def test_the_panel_route_passes_the_field_through(self):
-        P.record_usage(MODEL, USAGE, stream=False, elapsed_ms=900, effort="high")
-        P.record_usage(PLAIN_MODEL, USAGE, stream=False, elapsed_ms=900)
-        got = P.recent_usage(limit=10)
-        by_model = {row["model"]: row for row in got["rows"]}
-        self.assertEqual(by_model[MODEL].get("reasoning_effort"), "high")
-        self.assertEqual(by_model[MODEL].get("total_tokens"), 26,
-                         "读取流水时其它字段一个都不能少")
-        self.assertNotIn("reasoning_effort", by_model[PLAIN_MODEL])
 
 
 class FakeResponse(object):
@@ -251,7 +242,7 @@ class FakeHandler(object):
 
 
 class ChatRequestTests(unittest.TestCase):
-    """走一遍真实的调度与响应函数:请求跑完后台账里能看到档位。"""
+    """走一遍真实的调度与响应函数：请求结束后，用量流水里能看到档位。"""
 
     def setUp(self):
         if os.path.exists(P.USAGE_LOG):

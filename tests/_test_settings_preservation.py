@@ -1,10 +1,8 @@
-"""Settings writes must not drop keys the panel does not manage.
+"""设置写入不得丢掉面板不管的键。
 
-The web form only submits the keys it knows. If a setter replaces a whole
-group object, any hand-written or future key beside them disappears on the
-next save - silently, and only for the people who had added something. This
-pins the deep-merge contract on the one grouped setter the panel has, plus
-the top-level behaviour the plain save path already had.
+网页表单只提交它认识的键。如果 setter 整组替换对象，旁边手写的或将来的键
+就会在下一次保存时消失，而且悄无声息，只有加过键的人会发现。本套件在面板
+唯一的成组 setter 上钉住深合并契约，外加纯保存路径本来就有的顶层行为。
 
     python tests/_test_settings_preservation.py
 """
@@ -17,6 +15,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_settings
+import wb_usage as U
 
 
 class SettingsPreservationTests(unittest.TestCase):
@@ -62,7 +61,7 @@ class SettingsPreservationTests(unittest.TestCase):
         self.assertEqual(merged, {"a": 1, "nested": {"x": 2, "keep": True}, "b": 3})
         self.assertEqual(base, {"a": 1, "nested": {"x": 1, "keep": True}})
         self.assertEqual(patch, {"nested": {"x": 2}, "b": 3})
-        # A non-dict patch replaces the slot, matching a plain assignment.
+        # 非字典补丁直接替换该槽位，与普通赋值一致。
         self.assertEqual(wb_settings.deep_merge({"a": 1}, None), None)
         self.assertEqual(wb_settings.deep_merge(None, {"a": 1}), {"a": 1})
 
@@ -165,6 +164,7 @@ class UsageRetentionTests(unittest.TestCase):
 
     def test_env_overrides_the_setting(self):
         import wb_proxy as P
+        import wb_usage as U
         with tempfile.TemporaryDirectory() as directory:
             self._write(directory, {"usage": {"hour_keep_hours": 72,
                                               "day_keep_days": 8}})
@@ -177,21 +177,21 @@ class UsageRetentionTests(unittest.TestCase):
                 for key in saved:
                     os.environ.pop(key, None)
                 try:
-                    self.assertEqual(P._usage_day_keep_days(), 8)
-                    self.assertEqual(P._usage_hour_keep_hours(), 72)
+                    self.assertEqual(U._usage_day_keep_days(), 8)
+                    self.assertEqual(U._usage_hour_keep_hours(), 72)
                     # snapshot 的小时层按天剪枝，跟着同一个「小时层保留」走。
-                    self.assertEqual(P._usage_hour_keep_days(), 3)
+                    self.assertEqual(U._usage_hour_keep_days(), 3)
                     # 环境变量优先于面板值。
                     os.environ["WB_USAGE_DAY_KEEP_DAYS"] = "2"
                     os.environ["WB_USAGE_HOUR_KEEP_HOURS"] = "24"
                     os.environ["WB_USAGE_HOUR_KEEP_DAYS"] = "1"
-                    self.assertEqual(P._usage_day_keep_days(), 2)
-                    self.assertEqual(P._usage_hour_keep_hours(), 24)
-                    self.assertEqual(P._usage_hour_keep_days(), 1)
+                    self.assertEqual(U._usage_day_keep_days(), 2)
+                    self.assertEqual(U._usage_hour_keep_hours(), 24)
+                    self.assertEqual(U._usage_hour_keep_days(), 1)
                     self._write(directory, {})
-                    self.assertEqual(P._usage_day_keep_days(), 2)
-                    self.assertEqual(P._usage_hour_keep_hours(), 24)
-                    self.assertEqual(P._usage_hour_keep_days(), 1)
+                    self.assertEqual(U._usage_day_keep_days(), 2)
+                    self.assertEqual(U._usage_hour_keep_hours(), 24)
+                    self.assertEqual(U._usage_hour_keep_days(), 1)
                 finally:
                     for key, value in saved.items():
                         if value is None:

@@ -1,7 +1,4 @@
-"""Token time-series and credit history plumbing (M4 D5).
-
-Run with: python _test_usage_timeseries.py
-No upstream credentials or outbound network are used.
+"""测 token 时间序列与积分历史的统计通路（M4 D5）。不用上游凭据，也不出网。用 python tests/run_all.py _test_usage_timeseries 运行。
 """
 import json
 import os
@@ -17,6 +14,7 @@ os.environ["WB_PROXY_USAGE_DIR"] = _startup_dir.name
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_proxy
+import wb_usage as U
 
 
 def row(at, total_tokens=100, credit=0.0, error=False, outcome="completed",
@@ -43,13 +41,13 @@ class TimeseriesTests(unittest.TestCase):
 
     def test_bucket_size_auto_scales(self):
         now = time.time()
-        one_hour = wb_proxy.usage_timeseries(range="custom", since=now - 3600, until=now)
+        one_hour = U.usage_timeseries(range="custom", since=now - 3600, until=now)
         self.assertEqual(one_hour["bucket_seconds"], 60)
-        three_days = wb_proxy.usage_timeseries(range="custom", since=now - 3 * 86400, until=now)
+        three_days = U.usage_timeseries(range="custom", since=now - 3 * 86400, until=now)
         self.assertEqual(three_days["bucket_seconds"], 3600)
-        thirty_days = wb_proxy.usage_timeseries(range="custom", since=now - 30 * 86400, until=now)
+        thirty_days = U.usage_timeseries(range="custom", since=now - 30 * 86400, until=now)
         self.assertEqual(thirty_days["bucket_seconds"], 86400)
-        explicit = wb_proxy.usage_timeseries(range="custom", since=now - 3600, until=now,
+        explicit = U.usage_timeseries(range="custom", since=now - 3600, until=now,
                                              bucket_seconds=120)
         self.assertEqual(explicit["bucket_seconds"], 120)
 
@@ -62,7 +60,7 @@ class TimeseriesTests(unittest.TestCase):
             row(now - 90, total_tokens=0, credit=99.0, outcome="client_aborted"),
             row(now - 60, total_tokens=50, credit=0.5),
         ])
-        result = wb_proxy.usage_timeseries(range="custom", since=now - 180, until=now,
+        result = U.usage_timeseries(range="custom", since=now - 180, until=now,
                                            bucket_seconds=60)
         totals = {
             "requests": sum(b["requests"] for b in result["series"]),
@@ -71,8 +69,8 @@ class TimeseriesTests(unittest.TestCase):
             "credit": sum(b["credit"] for b in result["series"]),
         }
         self.assertEqual(totals["requests"], 2)
-        # usage_snapshot counts every non-completed row as an error, including
-        # client aborts; the series keeps that same definition.
+        # usage_snapshot 把所有非 completed 行都算作错误，包括客户端中止；
+        # 时间序列沿用同一定义。
         self.assertEqual(totals["errors"], 2)
         self.assertEqual(totals["tokens"], 150)
         self.assertAlmostEqual(totals["credit"], 3.5)
@@ -83,23 +81,23 @@ class TimeseriesTests(unittest.TestCase):
             row(now - 30, total_tokens=100, realm="cn"),
             row(now - 20, total_tokens=200, realm="intl"),
         ])
-        cn = wb_proxy.usage_timeseries(realm="cn", range="custom", since=now - 60, until=now)
+        cn = U.usage_timeseries(realm="cn", range="custom", since=now - 60, until=now)
         self.assertEqual(sum(b["total_tokens"] for b in cn["series"]), 100)
-        all_realms = wb_proxy.usage_timeseries(realm="all", range="custom", since=now - 60,
+        all_realms = U.usage_timeseries(realm="all", range="custom", since=now - 60,
                                                until=now)
         self.assertEqual(sum(b["total_tokens"] for b in all_realms["series"]), 300)
 
     def credits_window(self, rows):
         """写日志 + 清时间序列状态（切片/扫描两条路径都从零起）。"""
         self.write(rows)
-        wb_proxy._series_cache.clear()
-        wb_proxy._series_state.clear()
+        U._series_cache.clear()
+        U._series_state.clear()
 
     def test_credits_top50_ties_keep_log_order(self):
         # 70 条 at 完全相同的计费行跨第 50 名边界：选择必须是「at 倒序、
         # 相同 at 保持日志顺序」——丢掉的只能是同 at 组里日志靠后的那些。
         # 窗口从昨天本地午夜起：切片路径成立，行也全在过去。
-        midnight = wb_proxy._local_midnight(time.time() - 86400)
+        midnight = U._local_midnight(time.time() - 86400)
         T = midnight + 3600.0
         rows = [row(T, credit=100.0 + i) for i in range(70)]
         rows += [row(T + 600, credit=200.0 + i) for i in range(5)]
@@ -108,7 +106,7 @@ class TimeseriesTests(unittest.TestCase):
         # 规范：Python 稳定排序（at 倒序 + 同 at 日志顺序）的前 50 条。
         want = sorted([r for r in rows if r["credit"] > 0],
                       key=lambda r: r["at"], reverse=True)[:50]
-        got = wb_proxy.usage_timeseries(realm="all", range="custom", since=midnight,
+        got = U.usage_timeseries(realm="all", range="custom", since=midnight,
                                         until=None, ttl=0)
         self.assertEqual([(c["at"], c["credit"]) for c in got["credits"]],
                          [(r["at"], r["credit"]) for r in want])
@@ -122,18 +120,18 @@ class TimeseriesTests(unittest.TestCase):
 
     def test_credits_scan_builds_only_the_top50_entries(self):
         # 计数桩：整段扫描只为最终进前 50 的行建载荷。前 50 行就是窗口里
-        # 最新的 50 条，之后的 1950 行都进不了堆——旧实现会把 2000 条全部
+        # 最新的 50 条，之后的 1950 行都进不了堆——朴素做法会把 2000 条全部
         # 建成字典再排序切片。
-        midnight = wb_proxy._local_midnight(time.time() - 86400)
+        midnight = U._local_midnight(time.time() - 86400)
         T = midnight + 7200.0
         rows = [row(T + 1000 - i, credit=500.0 + i) for i in range(50)]
         rows += [row(T - i, credit=1.0 + i) for i in range(1950)]
         self.credits_window(rows)
         os.environ["WB_USAGE_DAY_BUCKETS"] = "0"  # 强制整段扫描路径
         try:
-            with mock.patch.object(wb_proxy, "_series_credit_entry",
-                                   wraps=wb_proxy._series_credit_entry) as entry:
-                got = wb_proxy.usage_timeseries(realm="all", range="custom",
+            with mock.patch.object(U, "_series_credit_entry",
+                                   wraps=U._series_credit_entry) as entry:
+                got = U.usage_timeseries(realm="all", range="custom",
                                                 since=midnight, until=None, ttl=0)
         finally:
             os.environ.pop("WB_USAGE_DAY_BUCKETS", None)
@@ -143,22 +141,22 @@ class TimeseriesTests(unittest.TestCase):
 
     def test_credits_slice_and_scan_are_byte_identical(self):
         # 同一份日志、同一个窗口：日桶切片与整段扫描（关掉日桶）逐字节一致。
-        midnight = wb_proxy._local_midnight(time.time() - 86400)
+        midnight = U._local_midnight(time.time() - 86400)
         T = midnight + 3600.0
         rows = [row(T + i * 3, credit=10.0 + i) for i in range(80)]
         rows += [row(T + 100, credit=90.0) for _ in range(30)]  # 同 at 一组
         self.credits_window(rows)
         os.environ["WB_USAGE_DAY_BUCKETS"] = "0"
         try:
-            wb_proxy._series_cache.clear()
-            wb_proxy._series_state.clear()
-            scan = wb_proxy.usage_timeseries(realm="all", range="custom",
+            U._series_cache.clear()
+            U._series_state.clear()
+            scan = U.usage_timeseries(realm="all", range="custom",
                                              since=midnight, until=None, ttl=0)
         finally:
             os.environ.pop("WB_USAGE_DAY_BUCKETS", None)
-        wb_proxy._series_cache.clear()
-        wb_proxy._series_state.clear()
-        sliced = wb_proxy.usage_timeseries(realm="all", range="custom",
+        U._series_cache.clear()
+        U._series_state.clear()
+        sliced = U.usage_timeseries(realm="all", range="custom",
                                            since=midnight, until=None, ttl=0)
         self.assertEqual(json.dumps(sliced["credits"], ensure_ascii=False),
                          json.dumps(scan["credits"], ensure_ascii=False))
@@ -188,7 +186,7 @@ class TimeseriesRouteTests(unittest.TestCase):
             return {"ok": True, "series": []}
 
         handler = self.make_handler()
-        with mock.patch.object(wb_proxy, "usage_timeseries", side_effect=fake_series):
+        with mock.patch.object(U, "usage_timeseries", side_effect=fake_series):
             handler._get_usage_timeseries({
                 "realm": ["cn"], "range": ["custom"],
                 "since": ["1000"], "until": ["2000"], "bucket": ["120"]})

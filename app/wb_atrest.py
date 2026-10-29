@@ -354,15 +354,12 @@ def unwrap_keyblob(key):
 # 三档扫描，命中即止，内存段按字节数均分给多个进程并行扫：
 #
 #   1) 密钥载荷：客户端把 atRestSecretKey 当成 44 字符的规范 base64 传递，
-#      `isCanonical32ByteBase64` 是其判据。JSON.parse 之后它在内存里是一段
-#      孤立的 base64 token。正则匹配走 C 层，约 200 MB/s/进程，每个候选只做
-#      两次 sha256，比逐窗口哈希快两个数量级；
-#   2) stride=8 逐窗口哈希：原生 Buffer 按至少 16 字节边界分配，先按 8 字节
-#      栅格找，命中率很高，速度也快 8 倍；
+#      JSON.parse 之后内存里是一段孤立的 base64 token，正则匹配走 C 层；
+#   2) stride=8 逐窗口哈希：原生 Buffer 按至少 16 字节边界分配，先按 8 字节栅格找；
 #   3) stride=1 逐窗口哈希：最后手段，保证不漏。
 #
-# 第 1 档的候选同样要过 keyblob 的 GCM 解封校验 `unwrap_keyblob` 才采信；
-# 校验不过就当没找到，继续往后扫，因此快档不会引入误判。
+# 第 1 档的候选同样要过 keyblob 的 GCM 解封校验 `unwrap_keyblob` 才采信；校验不过就
+# 继续往后扫，因此不会引入误判。
 CHUNK = 4 << 20
 OVERLAP = 31
 #: 分片粒度：把大段切开再分给各进程，否则一个 V8 大堆会把负载全压在单个进程上
@@ -556,10 +553,9 @@ def _scan_regions(job):
 def _run_scan(jobs, say):
     """并行跑一批扫描任务，任意一个命中就收工（其余子进程直接杀掉）。
 
-    并行用子进程而不是 multiprocessing：绿色包内置的 Python 是精简发行版，
-    根本没有 multiprocessing 模块，而 multiprocessing 的 spawn 在受限环境里
-    也常常不可用；`sys.executable 本文件 --scan-worker` 这条路在任何 Python 上
-    都能跑。
+    并行只用子进程：绿色包内置的 Python 是精简发行版，没有 multiprocessing
+    模块，该模块的 spawn 在受限环境里也常常不可用；`sys.executable 本文件
+    --scan-worker` 这条路在任何 Python 上都能跑。
     """
     if not jobs:
         return []

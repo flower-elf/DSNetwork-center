@@ -1,45 +1,35 @@
 // 费用估算页：按设置的官方价格折算当前范围的请求费用，并对比积分支出算出省了多少。
+// 时间范围控件与用量页共用 stats/range.js。
 
 import { html, render, nothing } from '../core/dom.js';
 import { icon } from '../core/icons.js';
 import { getJSON } from '../core/api.js';
 import { getState } from '../core/store.js';
-import { fmtNumber, fmtCredit, fmtCny, toLocalInputValue, fromLocalInputValue } from '../core/format.js';
+import { fmtNumber, fmtCredit, fmtCny } from '../core/format.js';
 import {
-  pageHeader, statCard, segmented, chip, loadErrorPage, loadErrorInline, skeletonStats, skeletonBlock,
+  pageHeader, statCard, loadErrorPage, loadErrorInline, skeletonStats, skeletonBlock,
 } from '../ui/widgets.js';
-import { RANGES, rangeLabel, scopeRealm, scopeText, buildQuery } from './stats/logic.js';
+import { rangeLabel, scopeText } from './stats/logic.js';
+import { createRangeControls } from './stats/range.js';
 
 export const autoRefresh = true;
 
 export function mount(host) {
-  let range = 'today';
-  let sinceInput = '';
-  let untilInput = '';
-  let includeAll = false;
   let data = null;
   let missing = '';
   let fatal = '';
   let phase = 'loading';
   let seq = 0;
+  const rangeCtl = createRangeControls({ redraw: draw, reload: load });
 
   function draw() {
     render(view(), host);
   }
 
-  function query() {
-    return buildQuery({
-      realm: scopeRealm(getState().viewRealm, includeAll),
-      range,
-      since: fromLocalInputValue(sinceInput),
-      until: fromLocalInputValue(untilInput),
-    });
-  }
-
   async function load() {
     const mine = ++seq;
     try {
-      const payload = await getJSON('/usage/cost-estimate' + query());
+      const payload = await getJSON('/usage/cost-estimate' + rangeCtl.query());
       if (mine !== seq) return;
       data = payload;
       missing = '';
@@ -65,26 +55,6 @@ export function mount(host) {
     return load();
   }
 
-  function selectRange(id) {
-    if (range === id) return;
-    range = id;
-    if (id === 'custom') prefillCustomRange();
-    draw();
-    load();
-  }
-
-  function prefillCustomRange() {
-    if (sinceInput) return;
-    const d = new Date();
-    sinceInput = toLocalInputValue(new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() / 1000);
-  }
-
-  function toggleScope() {
-    includeAll = !includeAll;
-    draw();
-    load();
-  }
-
   function money(value) {
     return value == null ? '—' : fmtCny(value);
   }
@@ -102,7 +72,7 @@ export function mount(host) {
     return html`
       <div class="grid-stats cols-4">
         ${statCard({
-          label: rangeLabel(range) + ' 官方价格合计',
+          label: rangeLabel(rangeCtl.range) + ' 官方价格合计',
           value: data ? fmtCny(summary.official_cny || 0) : '—',
           icon: 'ReceiptText',
           hint: data ? summary.priced_models + ' 个模型已定价' : '费用估算未读取到',
@@ -136,7 +106,7 @@ export function mount(host) {
     if (!rows.length) {
       return html`
         <div class="card">
-          <div class="empty text-xs muted">${rangeLabel(range)}没有已完成的请求记录，费用估算没有可折算的用量。</div>
+          <div class="empty text-xs muted">${rangeLabel(rangeCtl.range)}没有已完成的请求记录，费用估算没有可折算的用量。</div>
         </div>`;
     }
     return html`
@@ -194,44 +164,24 @@ export function mount(host) {
       </div>`;
   }
 
-  function customRangeCard() {
-    return html`
-      <div class="card card-tight">
-        <div class="row-wrap">
-          <label class="row text-2xs muted">起点
-            <input class="input input-sm" type="datetime-local" .value=${sinceInput}
-                   @change=${(e) => { sinceInput = e.target.value; load(); }}>
-          </label>
-          <label class="row text-2xs muted">终点
-            <input class="input input-sm" type="datetime-local" .value=${untilInput}
-                   @change=${(e) => { untilInput = e.target.value; load(); }}>
-          </label>
-          <span class="text-2xs muted">终点留空表示统计到现在。</span>
-        </div>
-      </div>`;
-  }
-
   function view() {
-    const actions = html`
-      ${segmented(RANGES, range, selectRange)}
-      ${chip(includeAll ? '含两个版本' : '仅' + scopeText(false, getState().viewRealm), includeAll, toggleScope)}`;
     const desc = '以模型官方价格为基准，折算当前范围的请求费用，再减去积分折算的支出，得到省了多少。只统计已完成的请求。当前统计：'
-      + scopeText(includeAll, getState().viewRealm) + '。';
+      + scopeText(rangeCtl.includeAll, getState().viewRealm) + '。';
     if (phase === 'loading') {
       return html`
         <div class="page">
-          ${pageHeader({ path: 'estimate', title: '费用估算', desc, actions })}
+          ${pageHeader({ path: 'estimate', title: '费用估算', desc, actions: rangeCtl.actions() })}
           ${skeletonStats(4)}
           ${skeletonBlock(320)}
         </div>`;
     }
     if (phase === 'error') {
-      return html`<div class="page">${pageHeader({ path: 'estimate', title: '费用估算', desc, actions })}${loadErrorPage(fatal || '费用估算没有读取到', retry)}</div>`;
+      return html`<div class="page">${pageHeader({ path: 'estimate', title: '费用估算', desc, actions: rangeCtl.actions() })}${loadErrorPage(fatal || '费用估算没有读取到', retry)}</div>`;
     }
     return html`
       <div class="page">
-        ${pageHeader({ path: 'estimate', title: '费用估算', desc, actions })}
-        ${range === 'custom' ? customRangeCard() : nothing}
+        ${pageHeader({ path: 'estimate', title: '费用估算', desc, actions: rangeCtl.actions() })}
+        ${rangeCtl.range === 'custom' ? rangeCtl.customCard() : nothing}
         ${missing ? loadErrorInline('费用估算没有刷新成功：' + missing + '。下面显示的是上一次读取到的结果。', retry) : nothing}
         ${statCards()}
         ${tableCard()}

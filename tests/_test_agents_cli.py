@@ -1,16 +1,13 @@
-"""The standalone configurator: `python wb_agents.py ...` (hermetic, no network).
+"""独立配置器：`python wb_agents.py ...`（密封，不访问网络）。
 
-The panel's one-click setup can only ever edit the machine the gateway runs
-on - a remote browser cannot write another computer's config files - so the
-CLI is what covers every other machine, and it is the one part of the agents
-feature a user runs by hand. This suite drives the real entry point as a
-subprocess (argument parsing, key resolution, exit codes and all) against
-temporary homes, with a stub gateway standing in for GET /v1/models.
+面板的一键设置只能改网关所在这台机器的配置，远程浏览器写不了别的电脑的
+文件，所以其它机器都要靠 CLI，它也是智能体功能里唯一由用户手动运行的部分。
+本套件以子进程驱动真实入口（参数解析、密钥解析、退出码全都在内），跑在临时
+home 上，由替身网关顶替 GET /v1/models。
 
-Two properties the panel side cannot show are pinned here as well: a dry run
-prints exactly what a real run writes (both go through plan()), and
-GET /agents/cli serves the script to remote machines without a panel session
-while the neighbouring /agents read still refuses one.
+面板侧展示不了的两个性质也在这里钉住：试运行打印的内容与真实写入完全一致
+（两者都走 plan()），以及 GET /agents/cli 在没有面板会话时也向远程机器提供
+脚本，而相邻的 /agents 读接口仍拒绝无会话请求。
 
     python tests/_test_agents_cli.py
 """
@@ -50,11 +47,11 @@ def check(label, cond, extra=""):
 
 
 # ---------------------------------------------------------------------------
-# Stub gateway + a port nothing listens on
+# 替身网关与一个没人监听的端口
 # ---------------------------------------------------------------------------
 
 class StubGateway(http.server.BaseHTTPRequestHandler):
-    """Answers GET /v1/models; the status and payload are the test's to set."""
+    """应答 GET /v1/models；状态码与载荷由测试设定。"""
 
     status = 200
     payload = {"object": "list", "data": []}
@@ -87,7 +84,7 @@ _gateway = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubGateway)
 threading.Thread(target=_gateway.serve_forever, daemon=True).start()
 GW = "http://127.0.0.1:%d" % _gateway.server_address[1]
 
-# A closed socket's port: connection refused without any real network use.
+# 已关闭套接字的端口：连接被拒绝，不经过真实网络。
 _sock = socket.socket()
 _sock.bind(("127.0.0.1", 0))
 DEAD = "http://127.0.0.1:%d" % _sock.getsockname()[1]
@@ -97,10 +94,9 @@ TMP = tempfile.mkdtemp(prefix="wb-agents-cli-")
 
 
 def run_cli(args, env=None):
-    """Run the real CLI. PATH is emptied so the client probes stay deterministic
-    (a developer machine may well have `codex` on PATH; CI does not), and the
-    wall clock is bounded so a child that blocks on a prompt fails this suite
-    instead of hanging it."""
+    """跑真实 CLI。清空 PATH 让客户端探测结果确定（开发机的 PATH 上可能有
+    `codex`，CI 没有），并限制挂钟时间，卡在提示上的子进程会失败而不是挂住
+    本套件。"""
     child = dict(os.environ)
     for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "WB_PROXY_API_KEY"):
         child.pop(name, None)
@@ -137,8 +133,8 @@ for client in ("claude-code", "codex", "opencode", "dsh", "crush", "zcode"):
     check("%s listed" % client, client in out, out)
 check("nothing is reported installed", out.count("not detected") == 6, out)
 
-# The shared options work on either side of the subcommand (parents= with
-# SUPPRESS defaults); --json after the verb is the natural spelling.
+# 共享选项放在子命令两侧都行（parents= 与 SUPPRESS 默认值）；--json 放在
+# 动词后面是习惯写法。
 code, out, err = run_cli(["--home", home1, "--state-dir", os.path.join(TMP, "state1"),
                           "list", "--json"])
 data = json.loads(out)
@@ -225,8 +221,8 @@ check("the would-be file is named", "create" in out and "settings.json" in out, 
 code, out2, err = run_cli(args4)
 check("real apply exit 0", code == 0, (code, err))
 written4 = read(os.path.join(home4, ".claude", "settings.json"))
-# stdout goes through the platform's text translation (CRLF on Windows);
-# the file is written with newline="" and keeps bare LF.
+# stdout 走平台文本转换（Windows 上是 CRLF）；文件用 newline="" 写入，
+# 保留裸 LF。
 check("dry-run content equals the real write",
       written4 in out.replace("\r\n", "\n"), (out[-400:], written4))
 
@@ -363,8 +359,8 @@ check("restore returns to the pre-first-apply bytes", read(settings10) == origin
 check("the credentials file we created is gone",
       not os.path.exists(os.path.join(dsh_dir, ".credentials.yaml")))
 
-# The other half of the rule: a hand edit to a file we created makes it the
-# user's file, and restore must bring their version back rather than delete it.
+# 该规则的另一半：用户手改过我们创建的文件后，它就属于用户，restore 必须
+# 恢复用户的版本而不是删掉它。
 home11 = os.path.join(TMP, "home11")
 os.makedirs(os.path.join(home11, ".dsh"))
 state11 = os.path.join(TMP, "state11")
@@ -385,9 +381,8 @@ print("[11] GET /agents/cli serves the script without a panel session")
 
 
 class CliDispatch(wb_proxy.Handler):
-    """A real Handler driven over an in-memory socket (the pattern the
-    panel-route-auth suite uses): what answers is the dispatcher, not a
-    hand-picked method."""
+    """由内存套接字驱动的真实 Handler（panel-route-auth 套件的同一套路）：
+    应答的是分发器，而不是挑出来的一个方法。"""
 
     def __init__(self, path):
         self.path = path

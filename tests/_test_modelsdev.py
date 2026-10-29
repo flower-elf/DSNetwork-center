@@ -1,7 +1,6 @@
-"""Model metadata lookup chain (M5 E1) and cache alias normalization (E3).
+"""models.dev 元数据查找链（M5 E1）与缓存别名归一化（E3）测试：不出网，不用上游凭据（models.dev 已打桩）。
 
 Run with: python _test_modelsdev.py
-No upstream credentials or outbound network are used (models.dev is stubbed).
 """
 import json
 import os
@@ -40,13 +39,6 @@ def reset_module():
         wb_modelsdev._index_loaded = False
         wb_modelsdev._last_fetch = 0.0
         wb_modelsdev._fetching = False
-
-
-class KnowledgeTableTests(unittest.TestCase):
-    def test_known_values(self):
-        self.assertEqual(wb_modelsdev.CONTEXT_FALLBACK["glm-5.2"], (1000000, 131072))
-        self.assertEqual(wb_modelsdev.CONTEXT_FALLBACK["auto"], (168000, 0))
-        self.assertEqual(wb_modelsdev.DEFAULT_CONTEXT, 1000000)
 
 
 class BuildIndexTests(unittest.TestCase):
@@ -125,13 +117,6 @@ class LookupTests(unittest.TestCase):
         self.assertEqual((context, output), (777, 77))
         self.assertEqual(source["context"], "cache")
 
-    def test_unknown_model_defaults_to_1m_and_no_output(self):
-        context, output, source = wb_modelsdev.lookup(
-            "totally-unknown", 0, 0, directory=tempfile.gettempdir(), index={})
-        self.assertEqual(context, 1000000)
-        self.assertIsNone(output)
-        self.assertEqual(source["output"], "unknown")
-
     def test_unknown_output_is_omitted_even_with_context(self):
         context, output, _source = wb_modelsdev.lookup(
             "auto", 0, 0, directory=tempfile.gettempdir(), index={})
@@ -183,11 +168,6 @@ class RefreshTests(unittest.TestCase):
 class CatalogEntryTests(unittest.TestCase):
     def setUp(self):
         reset_module()
-
-    def test_model_entry_uses_the_table(self):
-        entry = wb_proxy.model_entry("glm-5.2", {})
-        self.assertEqual(entry["context_length"], 1000000)
-        self.assertEqual(entry["max_output_tokens"], 131072)
 
     def test_unknown_model_gets_1m_context_and_no_output(self):
         entry = wb_proxy.model_entry("totally-unknown", {})

@@ -1,14 +1,10 @@
-"""Release engineering pins (M6 F1-F3).
+"""测发布工程契约（M6 F1-F3）：workflows、Dockerfile、compose 文件保持发布纪律，覆盖 checksums.txt 资产、tag 与源码版本一致、healthcheck、PUID/PGID，并清除冲突标记残留。
 
-The workflows, Dockerfile and compose file are text artifacts nothing else in
-the suite executes; these assertions keep the release discipline from silently
-disappearing (checksums asset, tag == source version, healthcheck, PUID/PGID).
-The last class keeps merge leftovers (conflict markers) out of the tree.
-
-Run with: python _test_release_engineering.py
+运行：python _test_release_engineering.py
 """
 import os
 import re
+import sys
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -20,12 +16,14 @@ def read(*parts):
 
 
 class VersionStringTests(unittest.TestCase):
-    def test_source_version_strings_agree(self):
-        src = read("app", "wb_proxy.py")
-        version = re.search(r'^VERSION = "([^"]+)"', src, re.M)
-        self.assertIsNotNone(version, "VERSION not found")
-        self.assertIn('server_version = "wb-proxy-center/" + VERSION', src)
-        self.assertIn('"version": VERSION', src)
+    def test_running_version_comes_from_the_handler_string(self):
+        sys.path.insert(0, os.path.join(ROOT, "app"))
+        import wb_proxy
+        self.assertEqual(wb_proxy.Handler.server_version,
+                         "wb-proxy-center/" + wb_proxy.VERSION)
+        self.assertEqual(wb_proxy.running_version(), wb_proxy.VERSION)
+        self.assertEqual(wb_proxy.runtime_settings_view().get("version"),
+                         wb_proxy.VERSION)
 
 
 class WorkflowTests(unittest.TestCase):
@@ -36,8 +34,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("refs/tags/v", text)
         self.assertIn("GITHUB_REF_NAME", text)
         self.assertIn("server_version", text)
-        # The workflow's extraction must see the same source constant the
-        # release test pins, otherwise a passing CI would mean nothing.
+        # 工作流提取的必须是发布测试校验的同一个源码常量，
+        # 否则 CI 通过也没有意义。
         self.assertIn("VERSION", text)
 
     def test_release_checksums_workflow_hashes_every_asset(self):

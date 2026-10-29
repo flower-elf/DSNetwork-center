@@ -53,13 +53,9 @@ class CanReportActivityTests(unittest.TestCase):
     def test_can_report_activity_skips_enterprise(self):
         acc = make_account(uid="ent-rep", realm="cn", enterpriseId="ent-1")
         self.assertFalse(acc.can_report_activity())
-        res = acc.report_activity()
+        res = wb_tasks.report_activity(acc)
         self.assertFalse(res.get("ok"))
         self.assertIn("enterprise", res.get("error", ""))
-
-    def test_intl_account_never_reports(self):
-        acc = make_account(realm="intl")
-        self.assertFalse(acc.can_report_activity())
 
     def test_cn_account_without_record_can_report(self):
         acc = make_account(realm="cn")
@@ -77,14 +73,15 @@ class CanReportActivityTests(unittest.TestCase):
 class ReportActivityTests(unittest.TestCase):
     def test_rejects_intl_realm(self):
         acc = make_account(realm="intl")
-        res = acc.report_activity()
+        self.assertFalse(acc.can_report_activity())
+        res = wb_tasks.report_activity(acc)
         self.assertFalse(res.get("ok"))
         self.assertIn("only for CN", res.get("error", ""))
 
     def test_fails_when_report_events_rejected(self):
         acc = make_account(realm="cn")
         with mock.patch.object(wb_tasks, "report_events", return_value=False):
-            res = acc.report_activity()
+            res = wb_tasks.report_activity(acc)
             self.assertFalse(res.get("ok"))
             self.assertIn("拒绝", res.get("error", ""))
             self.assertIsNone(acc.last_activity_report)
@@ -96,7 +93,7 @@ class ReportActivityTests(unittest.TestCase):
 
             with mock.patch.object(wb_tasks, "report_events", return_value=True), \
                  mock.patch.object(wb_tasks, "fetch_streak_days", return_value=5):
-                res = acc.report_activity()
+                res = wb_tasks.report_activity(acc)
                 self.assertTrue(res.get("ok"))
                 self.assertEqual(res.get("streak_days"), 5)
                 self.assertIn("连续打卡 5 天", res.get("msg", ""))
@@ -111,7 +108,7 @@ class ReportActivityTests(unittest.TestCase):
         acc = make_account(realm="cn")
         with mock.patch.object(wb_tasks, "report_events", return_value=True), \
              mock.patch.object(wb_tasks, "fetch_streak_days", return_value=None):
-            res = acc.report_activity()
+            res = wb_tasks.report_activity(acc)
             self.assertTrue(res.get("ok"))
             self.assertIn("连登天数未知", res.get("msg", ""))
 
@@ -119,7 +116,7 @@ class ReportActivityTests(unittest.TestCase):
         acc = make_account(realm="cn")
         with mock.patch.object(wb_tasks, "report_events", return_value=True), \
              mock.patch.object(wb_tasks, "fetch_streak_days", return_value=0):
-            res = acc.report_activity()
+            res = wb_tasks.report_activity(acc)
             self.assertTrue(res.get("ok"))
             self.assertEqual(res.get("streak_days"), 0)
             self.assertIn("连登仍是 0 天", res.get("msg", ""))
@@ -138,12 +135,12 @@ class SchedulerActivityReportTests(unittest.TestCase):
 
         report_calls = []
 
-        def fake_report(self):
-            report_calls.append(self.uid)
-            self.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
+        def fake_report(acc):
+            report_calls.append(acc.uid)
+            acc.last_activity_report = time.strftime("%Y-%m-%d %H:%M:%S")
             return {"ok": True, "streak_days": 2, "msg": "对话活跃上报成功（连续打卡 2 天）"}
 
-        with mock.patch.object(wb_accounts.Account, "report_activity", fake_report), \
+        with mock.patch.object(wb_tasks, "report_activity", fake_report), \
              mock.patch.object(wb_scheduler, "do_cat_travel", lambda acc: {"action": None}), \
              mock.patch.object(wb_scheduler.time, "sleep", lambda *_: None):
             scheduler._run_cycle("测试第一轮", True)
@@ -182,6 +179,8 @@ class StreakBonusTests(unittest.TestCase):
 
             res = wb_tasks.run_streak_bonus(acc)
             self.assertTrue(res.get("ok"))
+            first_url = mock_url.call_args_list[0][0][0].full_url
+            self.assertTrue(first_url.endswith("/activity/growth/heatmap"), first_url)
 
 
 if __name__ == "__main__":

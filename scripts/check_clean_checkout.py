@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
-"""Fail when a full suite run leaves the checkout dirty.
+"""整轮套件跑完后检出目录变脏就失败。
 
-Every suite is supposed to keep its scratch state in a temporary directory, but
-a suite that writes into the checkout instead is invisible: it passes, and the
-next suite - or the next release - inherits a modified tree. Reviews kept
-catching that by hand with `git status`; this turns that expectation into a CI
-contract.
+每个套件的临时状态都该留在临时目录里；写进检出目录的套件不会报错，却把改动
+留给下一个套件或下一次发版。本脚本把「跑完必须干净」变成 CI 契约。
 
-Git decides what "dirty" means, so the ignore rules stay authoritative. The
-outputs that are intentionally persistent are not dirt: `suite-logs/` from
-`run_all.py --logs`, `__pycache__/`, `accounts/*.json` and the rest of
-`.gitignore`. What fails the guard is a modified tracked file, a deleted tracked
-file, or a new file or directory that `.gitignore` does not cover.
+脏与否由 Git 判定，忽略规则保持权威。有意持久的输出不算脏：run_all.py --logs
+的 suite-logs/、__pycache__/、accounts/*.json 以及 .gitignore 里其余条目。
+会挂的是被改动或删除的跟踪文件，以及 .gitignore 未覆盖的新文件或新目录。
 
     python scripts/check_clean_checkout.py
 
-Exit status: 0 clean, 1 dirty, 2 the check could not run.
+退出码：0 干净，1 变脏，2 检查无法运行。
 
-This assumes the checkout was clean before the suites ran, which is what
-`actions/checkout` gives CI. Run over a developer's own working tree it reports
-their own edits, which is the same answer with the same wording.
+前提是套件开跑前检出是干净的，actions/checkout 给 CI 的正是这个前提。对开发者的
+工作树运行时，报出的就是该工作树里已有的改动，答案与措辞都相同。
 """
 import os
 import subprocess
@@ -28,12 +22,12 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# core.quotePath=false prints a non-ASCII path as itself instead of as escaped
-# octal, so the path in the log is one the reader can paste back into a shell.
+# core.quotePath=false 让非 ASCII 路径按原样打印，不用八进制转义，日志里的
+# 路径可以直接贴回 shell。
 STATUS = ("git", "-c", "core.quotePath=false", "status", "--porcelain")
 
-# Porcelain's second column is the worktree state, which is what a suite can
-# change; the first is the index. "??" is untracked and has no letter of its own.
+# porcelain 的第二列是工作树状态，套件能改动的就是它；第一列是暂存区。
+# ?? 表示未跟踪，没有专属字母。
 KINDS = {
     "M": "modified",
     "D": "deleted",
@@ -46,7 +40,7 @@ KINDS = {
 
 
 def porcelain():
-    """`git status --porcelain` for the repository, or None when it cannot run."""
+    """仓库的 `git status --porcelain` 输出；无法运行时返回 None。"""
     try:
         done = subprocess.run(STATUS, cwd=ROOT, capture_output=True, text=True,
                               encoding="utf-8", errors="replace")
@@ -61,7 +55,7 @@ def porcelain():
 
 
 def describe(line):
-    """One porcelain line as (kind, path)."""
+    """一行 porcelain 输出解析成 (kind, path)。"""
     code, path = line[:2], line[3:]
     if code == "??":
         return "untracked", path

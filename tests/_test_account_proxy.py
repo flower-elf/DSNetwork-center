@@ -1,5 +1,4 @@
-"""Per-account outbound proxy tests: a local stub proxy records absolute-URI requests and
-answers canned JSON. No external network.
+"""按账号出站代理的测试：本地替身代理记录绝对 URI 请求并回固定 JSON。不访问外网。
 """
 
 import json
@@ -10,9 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits. The suite used to point
-# both at tests/_acc_proxy and tests/_use_proxy, so two runs of it shared one
-# directory and every run left those directories behind in the checkout.
+# 套件自用的目录，进程退出时随临时根一起删除，不在检出里留文件。
 _TMP = isolated_data_dirs("wb-account-proxy-")
 
 import wb_accounts as A
@@ -142,7 +139,7 @@ finally:
 print()
 print("[5] AccountPool.set_proxy persists the binding")
 
-# Inside the suite's own tree, so this one is removed with it at exit.
+# 放在套件自用目录内，退出时随临时根一起删除。
 tmpdir = os.path.join(_TMP.name, "pool")
 pool = A.AccountPool(tmpdir, log=lambda m: None)
 pool.add(

@@ -1,4 +1,4 @@
-"""Unit tests for per-key concurrency limits (#359)."""
+"""每个 key 的并发上限单元测试（#359）。"""
 import unittest
 import sys
 import os

@@ -3,10 +3,10 @@ import random
 import threading
 import time
 
-#: 第一次抖动的退避秒数；之后每次翻倍，封顶 EGRESS_BACKOFF_MAX。
+#: 首次瞬时失败的退避秒数；之后逐次翻倍，封顶 EGRESS_BACKOFF_MAX。
 EGRESS_BACKOFF_BASE = 1.0
 EGRESS_BACKOFF_MAX = 15.0
-#: 距上次抖动超过该时长即开始新一轮计数。
+#: 距上次瞬时失败超过该时长即开始新一轮计数。
 EGRESS_STREAK_RESET = 60.0
 #: 抖动比例区间：实际退避为计算值的 0.75 到 1.25 倍，避免请求同步重试。
 EGRESS_JITTER_LOW = 0.75
@@ -18,7 +18,7 @@ _state = {}
 
 
 def transient_backoff(streak):
-    """连续 streak 次抖动后该出口的退避秒数，不含抖动。"""
+    """连续 streak 次瞬时失败后的退避秒数，不含随机抖动。"""
     step = max(0, int(streak) - 1)
     return min(EGRESS_BACKOFF_BASE * (2 ** min(step, 20)), EGRESS_BACKOFF_MAX)
 
@@ -55,7 +55,7 @@ def note_success(key):
 
 
 def streak(key, now=None):
-    """返回该出口当前的连续抖动次数，供测试与排障使用。"""
+    """返回该出口当前的连续瞬时失败次数，供测试与排障使用。"""
     now = time.time() if now is None else now
     with _lock:
         state = _state.get(key)

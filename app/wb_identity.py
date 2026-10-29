@@ -237,11 +237,11 @@ def build_identity_headers(product, realm, uid, token,
         }
         headers.update(trace_headers())
     elif product == PRODUCT_VSCODE:
+        # 插件只发 X-Agent-Intent 与 X-Agent-Type；运行位置与用途两个头属于
+        # 桌面 CLI，插件从不发送。
         headers = {
             "X-Agent-Intent": "craft",
             "X-Agent-Type": "main",
-            "X-Agent-Purpose": "conversation",
-            "X-Agent-Runtime": "other",
             "X-IDE-Type": "VSCode",
             "X-IDE-Name": "VSCode",
             "X-IDE-Version": DEFAULT_VSCODE_VERSION,
@@ -257,6 +257,7 @@ def build_identity_headers(product, realm, uid, token,
             "X-Conversation-Message-ID": msg_id,
             "X-Request-ID": msg_id,
         }
+        headers.update(trace_headers())
     else:
         ide_version = DEFAULT_IDE_VERSION
         headers = {

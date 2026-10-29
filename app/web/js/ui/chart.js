@@ -1,5 +1,6 @@
 // 趋势图：Chart.js（vendor/chart-*.umd.min.js 提供全局变量 Chart）的面积折线图封装。
 // 颜色取自 CSS 变量，切换主题后自动重绘。
+import { toastError } from './toast.js';
 
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -140,6 +141,68 @@ export function createTrendChart(canvas, initial) {
     destroy() {
       document.removeEventListener('wb-theme-change', onTheme);
       chart.destroy();
+    },
+  };
+}
+
+/**
+ * 趋势图宿主：页面每次重绘后调用 sync()，宿主负责建图、换数据与画布节点重建，
+ * 加载或渲染失败只提示一次。getPoints() 返回 { labels, series }，没有数据时返回 null。
+ */
+export function createChartHost(canvasRef, getPoints) {
+  let chart = null;
+  let chartCanvasEl = null; // 建图时用的画布节点，用于识别节点被重建的情况
+  let chartPending = false;
+  let chartErrorShown = false;
+
+  function showError(title, err) {
+    if (chartErrorShown) return;
+    chartErrorShown = true;
+    toastError(title, err);
+  }
+
+  async function syncChart() {
+    const canvas = canvasRef.value;
+    if (!canvas) return;
+    // 首屏失败视图上没有画布；恢复后 lit-html 会新建一个节点，旧的图表必须重建。
+    if (chart && chartCanvasEl !== canvas) {
+      chart.destroy();
+      chart = null;
+    }
+    const points = getPoints();
+    if (!points) {
+      if (chart) { chart.destroy(); chart = null; }
+      return;
+    }
+    if (chart) {
+      chart.update(points);
+      return;
+    }
+    if (chartPending) return;
+    chartPending = true;
+    try {
+      await ensureChart();
+    } catch (err) {
+      showError('图表库加载失败', err);
+      return;
+    } finally {
+      chartPending = false;
+    }
+    // 等加载期间页面可能已经卸载，或数据又换了一轮；用当前节点与当前数据建图。
+    const current = canvasRef.value;
+    if (!current || !current.isConnected) return;
+    const latest = getPoints();
+    if (!latest) return;
+    chart = createTrendChart(current, latest);
+    chartCanvasEl = current;
+  }
+
+  return {
+    sync() {
+      return syncChart().catch((err) => showError('趋势图渲染失败', err));
+    },
+    destroy() {
+      if (chart) { chart.destroy(); chart = null; }
     },
   };
 }

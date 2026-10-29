@@ -9,29 +9,55 @@ import json
 import time
 import urllib.error
 
+import wb_usage
+
 
 # 运行中的网关模块。wb_proxy 导入本模块后调用 bind 注入自身；在这里 import
 # wb_proxy 会在网关以 __main__ 运行时载入第二份副本。
 P = None
 
+# 本模块向网关索取的接口。bind 时逐个核对，接线缺东西在启动阶段即失败。
+REQUIRED = (
+    "CURRENT_REALM", "ContentRejected", "LocalNetworkError", "RateLimited",
+    "_new_id", "aggregate_stream", "chat_to_response", "cors_origin_allowed",
+    "custom_tool_names", "estimate_tokens", "extract_session_key",
+    "follow_up_with_tool_results", "internal_calls_from_chat", "open_upstream",
+    "prepare_dsh_tool_aliases", "prompt_fingerprint", "responses_to_chat", "restore_dsh_tool_names",
+    "stream_responses_events", "sum_usage", "wb_webtools", "web_tools_active",
+)
+
 
 def bind(module):
+    missing = [name for name in REQUIRED if not hasattr(module, name)]
+    if missing:
+        raise RuntimeError("网关缺少 Messages 管线依赖: %s" % ", ".join(missing))
     global P
     P = module
 
 
-def _text(content):
+def _text(content, dump_unknown=False):
+    """把消息内容摊平成字符串。
+
+    dump_unknown 为真时（tool_result 的 content），非文本块按 JSON 展开，
+    非字符串非列表的顶层值也整体序列化；否则这些输入都返回空串。
+    """
     if isinstance(content, str):
         return content
-    if not isinstance(content, list):
+    if isinstance(content, list):
+        pieces = []
+        for block in content:
+            if isinstance(block, str):
+                pieces.append(block)
+            elif isinstance(block, dict):
+                if block.get("type") == "text":
+                    pieces.append(str(block.get("text") or ""))
+                elif dump_unknown and "content" in block:
+                    pieces.append(json.dumps(block.get("content"),
+                                             ensure_ascii=False))
+        return "\n".join(piece for piece in pieces if piece)
+    if not dump_unknown or content is None:
         return ""
-    pieces = []
-    for block in content:
-        if isinstance(block, str):
-            pieces.append(block)
-        elif isinstance(block, dict) and block.get("type") == "text":
-            pieces.append(str(block.get("text") or ""))
-    return "\n".join(piece for piece in pieces if piece)
+    return json.dumps(content, ensure_ascii=False)
 
 
 def _image_part(block):
@@ -50,25 +76,6 @@ def _image_part(block):
         if url:
             return {"type": "image_url", "image_url": {"url": url}}
     return None
-
-
-def _result_text(content):
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        pieces = []
-        for block in content:
-            if isinstance(block, str):
-                pieces.append(block)
-            elif isinstance(block, dict):
-                if block.get("type") == "text":
-                    pieces.append(str(block.get("text") or ""))
-                elif "content" in block:
-                    pieces.append(json.dumps(block.get("content"), ensure_ascii=False))
-        return "\n".join(piece for piece in pieces if piece)
-    if content is None:
-        return ""
-    return json.dumps(content, ensure_ascii=False)
 
 
 def _json_object(raw):
@@ -171,7 +178,7 @@ def messages_to_responses(payload):
                 items.append({
                     "type": "function_call_output",
                     "call_id": str(block.get("tool_use_id") or ""),
-                    "output": _result_text(block.get("content")),
+                    "output": _text(block.get("content"), dump_unknown=True),
                 })
         if parts:
             items.append({"type": "message", "role": role, "content": parts})
@@ -495,11 +502,11 @@ def _stream_headers(handler):
 
 
 def _record_usage(handler, model, usage, **kwargs):
-    return P.record_usage(model, usage, key=handler._key_id(), **kwargs)
+    return wb_usage.record_usage(model, usage, key=handler._key_id(), **kwargs)
 
 
 def _record_error(handler, model, status, message, **kwargs):
-    return P.record_error(model, status, message, key=handler._key_id(), **kwargs)
+    return wb_usage.record_error(model, status, message, key=handler._key_id(), **kwargs)
 
 
 def _stream_close(handler, writer, model, fp, account, t_start, first_ms, effort=None):

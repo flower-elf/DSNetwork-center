@@ -52,7 +52,7 @@ class LogStore:
         self._last_trim = 0.0
         self._last_trim_bytes = 0.0
 
-    # -- lifecycle ---------------------------------------------------------
+    # -- 生命周期 ---------------------------------------------------------
     @property
     def enabled(self):
         return self._enabled
@@ -92,7 +92,7 @@ class LogStore:
         if thread is not None:
             thread.join(timeout=5.0)
 
-    # -- writes ------------------------------------------------------------
+    # -- 写入 --------------------------------------------------------------
     def append(self, entry):
         """排队一条记录，不阻塞请求路径。"""
         if not self._enabled:
@@ -111,15 +111,15 @@ class LogStore:
         self._queue.put(("append", row, None))
 
     def clear(self):
-        """Delete every stored row. Returns True when it was accepted."""
+        """清空全部日志行，提交被接受时返回 True。"""
         if not self._enabled:
             return False
         self._submit("clear", wait=True)
         return True
 
-    # -- reads -------------------------------------------------------------
+    # -- 读取 --------------------------------------------------------------
     def query(self, limit=200, level="", tag="", search="", since_id=0):
-        """Rows matching the panel's filters, shaped like wb_proxy.get_logs."""
+        """按看板筛选条件返回日志行，结构与 wb_proxy.get_logs 一致。"""
         if not self._enabled:
             return None
         payload = {"limit": limit, "level": level, "tag": tag,
@@ -127,16 +127,16 @@ class LogStore:
         return self._submit("query", payload, wait=True)
 
     def stats(self):
-        """Row count, file size and the stored time span; None when off."""
+        """返回行数、文件大小与已存时间跨度；存储关闭时为 None。"""
         if not self._enabled:
             return None
         return self._submit("stats", wait=True)
 
     def max_id(self):
-        """Highest stored id, or 0. Used once on startup to resume numbering.
+        """返回已存的最大 id，没有时为 0。
 
-        Reads on a throwaway connection: the worker may not be running yet, and
-        the counter it feeds has to be right before the first line is logged.
+        启动时调用一次以续接编号。此处另开连接读取：工作线程可能尚未启动，
+        而它供给的计数器必须在记录第一行之前就正确。
         """
         try:
             conn = sqlite3.connect(self.path, timeout=5)
@@ -155,7 +155,7 @@ class LogStore:
             except Exception:
                 pass
 
-    # -- worker ------------------------------------------------------------
+    # -- 工作线程 ----------------------------------------------------------
     def _submit(self, kind, payload=None, wait=False, timeout=8.0):
         fut = {"event": threading.Event(), "result": None, "error": None}
         self._queue.put((kind, payload, fut))
@@ -172,15 +172,12 @@ class LogStore:
         if directory:
             os.makedirs(directory, exist_ok=True)
         conn = sqlite3.connect(self.path, timeout=10)
-        # auto_vacuum has to be set before the first table exists; on a database
-        # that already has one it is a no-op and the size cap falls back to a
-        # full VACUUM, which still gets the file back under the cap.
+        # auto_vacuum 必须在第一张表建好之前设置；已有表的库上这条是空操作，
+        # 大小上限就退回整库 VACUUM，同样能把文件压回上限以内。
         conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
-        # Every statement runs on this one thread - writes, reads and trims are
-        # serialised through the queue - so there is no reader/writer race to
-        # solve, and the rollback journal keeps "file size" meaning the size of
-        # the single file the operator set a cap on (WAL would park the newest
-        # rows in a sidecar that the cap never shrinks).
+        # 所有语句都跑在这一个线程上，写入、读取、裁剪经队列串行，没有读写
+        # 竞态要解决；回滚日志让「文件大小」始终等于运维设定上限的那一个
+        # 文件（WAL 会把最新行放进旁文件，上限永远缩不到）。
         conn.execute("PRAGMA journal_mode=DELETE")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
@@ -264,8 +261,7 @@ class LogStore:
                 conn.commit()
                 self._maybe_trim(conn)
             elif any(fut is not None for _k, _p, fut in batch):
-                # A read-only batch still may have started an implicit
-                # transaction; leaving it open would hold a read lock.
+                # 只读批次也可能已经开启隐式事务；不提交会一直持着读锁。
                 conn.commit()
         try:
             conn.commit()
@@ -280,7 +276,7 @@ class LogStore:
         fut["error"] = error
         fut["event"].set()
 
-    # -- queries -----------------------------------------------------------
+    # -- 查询 --------------------------------------------------------------
     def _query(self, conn, limit=200, level="", tag="", search="", since_id=0):
         where, args = [], []
         if since_id and since_id > 0:
@@ -321,7 +317,7 @@ class LogStore:
             "path": self.path,
         }
 
-    # -- retention ---------------------------------------------------------
+    # -- 保留清理 ----------------------------------------------------------
     def _maybe_trim(self, conn):
         now = time.time()
         if now - self._last_trim >= _TRIM_INTERVAL:
@@ -340,7 +336,7 @@ class LogStore:
                     pass
 
     def _trim(self, conn):
-        """Apply the row and age caps. Both are cheap DELETEs."""
+        """执行行数与保留天数上限，两者都是简单的 DELETE。"""
         days = self._caps.get("days")
         if days:
             cutoff = time.strftime(
@@ -358,18 +354,15 @@ class LogStore:
         conn.commit()
 
     def _trim_bytes(self, conn, cap):
-        """Delete oldest-first, then rebuild, until the file is under `cap`.
+        """按从旧到新的顺序删除并重建，直到文件小于 `cap`。
 
-        Estimates how many rows to drop from the average row size and rebuilds
-        once, rather than shrinking a page at a time: incremental_vacuum frees
-        one page per pass here, which on a database of this size would need
-        thousands of passes. A second pass covers an estimate that came in
-        under, and the loop stops as soon as the file fits.
+        按平均行长估算要删的行数，一次重建完成，不逐页收缩：incremental_vacuum
+        每次只释放一页，这种体量的库要跑上千次。估算偏小时再补一轮，文件装下即停。
         """
         size = self._size()
         if size <= cap:
             return
-        # Aim below the cap so the next writes do not trip it immediately.
+        # 目标压到上限以下，随后的写入不会立刻又触发裁剪。
         target = max(1, int(cap * 0.85))
         for _ in range(4):
             total = conn.execute("SELECT COUNT(*) FROM logs").fetchone()[0]

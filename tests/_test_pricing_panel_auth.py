@@ -1,18 +1,4 @@
-"""GET /pricing belongs to the panel boundary, not the API-key boundary.
-
-    python tests/_test_pricing_panel_auth.py
-
-/pricing is the dashboard's read side for the pricing feature: it returns the
-current policy document, the gap/mapping state, the pricing log and the resolved
-project-local pricing file paths. None of that is part of the OpenAI-compatible
-client surface, so an API key has no reason to reach it - which is exactly the
-boundary the write side already uses for POST /pricing/refresh and
-POST /pricing/mapping.
-
-These tests drive the real do_GET dispatcher through the four credential tiers
-the boundary has to tell apart: nothing at all, a valid API key, a wrong panel
-token, and a real panel session. /v1/models is checked alongside them because it
-is the endpoint that must *stay* readable with an API key alone.
+"""测 GET /pricing 的认证边界：它归面板，API key 进不来，与写侧的 POST /pricing/refresh、POST /pricing/mapping 同一条边界。四档凭据逐个试：无凭据、有效 API key、错误面板口令、真实面板会话；/v1/models 必须继续只凭 API key 可读。用 python tests/run_all.py _test_pricing_panel_auth 运行，不联网。
 """
 import os
 import sys
@@ -22,16 +8,18 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  自带数据根目录
 
 _TMP_ENV = isolated_data_dirs("wb-pricing-panel-auth-")
 
-import wb_proxy as proxy          # noqa: E402
+import wb_proxy as proxy
+import wb_http as H          # noqa: E402
+import wb_modelsdev          # noqa: E402
 import wb_settings as settings    # noqa: E402
 
 API_KEY = {"name": "client key", "key": "sk-client-abc", "enabled": True}
 
-#: What PRICING.status() hands back; the panel must see exactly this.
+#: PRICING.status() 返回的内容，面板拿到的必须一字不差。
 PRICING_DOCUMENT = {
     "interval_minutes": 30.0,
     "enabled": True,
@@ -52,11 +40,10 @@ class FakePricing(object):
 
 
 class Request(object):
-    """Enough of a request object to run the real dispatcher.
+    """够跑真实派发器的最小请求对象。
 
-    The boundary under test lives in do_GET/do_POST, so the methods are borrowed
-    from the real Handler rather than re-implemented: only the response sink and
-    the two socket helpers _error() needs are replaced.
+    被测边界在 do_GET/do_POST 里，方法直接借自真实 Handler，只替换响应出口
+    和 _error() 要用的两个 socket 辅助函数。
     """
 
     _is_panel_route = staticmethod(proxy.Handler._is_panel_route)
@@ -80,7 +67,7 @@ class Request(object):
         self.status = None
         self.body = None
 
-    # A test request has no socket behind it.
+    # 测试请求背后没有 socket。
     def _handle_expect_continue(self):
         pass
 
@@ -99,16 +86,15 @@ class PanelRouteBoundaryTests(unittest.TestCase):
             mock.patch.multiple(proxy, ACCOUNTS_DIR=self.directory,
                                 API_KEY=None, POOL=None),
             mock.patch.object(proxy, "PRICING", FakePricing()),
-            mock.patch.object(proxy, "fetch_models",
+            mock.patch.object(H, "fetch_models",
                               lambda realm=None: [("gpt-4o", {})]),
-            mock.patch.object(proxy.wb_modelsdev, "refresh_async",
+            mock.patch.object(wb_modelsdev, "refresh_async",
                               lambda *a, **k: None),
         ]
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
-        # A configured, enabled key is what puts the deployment in
-        # "auth required" mode, so the anonymous tier really is anonymous.
+        # 配置了启用的 key，部署才进入需要认证的模式，匿名档才真正匿名。
         settings.set_api_keys(self.directory, [API_KEY])
 
     def _cleanup(self):
@@ -124,10 +110,10 @@ class PanelRouteBoundaryTests(unittest.TestCase):
         return Request(path, headers)
 
     def assert_panel_rejected(self, request):
-        """401 from the panel boundary - not from the API-key check.
+        """401 来自面板边界，与 API key 检查无关。
 
-        The distinction is the whole point: a *valid* API key must still be
-        turned away here, so the message has to name the panel, not the key.
+        区分二者是关键：有效的 API key 在这里也必须被拒，所以报错消息必须
+        点名面板，不能说 key 的问题。
         """
         request.do_GET()
         self.assertIsNotNone(request.body, "请求没有被派发处理")
@@ -153,7 +139,7 @@ class PanelRouteBoundaryTests(unittest.TestCase):
         self.assertEqual(request.body, PRICING_DOCUMENT)
 
     def test_a_panel_session_can_read_pricing_without_any_api_key(self):
-        """The panel keeps working exactly as before - that is the other half."""
+        """面板照常工作，这是另一半契约。"""
         request = self.request("/pricing", panel=proxy.PANEL.create())
         request.do_GET()
         self.assertEqual(request.status, 200)

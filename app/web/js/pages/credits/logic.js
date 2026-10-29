@@ -55,9 +55,8 @@ export function packageState(raw, now = Date.now()) {
   return 'active';
 }
 
-export const STATE_ORDER = { active: 0, expired: 1, used: 2 };
+const STATE_ORDER = { active: 0, expired: 1, used: 2 };
 
-/** 状态徽章的文案与色调。 */
 export function stateBadge(state) {
   if (state === 'expired') return { text: '已过期', tone: 'danger' };
   if (state === 'used') return { text: '已用完', tone: 'muted' };
@@ -223,7 +222,6 @@ export function cycleText(raw) {
   return item.expireAt ? day(item.expireAt) + ' 到期' : day(item.startAt) + ' 开始';
 }
 
-/** 归并行的说明：来源说明与笔数。 */
 export function groupSubText(group) {
   const parts = [];
   if (group.count > 1) parts.push('共 ' + group.count + ' 笔');

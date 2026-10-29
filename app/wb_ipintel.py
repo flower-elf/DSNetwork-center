@@ -20,7 +20,6 @@ FIELDS = ("country", "country_code", "ip_type", "isp", "asn")
 
 
 def type_label(ip_type):
-    """返回存储类型的显示标签，未知时返回空串。"""
     return TYPE_LABELS.get(str(ip_type or "").strip().lower(), "")
 
 
@@ -60,8 +59,8 @@ def _open(request, timeout):
 def lookup(ip, timeout=LOOKUP_TIMEOUT):
     """查询一个出口 IP 的国家与地址类型，未知时字段为空。
 
-    请求直接发出，不走被描述的代理：该代理只通上游时查询仍要可用，也不能由
-    待查出口回答。
+    请求直接发出，不经账号配置的代理：代理只放行上游时查询仍要可用，也不能
+    由待查出口回答这次查询。
     """
     address = str(ip or "").strip()
     if not address:

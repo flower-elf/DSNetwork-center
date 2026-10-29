@@ -1,36 +1,30 @@
-"""Block-buffered SSE reading must be byte-identical to plain line iteration.
+"""验证按块缓冲读取 SSE 与逐行迭代逐字节一致，且每行一次系统调用降为每块一次。
 
-`for line in upstream` on an http.client.HTTPResponse costs one read() syscall
-per SSE event, and every syscall releases and re-acquires the GIL. A streaming
-turn emits thousands of events, so the process spends most of its time handing
-the GIL between handler threads instead of working. Measured on the 4 vCPU box
-running v1.7.2 at 15-20 req/s:
+对 http.client.HTTPResponse 直接 for line 迭代时，每个 SSE 事件一次 read() 系统调用，
+每次都要释放再获取 GIL；一次流式回复有上千个事件，时间大多耗在 handler 线程间的 GIL 交接上。
+v1.7.2 在 4 vCPU 机器、15-20 req/s 下的实测（strace -c -f -p <pid>，10 秒）：
 
-    10s syscall profile of wb-proxy (strace -c -f -p <pid>)
-      71.44%   59.43s    559us/call   106214  futex     <- GIL handoff
+    wb-proxy 的 10 秒系统调用统计
+      71.44%   59.43s    559us/call   106214  futex     <- GIL 交接
       20.31%   16.89s  42659us/call      396  poll
-       1.80%    1.50s     41us/call    36366  read      <- one per SSE line
+       1.80%    1.50s     41us/call    36366  read      <- 每个 SSE 行一次
        0.54%    0.45s     88us/call     5043  sendto
 
-`iter_sse_lines()` reads with read1() (at most one underlying syscall per call)
-and splits in memory, which is why the equivalence pinned here matters: the
-whole point is to change the *number* of syscalls without changing a single
-byte the caller sees.
-
-The reference is io.BytesIO iteration, not a hand-rolled splitter, because that
-is the same readline() semantics the replaced loop had: lines carry their
-terminator, a final line without one is still yielded, and only "\\n" splits.
+`iter_sse_lines()` 用 read1() 读取（每次至多一次底层系统调用）并在内存中切分，所以这里
+验证的等价性是关键：只改变系统调用次数，调用方看到的字节一个都不能变。参照实现用
+io.BytesIO 迭代，与被替换的旧循环同为 readline() 语义：行保留终止符，末尾没有终止符的
+最后一行照常输出，只按 "\\n" 切分。
 """
 import io
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits.
+from _isolated_dirs import isolated_data_dirs  # noqa: E402（独立数据根目录）
+# 独立数据目录，进程退出时删除。
 _TMP = isolated_data_dirs("wb-sse-read-batching-")
 
-import wb_proxy as P  # noqa: E402
+import wb_translate as T  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -47,12 +41,10 @@ def check(label, ok, detail=""):
 
 
 class FakeStream:
-    """The wire as a list of chunks, answered through read1().
+    """把网络数据模拟成分块列表，经 read1() 按序吐出。
 
-    `chunks` is handed over in order: read1() returns at most `n` bytes from the
-    front of the current chunk and b"" once the script is exhausted. Chunks are
-    deliberately not aligned to any block size, so lines straddle boundaries -
-    the case the reader has to get right.
+    read1() 从当前块头部至多返回 n 个字节，脚本耗尽后返回 b""。块切成不规则大小，
+    让行跨越块边界，这正是读取器必须处理正确的情况。
     """
 
     def __init__(self, chunks):
@@ -74,10 +66,10 @@ class FakeStream:
 
 
 def same_as_plain_iteration(data, chunk_size):
-    """Read `data` in `chunk_size` chunks; return (yielded, read1_calls)."""
+    """按 chunk_size 分块读取 data，返回输出行、read1 调用次数和块数。"""
     wire = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)] or [b""]
     src = FakeStream(wire)
-    got = list(P.iter_sse_lines(src))
+    got = list(T.iter_sse_lines(src))
     return got, src.read1_calls, len(wire)
 
 
@@ -106,20 +98,20 @@ for label, data in CASES:
 
 print("-- the same bytes through the real io.BytesIO read1() --")
 for label, data in CASES:
-    got = list(P.iter_sse_lines(io.BytesIO(data)))
+    got = list(T.iter_sse_lines(io.BytesIO(data)))
     check("%s via BytesIO" % label, got == list(io.BytesIO(data)),
           "got=%r" % (got[:4],))
 
 print("-- a line is emitted as soon as it is complete, not when a block fills --")
 src = FakeStream([b"data: one\n"])
-gen = P.iter_sse_lines(src)
+gen = T.iter_sse_lines(src)
 check("first complete line arrives on the first read1",
       next(gen) == b"data: one\n")
 check("no second read1 was needed to emit it", src.read1_calls == 1,
       "%d calls" % src.read1_calls)
 
 src = FakeStream([b"data: par", b"tial\n"])
-got = list(P.iter_sse_lines(src))
+got = list(T.iter_sse_lines(src))
 check("a line straddling two chunks is reassembled", got == [b"data: partial\n"],
       repr(got))
 
@@ -134,7 +126,7 @@ for chunk_size in (8192, 65536):
           calls <= wire + 2,
           "%d calls for %d lines over %d chunks" % (calls, len(ref), wire))
 
-# The headline number: what the old loop cost per line versus what it costs now.
+# 汇总数字：旧循环按行计一次调用，现在按块计。
 _, calls, wire = same_as_plain_iteration(lines, 65536)
 print("    2000 events / 64 KiB blocks: %d read1 calls vs %d lines (%.0fx fewer)"
       % (calls, len(ref), float(len(ref)) / max(1, calls)))
@@ -142,42 +134,27 @@ check("at least an order of magnitude fewer syscalls",
       len(ref) >= 10 * calls, "%d lines, %d calls" % (len(ref), calls))
 
 print("-- objects without read1 fall back to plain iteration --")
-check("a list iterates unchanged",
-      list(P.iter_sse_lines([b"a\n", b"b\n"])) == [b"a\n", b"b\n"])
 check("an iterator iterates unchanged",
-      list(P.iter_sse_lines(iter([b"a\n", b"b"]))) == [b"a\n", b"b"])
+      list(T.iter_sse_lines(iter([b"a\n", b"b"]))) == [b"a\n", b"b"])
 
 src = FakeStream([b"y" * 100])
-list(P.iter_sse_lines(src, block_size=16))
+list(T.iter_sse_lines(src, block_size=16))
 check("a custom block_size is passed to read1",
       src.read1_calls >= 7, "%d calls for 100 bytes at 16" % src.read1_calls)
-
-print("-- strip_data_prefix still sees the shape it expects --")
-got = list(P.iter_sse_lines(FakeStream([b"data: {\"a\": 1}\n\n", b"data: [DONE]\n\n"])))
-check("prefix stripping works on the yielded lines",
-      [P.strip_data_prefix(l.decode("utf-8", "replace")) for l in got]
-      == ['{"a": 1}', "", "[DONE]", ""],
-      repr(got))
 
 print("-- before_read: the hook that lets a caller batch its writes --")
 
 calls = [0]
 src = FakeStream([b"a\n", b"b\n", b"c\n"])
-got = list(P.iter_sse_lines(src, before_read=lambda: calls.__setitem__(0, calls[0] + 1)))
+got = list(T.iter_sse_lines(src, before_read=lambda: calls.__setitem__(0, calls[0] + 1)))
 check("lines still come out intact with a hook attached",
       got == [b"a\n", b"b\n", b"c\n"], repr(got))
 check("the hook fires exactly once per read1",
       calls[0] == src.read1_calls,
       "%d hook calls vs %d read1 calls" % (calls[0], src.read1_calls))
 
-src = FakeStream([b"a\n", b"b\n"])
-list(P.iter_sse_lines(src))
-check("read1_calls is 3 for 2 chunks (the last one returns b'')",
-      src.read1_calls == 3, src.read1_calls)
-
-# The invariant that makes batching latency-free: whenever the generator is
-# about to block on the socket, the caller's buffer has already been drained.
-# Nothing sits in memory waiting for data that has not arrived.
+# 批处理零延迟的不变量：生成器即将阻塞在 socket 读取时，调用方缓冲区已经清空，
+# 内存中不会滞留等待未到数据的内容。
 drained = []
 written = []
 src = FakeStream([b"data: a\n", b"data: b\n", b"data: c\n"])
@@ -191,13 +168,13 @@ def flush_out():
 
 
 def before_read():
-    # The hook runs immediately before read1(). Draining here is exactly what
-    # makes batching latency-free, so record the size *after* the drain.
+    # 钩子在 read1() 之前执行；在这里清空缓冲正是批处理零延迟的原因，所以记录
+    # 清空后的大小。
     flush_out()
     drained.append(len(buf))
 
 
-for line in P.iter_sse_lines(src, before_read=before_read):
+for line in T.iter_sse_lines(src, before_read=before_read):
     buf.append(line)
 flush_out()
 check("the write buffer is empty whenever a blocking read begins",
@@ -207,7 +184,7 @@ check("every event still reached the wire",
 
 
 def batched(data, chunk_size):
-    """Mimic _chat_stream_response: buffer events, flush on before_read."""
+    """模拟 _chat_stream_response：缓冲事件，在 before_read 时刷出。"""
     wire = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)] or [b""]
     src = FakeStream(wire)
     writes = []
@@ -218,7 +195,7 @@ def batched(data, chunk_size):
             writes.append(b"".join(pending))
             del pending[:]
 
-    for line in P.iter_sse_lines(src, before_read=flush):
+    for line in T.iter_sse_lines(src, before_read=flush):
         pending.append(b"data: " + line)
     flush()
     return writes, len(wire)

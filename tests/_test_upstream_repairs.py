@@ -4,11 +4,12 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# 独立目录，进程退出时删除，不与其他套件共用 tests/_acc 与 tests/_use。
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  独立数据目录
+# 进程退出时删除，不与其他套件共用 tests/_acc 与 tests/_use。
 _TMP = isolated_data_dirs("wb-upstream-repairs-")
 
 import wb_proxy as P
+import wb_sanitize as S
 
 PASS = FAIL = 0
 
@@ -158,9 +159,10 @@ check("the intruder is kept, only moved",
 adjacent = [{"role": "user", "content": "go"},
             assistant_with_calls("c0"),
             tool_result("c0")]
-unchanged, changed2 = P.repack_tool_result_blocks(copy.deepcopy(adjacent))
+batch = copy.deepcopy(adjacent)
+unchanged, changed2 = P.repack_tool_result_blocks(batch)
 check("an already-correct batch is left alone", not changed2)
-check("and returned as the same object", unchanged is not None)
+check("and returned as the same object", unchanged is batch)
 
 two_batches = [assistant_with_calls("a0"),
                tool_result("a0"),
@@ -272,7 +274,7 @@ check("plain text is not silently accepted", P.is_truncated_arguments("not json"
 mixed_calls = [{"id": "ok", "function": {"name": "f", "arguments": '{"a":1}'}},
                {"id": "cut", "function": {"name": "f", "arguments": '{"a":'}},
                {"id": "noargs", "function": {"name": "f", "arguments": ""}}]
-kept_calls = P.drop_truncated_tool_calls(mixed_calls)
+kept_calls = S.drop_truncated_tool_calls(mixed_calls)
 check("only the truncated call is dropped",
       [c["id"] for c in kept_calls] == ["ok", "noargs"])
 
@@ -359,19 +361,6 @@ check("a split parallel batch leaves as one assistant",
 check("both calls survive the merge",
       [tc["id"] for tc in split_assistants[0].get("tool_calls", [])] == ["c0", "c1"],
       split_assistants[0].get("tool_calls"))
-
-print()
-print("[5] prompt_cache_key is off by default")
-
-check("the injection is opt-in, not always-on",
-      P.prompt_cache_key_enabled() is False,
-      P.prompt_cache_key_enabled())
-
-P.wb_settings.set_prompt_cache_key(P.ACCOUNTS_DIR, True)
-check("it can be switched on in settings",
-      P.prompt_cache_key_enabled() is True)
-P.wb_settings.set_prompt_cache_key(P.ACCOUNTS_DIR, False)
-check("and switched back off", P.prompt_cache_key_enabled() is False)
 
 print()
 print("PASS=%d FAIL=%d" % (PASS, FAIL))

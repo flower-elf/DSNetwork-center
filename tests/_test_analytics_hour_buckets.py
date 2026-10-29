@@ -3,32 +3,31 @@
 日桶只拆得开「起点是本地午夜 + until 开放」的窗口；面板自定义区间的起点是
 任意时刻，那条路径一直整段扫描（路由器上冷 49.4s）。analytics 的 token 口径
 含失败行（`_feed_analytics`），与 snapshot/series 不同，借不了别人的层——所以
-这一套钉住 analytics 自己的小时子表：
+这一套断言 analytics 自己的小时子表：
 
   * 切分：每行折进「它 at 所属那天的那一小时」，小时键是「离本地午夜多少
     秒」（字符串），迟写（at 早于折叠时刻）的行也落回它时间戳所属的那天那
     小时；realm 不匹配的行不建桶；
-  * 等价：起点整小时的自定义窗口由小时桶相加，与改动前的逐行口径一致。
+  * 等价：起点整小时的自定义窗口由小时桶相加，与逐行口径逐字节一致。
     测试数据的价刻意用二进制可精确求和的数（0.5/0.25/0.125）与 unit=1，所以
     连 cost_cny 都能逐字节比；价不是精确值时只有浮点求和顺序的差异，这一条
-    单独钉在 [8]；
+    单独断言在 [8]；
   * 逐字节：同一日志同一窗口，「走层」与「强制整段扫（现折小时桶）」逐字节
-    一致；省下的工作用计数桩证明（窗口回答不再付 cost_for_row）；
+    一致；省下的工作用计数桩证明（窗口回答不付 cost_for_row）；
   * 覆盖不到就退回扫描：非整小时的起点、until 切在桶中间、小时被剪掉、
-    days_floor 以下——一律退回，结果与改动前的逐行口径一致；
+    days_floor 以下——一律退回，结果与逐行口径一致；
   * checkpoint：小时子表与 max_at 随状态落盘/加载，重启（含真·子进程）后
     与冷折逐字节一致；旧格式的日桶（没有 at）整体拒收 → 重折一次；而旧天
     被剪掉的小时表（hours 键缺席或为 null）**不算损坏**，状态照常采用（#26，采纳用例见 _test_usage_aggregate_cache.py）；
   * 降级：坏小时子表（形状/小时键/at/max_at）一律当作没有缓存，结果回到真值；
   * 保留：WB_USAGE_HOUR_KEEP_HOURS 决定小时子表的保留线，剪掉的天退回扫描；
-  * 开关：WB_USAGE_DAY_BUCKETS=0 时与改动前逐字节一致（旧口径）。
+  * 开关：WB_USAGE_DAY_BUCKETS=0 时退回逐行口径，逐字节一致。
 
 降级用例沿用 _test_usage_day_buckets.py 的写法：先给「应当被拒绝」的那份状态
 加一个一眼可见的标记（poison），再做变异。标记没被采用就说明校验拦住了它；
 一旦被错误采用，结果里就会多出那个标记，用例当场失败。
 
-No network: the usage log, the pricing table and the settings file are
-synthesised in a temp directory.
+不联网：usage 日志、计价表与 settings 文件在临时目录里现造。
 """
 import io
 import json
@@ -59,6 +58,8 @@ import time as _time
 _time.time = lambda: FROZEN
 
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_cache
 import wb_pricing
 
 P.ACCOUNTS_DIR = ACCOUNTS_DIR
@@ -68,7 +69,7 @@ wb_pricing.set_settings_dir(ACCOUNTS_DIR)
 USAGE_LOG = P.USAGE_LOG
 # checkpoint 在 v4 里一类一份文件（T8 的拆分）：这里给出合并视图与按类读写，
 # 用例里 data["snapshot"] / data["series"] / data["analytics"] 的写法不用改。
-KIND_FILES = {kind: P._usage_cache_kind_path(kind) for kind in P._USAGE_CACHE_KINDS}
+KIND_FILES = {kind: U._usage_cache_kind_path(kind) for kind in U._USAGE_CACHE_KINDS}
 
 
 def cache_files():
@@ -79,7 +80,7 @@ def clear_cache_files():
     for path in KIND_FILES.values():
         if os.path.exists(path):
             os.unlink(path)
-P._usage["started"] = FROZEN
+U._usage["started"] = FROZEN
 
 PASS = FAIL = 0
 
@@ -264,26 +265,26 @@ def cache_env_force():
 
 
 def cache_env_off():
-    """改动前的口径：checkpoint 关掉、日桶/小时桶关掉（= 逐行扫描）。"""
+    """对照口径：checkpoint 关掉、日桶/小时桶关掉（= 逐行扫描）。"""
     cache_env(enabled=0, min_bytes=0, min_seconds=0, days=0)
 
 
 def restart():
     """清掉所有状态、TTL 缓存与「已读过 checkpoint」的记忆，模拟进程重启。"""
-    P._analytics_state.clear()
-    P._analytics_cache.clear()
-    P._snap_cache.clear()
-    P._usage_snap_state.clear()
-    P._usage_cache_forget()
-    P._usage_cache_progress.clear()
-    P._usage_cache_checkpointed.clear()
-    P._usage_cache_last_attempt = time.time()
-    P._usage_cache_digest_memo.clear()
+    U._analytics_state.clear()
+    U._analytics_cache.clear()
+    U._snap_cache.clear()
+    U._usage_snap_state.clear()
+    U._usage_cache_forget()
+    U._usage_cache_progress.clear()
+    U._usage_cache_checkpointed.clear()
+    wb_usage_cache._usage_cache_last_attempt = time.time()
+    U._usage_cache_digest_memo.clear()
 
 
 def win(lo, hi=None, realm=None, ttl=0):
     """公开入口的窗口结果（analytics）。"""
-    return P._compute_usage_analytics_uncached(realm=realm, since=lo, until=hi)
+    return U._compute_usage_analytics_uncached(realm=realm, since=lo, until=hi)
 
 
 def live():
@@ -300,7 +301,7 @@ def live():
 
 
 def deep(obj):
-    """一份结构深拷贝（比较「改动前」的结果用；活状态会被就地改）。"""
+    """一份结构深拷贝（比较对照组的结果用；活状态会被就地改）。"""
     return json.loads(canon(obj))
 
 
@@ -311,11 +312,12 @@ FROZEN = __FROZEN__
 _t.time = lambda: FROZEN
 sys.path.insert(0, __ROOT__)
 import wb_proxy as P
+import wb_usage as U
 import wb_pricing
 wb_pricing.set_data_dir(P.USAGE_DIR)
 wb_pricing.set_settings_dir(P.ACCOUNTS_DIR)
 
-TODAY0 = P._local_midnight(FROZEN)
+TODAY0 = U._local_midnight(FROZEN)
 DAY1 = TODAY0 - 86400
 NOON1 = DAY1 + 12 * 3600
 out = {}
@@ -324,11 +326,11 @@ for name, lo, hi in (("noon1", NOON1, None),
                      ("noon30", NOON1 + 1800, None),
                      ("today_until", TODAY0, FROZEN),
                      ("all", None, None)):
-    out["an_" + name] = P._compute_usage_analytics_uncached(since=lo, until=hi)
-out["an_noon1_cn"] = P._compute_usage_analytics_uncached(realm="cn", since=NOON1,
+    out["an_" + name] = U._compute_usage_analytics_uncached(since=lo, until=hi)
+out["an_noon1_cn"] = U._compute_usage_analytics_uncached(realm="cn", since=NOON1,
                                                          until=None)
 with open(os.environ["WB_CHILD_OUT"], "w", encoding="utf-8") as fh:
-    json.dump({"checkpointed": P._usage_cache_checkpointed, "results": out}, fh,
+    json.dump({"checkpointed": U._usage_cache_checkpointed, "results": out}, fh,
               ensure_ascii=False)
 print("child ok")
 '''
@@ -359,7 +361,7 @@ def run_child(extra_env=None):
 def cache_data():
     """五个 kind 文件的合并视图：{kind: entries}（缺失/读不出的当空表）。"""
     merged = {}
-    for kind in P._USAGE_CACHE_KINDS:
+    for kind in U._USAGE_CACHE_KINDS:
         try:
             with io.open(KIND_FILES[kind], encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -372,11 +374,11 @@ def cache_data():
 
 def save_cache(data):
     """把合并视图写回 kind 文件（保持 v4 的包装形状；空表不写）。"""
-    for kind in P._USAGE_CACHE_KINDS:
+    for kind in U._USAGE_CACHE_KINDS:
         entries = data.get(kind) or []
         if not entries:
             continue
-        payload = {"schema": P._USAGE_CACHE_SCHEMA, "kind": kind,
+        payload = {"schema": U._USAGE_CACHE_SCHEMA, "kind": kind,
                    "written_at": time.time(), "entries": entries}
         io.open(KIND_FILES[kind], "w", encoding="utf-8", newline="\n").write(
             json.dumps(payload, ensure_ascii=False))
@@ -417,7 +419,7 @@ def newest_hour(data, realm=None):
 
 
 # --------------------------------------------------------------------------
-# 计数桩：证明「走层」时窗口回答不再付计价/扫描
+# 计数桩：证明「走层」时窗口回答不付计价/扫描
 # --------------------------------------------------------------------------
 COST_CALLS = {"n": 0}
 _REAL_COST_FOR_ROW = wb_pricing.cost_for_row
@@ -434,8 +436,8 @@ wb_pricing.cost_for_row = counting_cost_for_row
 def cost_calls(fn):
     """计价计数：先清行级记忆（定价表），否则同一批行重复折会被记忆挡住、
     数不到「这一遍真的付了多少计价」。"""
-    P._row_day_memo.clear()
-    P._row_cost_memo.clear()
+    U._row_day_memo.clear()
+    U._row_cost_memo.clear()
     COST_CALLS["n"] = 0
     out = fn()
     return out, COST_CALLS["n"]
@@ -460,8 +462,8 @@ check("基线（改动前口径）：旗舰窗口有内容，开放窗口覆盖�
       (GOLDEN_OBJ["an_noon1"]["summary"]["window"]["total_tokens"],
        GOLDEN_OBJ["an_noon1_until"]["summary"]["window"]["total_tokens"]))
 check("基线（关掉日桶/小时桶）：状态里没有日桶、也没有小时子表",
-      not P._analytics_state[None]["days"],
-      P._analytics_state[None]["days"])
+      not U._analytics_state[None]["days"],
+      U._analytics_state[None]["days"])
 check("基线：失败行的 token 计进窗口、requests 不计（口径自检）",
       GOLDEN_OBJ["an_noon1"]["summary"]["window"]["errors"] == 1
       and GOLDEN_OBJ["an_noon1"]["summary"]["window"]["total_tokens"] >= 500 + 50,
@@ -477,7 +479,7 @@ print("[1] 切分：每行折进它 at 所属的本地日与小时（整点、�
 cache_env_nowrite()
 restart()
 live()
-days = P._analytics_state[None]["days"]
+days = U._analytics_state[None]["days"]
 check("日桶键 == 日志里出现过的本地日",
       sorted(days) == [DAY2_KEY, DAY1_KEY, TODAY_KEY], sorted(days))
 check("日桶带 at（本地午夜）与 hours 子表",
@@ -509,23 +511,23 @@ check("不限 realm 的折叠里 cn 行照常进桶",
       and hours1["23"]["accts"]["u2"]["window"]["requests"] == 1,
       hours1["23"]["accts"].keys())
 # realm=cn 是另一份状态：只有 cn 的行。
-P._compute_usage_analytics_uncached(realm="cn", since=NOON1, until=None)
-cn_days = P._analytics_state["cn"]["days"]
+U._compute_usage_analytics_uncached(realm="cn", since=NOON1, until=None)
+cn_days = U._analytics_state["cn"]["days"]
 check("realm=cn 的折叠独立成一份状态，只装 cn 的行",
       sorted(cn_days[DAY1_KEY]["hours"], key=int) == ["23"]
       and sorted(days[DAY1_KEY]["hours"], key=int) == ["11", "12", "23"],
       (sorted(cn_days[DAY1_KEY]["hours"], key=int),
        sorted(days[DAY1_KEY]["hours"], key=int)))
 check("max_at 是折过的最大 at（含 realm 不匹配的行）",
-      P._analytics_state[None]["max_at"] == TODAY0 + 13 * 3600 + 180,
-      (P._analytics_state[None]["max_at"], TODAY0 + 13 * 3600 + 180))
+      U._analytics_state[None]["max_at"] == TODAY0 + 13 * 3600 + 180,
+      (U._analytics_state[None]["max_at"], TODAY0 + 13 * 3600 + 180))
 # 迟写行：把一条 at 属于昨天 12:15 的行追加到今天，它必须落进昨天 12 点桶。
 append_log([row(NOON1 + 900, "m-a", "u1", 1000, 100, credit=0.5)])
 live()
-late = P._analytics_state[None]["days"][DAY1_KEY]["hours"]["12"]
+late = U._analytics_state[None]["days"][DAY1_KEY]["hours"]["12"]
 check("迟写行落进它时间戳所属的那天那小时（不是折叠时刻那小时）",
       late["summary"]["total_tokens"] == 400 + 40 + 500 + 50 + 1000 + 100
-      and P._analytics_state[None]["days"][TODAY_KEY]["hours"]["13"]
+      and U._analytics_state[None]["days"][TODAY_KEY]["hours"]["13"]
           ["summary"]["total_tokens"] == 900 + 90 + 110 + 11 + 120 + 12,
       late["summary"]["total_tokens"])
 write_log(ROWS)
@@ -585,8 +587,8 @@ restart()
 pricing_on = P.wb_pricing.pricing_enabled()
 # 先折一次（走层），再从状态里现折一份小时桶，两份必须逐字节一致。
 _, calls_cold = cost_calls(lambda: win(NOON1, None))
-layer = P._analytics_window_from_hours(None, NOON1, None, pricing_on)
-cold = P._scan_usage_analytics_window_hours(None, NOON1, None)
+layer = U._analytics_window_from_hours(None, NOON1, None, pricing_on)
+cold = U._scan_usage_analytics_window_hours(None, NOON1, None)
 check("走层 vs 现折小时桶：窗口半 maps 逐字节一致",
       canon(layer) == canon(cold), first_diff(canon(layer), canon(cold)))
 check("冷折确实付了计价（计数桩自检）", calls_cold > 0, calls_cold)
@@ -594,14 +596,14 @@ check("冷折确实付了计价（计数桩自检）", calls_cold > 0, calls_col
 _, calls_warm = cost_calls(lambda: win(NOON1, None))
 check("走层：窗口回答不再付计价（计数桩 == 0）", calls_warm == 0, calls_warm)
 # 强制整段扫（逐行口径）确实付了计价——省下的工作真实存在。
-_, calls_scan = cost_calls(lambda: P._scan_usage_analytics_window(None, NOON1, None))
+_, calls_scan = cost_calls(lambda: U._scan_usage_analytics_window(None, NOON1, None))
 check("逐行口径的整段扫确实付了计价（计数桩 > 0）", calls_scan > 0, calls_scan)
 # 窗口内 9 行里有 1 行是客户端中止（折叠在算价之前就丢掉它），其余 8 行各付一次。
 check("逐行口径的计价次数 == 窗口内非中止行数（8）", calls_scan == 8, calls_scan)
-# 午夜窗口：小时层与日桶层给出同一份窗口半（两条对齐路径互相印证）。
+# 午夜窗口：小时层与日桶层给出同一份窗口半（两条路径互相印证）。
 restart()
-by_hours = P._analytics_window_from_hours(None, TODAY0, None, pricing_on)
-by_days = P._analytics_window_from_days(None, TODAY_KEY, None, pricing_on)
+by_hours = U._analytics_window_from_hours(None, TODAY0, None, pricing_on)
+by_days = U._analytics_window_from_days(None, TODAY_KEY, None, pricing_on)
 check("午夜窗口：小时层与日桶层一致（逐字节）",
       canon(by_hours) == canon(by_days), first_diff(canon(by_days), canon(by_hours)))
 
@@ -644,7 +646,7 @@ check("until 切在桶中间：走的是现折小时桶那条冷路径（计数�
 cache_env(enabled=1, min_bytes=10 ** 9, min_seconds=10 ** 9, hours=1)
 restart()
 live()
-days = P._analytics_state[None]["days"]
+days = U._analytics_state[None]["days"]
 check("保留 1 小时：更早的天丢了 hours 子表、日桶还在",
       "hours" not in days[DAY2_KEY] and "hours" in days[TODAY_KEY]
       and "hours" in days[DAY1_KEY],
@@ -673,7 +675,7 @@ cache_env(keep=None)
 cache_env_nowrite()
 restart()
 live()
-P._analytics_state[None]["key"] = (0, 0, 0)
+U._analytics_state[None]["key"] = (0, 0, 0)
 got = canon(win(NOON1, None))
 check("状态的位置校验失效：重折后窗口仍与基线一致",
       got == canon(GOLDEN_RAW["an_noon1"]),
@@ -683,9 +685,9 @@ print()
 print("[5] checkpoint：小时子表与 max_at 随状态落盘/加载，重启后逐字节一致")
 check("写盘成功", make_checkpoint())
 stored = cache_data()
-COLD_DAYS = canon(P._analytics_state[None]["days"])
-COLD_MAX_AT = P._analytics_state[None]["max_at"]
-check("每个 kind 文件都是当前 schema 的 JSON 对象", all(json.load(io.open(KIND_FILES[k], encoding="utf-8"))["schema"] == P._USAGE_CACHE_SCHEMA for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])), cache_files())
+COLD_DAYS = canon(U._analytics_state[None]["days"])
+COLD_MAX_AT = U._analytics_state[None]["max_at"]
+check("每个 kind 文件都是当前 schema 的 JSON 对象", all(json.load(io.open(KIND_FILES[k], encoding="utf-8"))["schema"] == U._USAGE_CACHE_SCHEMA for k in U._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])), cache_files())
 entry = an_entry(stored, None)
 check("analytics 条目带 max_at（数字）",
       isinstance(entry.get("max_at"), (int, float))
@@ -713,11 +715,11 @@ check("冷折状态里的日桶 == 落盘的日桶（逐字节，含 at/hours �
 cache_env_nowrite()
 restart()
 LOADED_RAW = live()
-ADOPTED = dict(P._usage_cache_checkpointed)
+ADOPTED = dict(U._usage_cache_checkpointed)
 check("重启后加载到了 checkpoint（含 analytics）", "analytics" in ADOPTED, ADOPTED)
 check("加载后的日桶 == 冷折的日桶（逐字节，含 at/hours 键序）",
-      canon(P._analytics_state[None]["days"]) == COLD_DAYS,
-      first_diff(COLD_DAYS, canon(P._analytics_state[None]["days"])))
+      canon(U._analytics_state[None]["days"]) == COLD_DAYS,
+      first_diff(COLD_DAYS, canon(U._analytics_state[None]["days"])))
 check("加载后所有窗口与冷折逐字节一致", canon(LOADED_RAW) == GOLDEN,
       first_diff(GOLDEN, canon(LOADED_RAW)))
 # 重启后走层的窗口回答不该重折（小时子表是从 checkpoint 来的）。
@@ -782,7 +784,7 @@ mutate(lambda d: an_entry(d).update({"max_at": True}), "max_at 写成 true")
 mutate(lambda d: newest_day(d).pop("at"), "日桶没有 at（旧格式）")
 mutate(lambda d: newest_day(d).update({"at": "midnight"}), "日桶的 at 不是数字")
 # 注意：这里**没有**「日桶没有 hours」那条用例。剪枝线摘掉旧天的小时表是被认可的
-# 常态（#26），采纳覆盖钉在 _test_usage_aggregate_cache.py（标记落在 all-time
+# 常态（#26），采纳用例在 _test_usage_aggregate_cache.py（标记落在 all-time
 # 的 maps 上，一定可见，不受夹具/时区影响）。
 mutate(lambda d: newest_day(d).update({"hours": []}), "hours 不是对象")
 mutate(lambda d: mutate_hour(d, lambda h, k: h.update({"x": {}})),
@@ -823,9 +825,9 @@ write_pricing({**PRICING, "models": {
 cache_env_nowrite()
 restart()
 got = win(NOON1, None)
-layer = P._analytics_window_from_hours(None, NOON1, None,
+layer = U._analytics_window_from_hours(None, NOON1, None,
                                        P.wb_pricing.pricing_enabled())
-cold = P._scan_usage_analytics_window_hours(None, NOON1, None)
+cold = U._scan_usage_analytics_window_hours(None, NOON1, None)
 check("层与现折小时桶逐字节一致（非精确价）",
       canon(layer) == canon(cold), first_diff(canon(cold), canon(layer)))
 cache_env_off()
@@ -847,8 +849,8 @@ cache_env(enabled=0, min_bytes=0, min_seconds=0, days=0)
 restart()
 live()
 check("关掉日桶/小时桶：状态里一个日桶、一个小时子表都没有",
-      not P._analytics_state[None]["days"],
-      P._analytics_state[None]["days"])
+      not U._analytics_state[None]["days"],
+      U._analytics_state[None]["days"])
 check("关掉日桶/小时桶：结果与基线一致", canon(live()) == GOLDEN,
       first_diff(GOLDEN, canon(live())))
 # 打开小时层但 checkpoint 关掉（WB_USAGE_CACHE=0）：小时层仍然工作、结果与
@@ -857,8 +859,8 @@ cache_env(enabled=0, min_bytes=0, min_seconds=0, days=None)
 restart()
 check("checkpoint 关掉但小时层开着：结果与基线一致", canon(live()) == GOLDEN)
 check("checkpoint 关掉但小时层开着：小时子表确实折了",
-      bool(P._analytics_state[None]["days"])
-      and any(b.get("hours") for b in P._analytics_state[None]["days"].values()))
+      bool(U._analytics_state[None]["days"])
+      and any(b.get("hours") for b in U._analytics_state[None]["days"].values()))
 cache_env()
 
 print()
@@ -868,23 +870,23 @@ cache_env_nowrite()
 restart()
 live()
 pricing_on = P.wb_pricing.pricing_enabled()
-state = P._analytics_state[None]
+state = U._analytics_state[None]
 check("对齐窗口本来就走小时层（不是退回）",
-      P._analytics_window_from_hours(None, NOON1, None, pricing_on) is not None)
+      U._analytics_window_from_hours(None, NOON1, None, pricing_on) is not None)
 day_at = state["days"][TODAY_KEY]["at"]
 state["days"][TODAY_KEY]["at"] = day_at + 3600   # 假装这一天少了/多了 3600 秒
 check("日桶 at 被挪动（小时桶与日桶对不上）：小时层放弃、退回扫描",
-      P._analytics_window_from_hours(None, NOON1, None, pricing_on) is None)
+      U._analytics_window_from_hours(None, NOON1, None, pricing_on) is None)
 state["days"][TODAY_KEY]["at"] = day_at
 hours = state["days"][DAY1_KEY]["hours"]
 h_key = sorted(hours, key=int)[0]
 h_at = hours[h_key]["at"]
 hours[h_key]["at"] = h_at + 60
 check("小时桶 at 偏离格点：小时层放弃、退回扫描",
-      P._analytics_window_from_hours(None, NOON1, None, pricing_on) is None)
+      U._analytics_window_from_hours(None, NOON1, None, pricing_on) is None)
 hours[h_key]["at"] = h_at
 check("恢复后小时层又能用",
-      P._analytics_window_from_hours(None, NOON1, None, pricing_on) is not None)
+      U._analytics_window_from_hours(None, NOON1, None, pricing_on) is not None)
 # 格点被挪动时窗口结果仍然正确（退回扫描兜住）。
 cache_env_off()
 restart()
@@ -892,7 +894,7 @@ ref = canon(win(NOON1, None))
 cache_env_nowrite()
 restart()
 live()
-P._analytics_state[None]["days"][TODAY_KEY]["at"] += 3600
+U._analytics_state[None]["days"][TODAY_KEY]["at"] += 3600
 got = canon(win(NOON1, None))
 check("日桶 at 被挪动时窗口仍与逐行口径一致（退回扫描兜住）",
       got == ref, first_diff(ref, got))
@@ -930,18 +932,18 @@ if hasattr(time, "tzset"):
             lo = time.mktime((2026, 10, 25, 1, 0, 0, 0, 0, -1))
             cache_env_off()
             restart()
-            ref = canon(P._compute_usage_analytics_uncached(since=lo, until=None))
+            ref = canon(U._compute_usage_analytics_uncached(since=lo, until=None))
             cache_env_nowrite()
             restart()
-            got = canon(P._compute_usage_analytics_uncached(since=lo, until=None))
+            got = canon(U._compute_usage_analytics_uncached(since=lo, until=None))
             check("夏令时时区：横跨切换日的整点自定义窗口 == 逐行口径（逐字节）",
                   got == ref, first_diff(ref, got))
             cache_env_nowrite()
             restart()
-            P._compute_usage_analytics_uncached(since=lo, until=None)
+            U._compute_usage_analytics_uncached(since=lo, until=None)
             pricing_on = P.wb_pricing.pricing_enabled()
-            layer = P._analytics_window_from_hours(None, lo, None, pricing_on)
-            cold = P._scan_usage_analytics_window_hours(None, lo, None)
+            layer = U._analytics_window_from_hours(None, lo, None, pricing_on)
+            cold = U._scan_usage_analytics_window_hours(None, lo, None)
             check("夏令时时区：层确实接住了这个窗口（没有退回扫描）",
                   layer is not None)
             check("夏令时时区：层 == 现折小时桶（逐字节）",
@@ -951,8 +953,8 @@ if hasattr(time, "tzset"):
             # 开放）照常可用，与小时层给出同一份窗口半。
             lo2 = time.mktime((2026, 10, 25, 0, 0, 0, 0, 0, -1))
             key2 = time.strftime("%Y-%m-%d", time.localtime(lo2))
-            by_hours = P._analytics_window_from_hours(None, lo2, None, pricing_on)
-            by_days = P._analytics_window_from_days(None, key2, None, pricing_on)
+            by_hours = U._analytics_window_from_hours(None, lo2, None, pricing_on)
+            by_days = U._analytics_window_from_days(None, key2, None, pricing_on)
             check("夏令时切换日：小时层与日桶层一致（逐字节）",
                   by_hours is not None and by_days is not None
                   and canon(by_hours) == canon(by_days),

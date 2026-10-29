@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Release asset tooling (issue #28).
+"""发布资产工具（issue #28）。四个子命令只用标准库，发布工作流无需第三方 action：
 
-Four subcommands, all standard-library only so the release workflow needs no
-third-party action to produce the assets:
+    files                      打印便携包受管文件清单
+    portable                   构建便携 ZIP（附 release-manifest.json）
+    checksums                  对最终资产写 checksums.txt
+    body                      生成 Release 的下载说明区块（固定文案）
 
-    files                      print the managed portable file list
-    portable                   build the portable ZIP (+ release-manifest.json)
-    checksums                  write checksums.txt over the final assets
-    body                       compose the Release download section (fixed block)
-
-The portable ZIP is built from ``release/portable.txt`` rather than from a
-repository-wide glob: that list is also the contract #29's updater consumes
-("replace exactly these files, delete exactly these stale managed files"), so
-an accidental new file in the checkout can never end up in a release.
+便携 ZIP 按 ``release/portable.txt`` 清单构建，不做全仓通配：这份清单也是
+#29 的自更新契约（只替换这些文件、只删除这些过期受管文件），检出目录里误加的
+文件不可能混进发布包。
 
     python release/release_tools.py portable --version 0.2.0 --tag v0.2.0 \
         --out dist/wb-proxy-center-v0.2.0.zip
@@ -37,21 +33,20 @@ MANIFEST_NAME = "release-manifest.json"
 MARKER = "<!-- release-download-block -->"
 SCHEMA = 1
 
-# The folder every packaged file lives under. It matches the launcher layout,
-# so extracting gives one folder instead of a loose pile, and the updater
-# planned in #29 has a single prefix to strip (declared in the manifest).
+# 所有打包文件的根目录，与启动脚本的布局一致：解压得到单一目录，不会散落
+# 一堆文件；#29 的自更新也有单一前缀可剥离（写在 manifest 里）。
 PACKAGE_ROOT = "wb-proxy-center"
 
-# Paths the updater must never touch. They travel with the archive's manifest
-# so #29 can assert the contract instead of hardcoding it a second time.
+# 自更新永远不能碰的路径。它们随包内 manifest 一起发布，#29 直接按契约断言，
+# 不需要第二份硬编码。
 PROTECTED = ["accounts/", "usage/"]
 
-# Reproducible-build timestamp shared by the portable ZIP entries.
+# 便携 ZIP 各条目共用的可复现构建时间戳。
 DEFAULT_EPOCH = 1700000000
 
 
 def read_manifest(path=MANIFEST):
-    """Manifest paths, in file order, comments and blanks dropped."""
+    """清单里的路径，按文件顺序，注释行与空行忽略。"""
     out = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -63,7 +58,7 @@ def read_manifest(path=MANIFEST):
 
 
 def source_version(source=ROOT):
-    """The version the code itself claims, from app/wb_proxy.py's VERSION."""
+    """代码自称的版本号，取 app/wb_proxy.py 的 VERSION。"""
     import re
     with open(os.path.join(source, "app", "wb_proxy.py"), encoding="utf-8") as fh:
         text = fh.read()
@@ -75,16 +70,15 @@ def source_version(source=ROOT):
 
 def _zip_date(epoch):
     import time
-    t = time.gmtime(max(epoch, 315532800))  # 1980-01-01 is ZIP's floor
+    t = time.gmtime(max(epoch, 315532800))  # 1980-01-01 是 ZIP 时间戳下限
     return (t.tm_year, t.tm_mon, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec)
 
 
 def is_dot_path(name):
-    """True when any path component starts with a dot.
+    """任一路径组成部分以点开头时为 True。
 
-    The release ZIP carries product files only; tool config (``.github``,
-    ``.gitignore`` and the like) must never leak in, whether it comes from the
-    manifest or from the runtime tree.
+    发布 ZIP 只装产品文件，.github、.gitignore 这类工具配置无论来自清单还是
+    运行时树都不能混进来。
     """
     return any(part.startswith(".") for part in
                str(name or "").replace("\\", "/").split("/") if part)
@@ -92,11 +86,10 @@ def is_dot_path(name):
 
 def build_portable(version, tag, out_path, source=ROOT, runtime_dir=None,
                    root=PACKAGE_ROOT, epoch=DEFAULT_EPOCH):
-    """Write the portable ZIP and return (path, [managed files]).
+    """写出便携 ZIP，返回 (path, [受管文件])。
 
-    `runtime_dir` is the trimmed CPython the launchers look for under
-    `python/`. It is required: the asset this replaces is the green package,
-    and a ZIP without the runtime is a different, much less useful thing.
+    runtime_dir 是启动脚本在 python/ 下找的那份裁剪 CPython，必填：便携 ZIP
+    代替的是绿色包，没有运行时的 ZIP 是另一种、用处小得多的资产。
     """
     got = source_version(source)
     if got != version:
@@ -122,7 +115,8 @@ def build_portable(version, tag, out_path, source=ROOT, runtime_dir=None,
             data = fh.read()
         lower = name.lower()
         if lower.endswith((".sh", ".command")):
-            # Issue #329: 强制 LF 换行并赋予执行位，防止 Windows 检出的 CRLF 导致 macOS / Linux 启动报 bad interpreter
+            # 强制 LF 并赋执行位：Windows 检出的 CRLF 会让 macOS / Linux 启动
+            # 报 bad interpreter
             data = data.replace(crlf_bytes, lf_bytes)
             mode = 0o755
         elif lower.endswith(".bat"):
@@ -151,11 +145,10 @@ def build_portable(version, tag, out_path, source=ROOT, runtime_dir=None,
         "name": "workbuddy2api-hub",
         "version": version,
         "tag": tag,
-        # Everything below `files` lives under this folder, so an updater can
-        # strip the prefix without guessing the archive's shape.
+        # files 之下的一切都在这个目录里，自更新剥前缀即可，无需猜压缩包形状。
         "root": root,
         "files": files,
-        # The runtime is one managed subtree rather than 500 manifest lines.
+        # 运行时整体算一个受管子树，不占几百行清单。
         "runtime": {
             "prefix": "python/",
             "python": portable_runtime.RUNTIME_VERSION,
@@ -169,12 +162,12 @@ def build_portable(version, tag, out_path, source=ROOT, runtime_dir=None,
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     when = _zip_date(epoch)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-        # Sorted so the same inputs give a byte-identical archive.
+        # 排序后相同的输入产出逐字节一致的压缩包。
         for name, data, mode in sorted(entries, key=lambda e: e[0]):
             info = zipfile.ZipInfo(name, date_time=when)
             info.external_attr = mode << 16
             info.compress_type = zipfile.ZIP_DEFLATED
-            info.create_system = 3  # Unix, so the mode above survives
+            info.create_system = 3  # Unix，上面的 mode 才能保留
             zf.writestr(info, data)
         info = zipfile.ZipInfo(MANIFEST_NAME, date_time=when)
         info.external_attr = 0o644 << 16
@@ -193,7 +186,7 @@ def sha256(path):
 
 
 def write_checksums(assets, out_path):
-    """`sha256sum` format over the final uploaded assets, sorted by name."""
+    """对最终上传的资产按文件名排序，写 sha256sum 格式的校验值。"""
     lines = []
     for path in sorted(assets, key=lambda p: os.path.basename(p)):
         lines.append("%s  %s\n" % (sha256(path), os.path.basename(path)))
@@ -203,7 +196,7 @@ def write_checksums(assets, out_path):
 
 
 def download_block(zip_name):
-    """The stable help section the issue pins. Keep it short and unchanged."""
+    """issue #28 固定的下载说明区块，保持简短与稳定。"""
     return "\n".join([
         "## 下载说明",
         "",
@@ -219,11 +212,10 @@ def download_block(zip_name):
 
 
 def compose_body(existing, block):
-    """Everything the maintainer wrote above the marker, then the fresh block.
+    """marker 之上保留维护者写的全部内容，其后接新下载区块。
 
-    Re-running is idempotent: the second pass finds the same text above the
-    marker, so an updated asset list never duplicates the section or eats the
-    maintainer's notes.
+    重复执行是幂等的：第二遍在 marker 上方取到同样的文本，资产列表更新既不会
+    重复出块，也不会吃掉维护者的笔记。
     """
     above = ""
     if existing:
@@ -234,16 +226,15 @@ def compose_body(existing, block):
 
 
 def asset_names(version):
-    """The one asset the portable builder produces for a release."""
+    """便携构建为一个发布产出的唯一资产名。"""
     return "wb-proxy-center-v%s.zip" % version
 
 
 def _utf8_stdio():
-    """Let the progress lines survive a non-UTF-8 console.
+    """把标准输出与标准错误固定为 UTF-8，让进度行在非 UTF-8 控制台下也能打印。
 
-    Windows runners hand Python a cp1252 stdout, and the first Chinese summary
-    line then dies with UnicodeEncodeError. The repository already paid for this
-    once in tests/run_all.py; the same two lines fix it here.
+    Windows runner 给 Python 的 stdout 是 cp1252，第一条中文摘要就会抛
+    UnicodeEncodeError。
     """
     for stream in (sys.stdout, sys.stderr):
         try:

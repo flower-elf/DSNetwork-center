@@ -1,8 +1,9 @@
 // 设置 → 运维：日志保留、用量保留、上游超时、定价刷新、提示词与更新检查。
 import { html, live, nothing } from '../../core/dom.js';
-import { icon } from '../../core/icons.js';
 import { toast, toastError } from '../../ui/toast.js';
 import { parseNonNegativeInteger, parseNonNegativeNumber } from './logic.js';
+import { envHint, numberRow, settingCard, switchRow, textRow } from './rows.js';
+import { createUpdateBlock } from './update.js';
 
 const PROMPT_MODES = [
   { value: 'passthrough', label: '原样透传' },
@@ -43,6 +44,7 @@ export function createMaintenanceTab(page) {
   let saving = false;
   let dirtyShown = false;
   let envOverrides = {};
+  const update = createUpdateBlock(page);
 
   function envFor(field) {
     if (field === 'usageHourKeep') return (envOverrides.usage || {}).hour_keep_hours || null;
@@ -209,6 +211,10 @@ export function createMaintenanceTab(page) {
       baseline = stateOf(view);
       applyState(baseline);
       toast.success('运维设置已保存');
+      // 开关或间隔变了，状态行要跟着刷新（是否启用、下次检查时间）。
+      if ('update_check_enabled' in payload || 'update_check_interval_hours' in payload) {
+        update.load();
+      }
       return true;
     } catch (err) {
       toastError('保存运维设置失败', err);
@@ -219,35 +225,29 @@ export function createMaintenanceTab(page) {
     }
   }
 
-  function switchRow({ name, desc, field }) {
-    const env = envFor(field);
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">${name}</div>
-          <div class="setting-desc">${desc}</div>
-          ${env ? html`<div class="field-hint tone-warning">环境变量 ${env.name} = ${env.value}，优先于面板设置</div>` : nothing}
-        </div>
-        <div class="setting-control">
-          <label class="switch">
-            <input type="checkbox" .checked=${form[field]} ?disabled=${saving} aria-label=${name}
-                   @change=${(e) => { form[field] = e.target.checked; markDirty(); }}>
-            <span></span>
-          </label>
-        </div>
-      </div>`;
-  }
+  // 字段行共用的表单状态：改动先写进草稿并清掉这一项的错误，再按翻转情况重绘。
+  const ctl = {
+    form,
+    get saving() { return saving; },
+    errors,
+    env: envFor,
+    change: (field, value) => {
+      form[field] = value;
+      if (field in errors) errors[field] = '';
+      markDirty();
+    },
+  };
 
+  /** 自动检查间隔：每天、每周或每隔若干小时，三种取值共用一个下拉加一个输入框。 */
   function intervalRow() {
     const hours = Number(form.updateCheckInterval);
     const preset = hours === 24 ? 'daily' : hours === 168 ? 'weekly' : 'custom';
-    const env = envFor('updateCheckInterval');
     return html`
       <div class="setting">
         <div class="setting-main">
           <div class="setting-name">自动检查间隔</div>
           <div class="setting-desc">每天、每周，或每隔若干小时。打开自动检查后生效。</div>
-          ${env ? html`<div class="field-hint tone-warning">环境变量 ${env.name} = ${env.value}，优先于面板设置</div>` : nothing}
+          ${envHint(envFor('updateCheckInterval'))}
           ${errors.updateCheckInterval ? html`<div class="field-error">${errors.updateCheckInterval}</div>` : nothing}
         </div>
         <div class="setting-control">
@@ -275,136 +275,89 @@ export function createMaintenanceTab(page) {
       </div>`;
   }
 
-  function numberRow({ name, desc, field, suffix, min = '0', step = '1' }) {
-    const env = envFor(field);
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">${name}</div>
-          <div class="setting-desc">${desc}</div>
-          ${env ? html`<div class="field-hint tone-warning">环境变量 ${env.name} = ${env.value}，优先于面板设置</div>` : nothing}
-          ${errors[field] ? html`<div class="field-error">${errors[field]}</div>` : nothing}
-        </div>
-        <div class="setting-control">
-          <input class="input input-num" type="number" min=${min} step=${step}
-                 aria-label=${name}
-                 .value=${live(form[field])} ?disabled=${saving}
-                 @input=${(e) => { form[field] = e.target.value; errors[field] = ''; markDirty(); }}>
-          <span class="setting-unit">${suffix}</span>
-        </div>
-      </div>`;
-  }
-
-  function textRow({ name, desc, field, placeholder = '' }) {
-    const env = envFor(field);
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">${name}</div>
-          <div class="setting-desc">${desc}</div>
-          ${env ? html`<div class="field-hint tone-warning">环境变量 ${env.name} = ${env.value}，优先于面板设置</div>` : nothing}
-          ${errors[field] ? html`<div class="field-error">${errors[field]}</div>` : nothing}
-        </div>
-        <div class="setting-control">
-          <input class="input input-sm select-wide" type="text" placeholder=${placeholder}
-                 aria-label=${name}
-                 .value=${live(form[field])} ?disabled=${saving}
-                 @input=${(e) => { form[field] = e.target.value; errors[field] = ''; markDirty(); }}>
-        </div>
-      </div>`;
-  }
-
   return {
     seed,
+    onMount() {
+      update.load();
+    },
     render() {
-      const dirty = isDirty();
-      return html`
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <h2 class="card-title">${icon('Gauge')}运维</h2>
-              <div class="card-sub">
-                日志、用量聚合、上游超时、定价刷新与提示词。保存后立即生效。
-                <span class="text-2xs ${dirty ? 'tone-warning' : 'muted'}">${dirty ? '(有未保存的改动)' : ''}</span>
-              </div>
-            </div>
-            <div class="row-wrap">
-              <button class="btn btn-outline btn-sm" ?disabled=${saving || !dirty} @click=${revert}>
-                ${icon('Undo2')}撤销
-              </button>
-              <button class="btn btn-primary btn-sm" ?disabled=${saving || !dirty} @click=${saveAll}>
-                ${saving ? icon('LoaderCircle', 'spin') : icon('Save')}保存
-              </button>
-            </div>
-          </div>
+      return settingCard({
+        iconName: 'Gauge',
+        title: '运维',
+        desc: '日志、用量聚合、上游超时、定价刷新与提示词。保存后立即生效。',
+        dirty: isDirty(),
+        saving,
+        onRevert: revert,
+        onSave: saveAll,
+        body: html`
           <div class="setting-list">
             <div class="section-label">定价与刷新</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: 'OpenRouter 价格估算',
               field: 'pricingEnabled',
               desc: '按 OpenRouter 价格估算每条请求的等价花费。关闭后停止拉取价格并按 0 计。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '价格变体后缀继承',
               field: 'pricingVariant',
               desc: '模型名带渠道或发行后缀时，允许从去掉后缀的基名继承价格。关闭后只按精确名称匹配。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '定价刷新间隔', field: 'pricingRefresh', suffix: '分钟',
               desc: '多久从 OpenRouter 拉取一次价格，0 表示关闭自动刷新。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '积分后台刷新间隔', field: 'creditsRefresh', suffix: '小时',
               desc: '余额快照超过这个时长后由后台刷新，0 表示关闭后台刷新。',
             })}
 
             <div class="section-label">运行日志</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '运行日志写入数据库',
               field: 'logDb',
               desc: '把运行日志追加写入 usage/logs.sqlite3，重启后仍能回看。默认关闭。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '日志行数上限', field: 'logMaxRows', suffix: '条',
               desc: '只保留最新 N 条日志，留空表示不按条数限制。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '日志天数上限', field: 'logMaxDays', suffix: '天',
               desc: '只保留最近 N 天日志，留空表示不按天数限制。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '日志大小上限', field: 'logMaxBytes', suffix: '字节',
               desc: '数据库超过这个字节数时从最旧的日志删起，留空表示不按大小限制。',
             })}
 
             <div class="section-label">用量聚合</div>
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '小时层保留', field: 'usageHourKeep', suffix: '小时',
               desc: '小时分桶保留多久，默认 48 小时。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '日桶保留', field: 'usageDayKeep', suffix: '天',
               desc: '日分桶保留多少天，默认 32 天。',
             })}
 
             <div class="section-label">上游请求</div>
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '上游头部超时', field: 'upstreamHeader', suffix: '秒',
               desc: '等待上游响应头的最长秒数。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '上游空闲超时', field: 'upstreamIdle', suffix: '秒',
               desc: '流式响应两次数据之间的最长空闲秒数。',
             })}
-            ${textRow({
+            ${textRow(ctl, {
               name: '设备令牌', field: 'deviceToken', placeholder: '可留空',
               desc: '出站请求使用的设备令牌；留空表示不附带。',
             })}
-            ${textRow({
+            ${textRow(ctl, {
               name: '设备令牌文件', field: 'deviceTokenFile', placeholder: '可留空',
               desc: '从文件读取设备令牌；配置后优先于上面的值。',
             })}
-            ${textRow({
+            ${textRow(ctl, {
               name: '可信反向代理', field: 'trustedProxies',
               placeholder: '例如 127.0.0.1,10.0.0.0/8',
               desc: '只有来自这些 IP 或 CIDR 的请求才读取 X-Real-IP 与 X-Forwarded-For。Docker 或 Nginx 反向代理时填写代理地址。',
@@ -425,20 +378,21 @@ export function createMaintenanceTab(page) {
                 </select>
               </div>
             </div>
-            ${textRow({
+            ${textRow(ctl, {
               name: '提示词文件', field: 'promptFile', placeholder: '可留空',
               desc: '自定义或追加模式使用的提示词文件路径。',
             })}
 
             <div class="section-label">更新</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '自动检查更新',
               field: 'updateCheck',
               desc: '按下面的间隔检查 GitHub 上的新版本。默认关闭。',
             })}
             ${intervalRow()}
-          </div>
-        </div>`;
+            ${update.render()}
+          </div>`,
+      });
     },
     async canLeave() {
       if (!isDirty()) return true;

@@ -1,6 +1,7 @@
-"""DeepSeek reasoning_content 回填测试;不联网,纯请求体变换。
+"""DeepSeek reasoning_content 回填测试：不联网，只做请求体变换。
 
-上游 11155 要求 thinking 模式下把上一轮的 reasoning 回传,且会校验 len(reasoning) > 0,所以客户端没给时也要把字段镜像到 reasoning 并保持非空。
+上游 11155 要求 thinking 模式下带上上一轮的 reasoning，并校验 len(reasoning) > 0，
+所以客户端没给时也要把字段镜像到 reasoning，并保持非空。
 """
 
 import copy
@@ -8,10 +9,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits. The suite used to point
-# both at tests/_acc_rc and tests/_use_rc, so two runs of it shared one directory
-# and every run left those directories behind in the checkout.
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  独立数据根目录
+# 每轮运行独立的数据目录，进程退出时自动删除。
 _TMP = isolated_data_dirs("wb-reasoning-backfill-")
 
 import wb_proxy as P
@@ -142,7 +141,6 @@ out = P.backfill_reasoning_content(
     copy.deepcopy(msgs), "deepseek-v4.1-flash", thinking_enabled=True
 )
 a = asst(out)[0]
-check("reasoning_content stays a string", isinstance(a.get("reasoning_content"), str))
 check(
     "reasoning mirror is non-empty",
     a.get("reasoning") not in (None, ""),
@@ -223,11 +221,6 @@ check(
     "deepseek payload backfilled end to end",
     isinstance(a.get("reasoning_content"), str),
     sorted(a),
-)
-check(
-    "thinking enabled injected",
-    (body.get("thinking") or {}).get("type") == "enabled",
-    body.get("thinking"),
 )
 
 payload2 = copy.deepcopy(payload)

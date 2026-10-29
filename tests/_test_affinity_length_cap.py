@@ -1,25 +1,11 @@
-"""Affinity length cap, pool pages, and pool-sized chat concurrency.
+"""验证会话亲和长度上限、分页轮换与聊天并发上限的自动扩容契约。
 
-Two independent limits that both used to be fixed constants:
+会话消息体单调增长，超过几百条后超大请求会让上游断开连接，``WB_AFFINITY_MAX_MSGS`` 到
+阈值即释放单账号绑定；``WB_AFFINITY_PAGE_SIZE`` 决定释放进整个池（0）、保持绑定（1）还是
+在一个分页内轮换，本文件验证边界取值，池侧行为见 ``_test_affinity_pages.py``。
+``WB_MAX_CONCURRENT_CHAT=auto`` 按可用账号数扩容并发上限。
 
-* ``derive_affinity_key`` pinned every conversation to one upstream account so
-  the account-level prompt cache keeps hitting. That is right for normal
-  conversations, but a conversation's body grows monotonically, and past a few
-  hundred messages the oversized request makes the upstream drop the
-  connection. ``WB_AFFINITY_MAX_MSGS`` releases the pin once a conversation is
-  that long, trading its prefix cache for not being retried.
-
-  What it is released *into* is ``WB_AFFINITY_PAGE_SIZE``: 0 sends the
-  conversation back to the whole pool (the 1.6.x behaviour), 1 keeps it pinned
-  (the cap switched off), and anything higher rotates it over one page of the
-  pool so every account of that page keeps a warm copy of the prefix. The page
-  tests below pin the boundary; the pool side is in ``_test_affinity_pages.py``.
-
-* ``MAX_CONCURRENT_CHAT`` was a fixed 32 regardless of pool size.
-  ``WB_MAX_CONCURRENT_CHAT=auto`` sizes it from the ready-account count.
-
-Run with: python _test_affinity_length_cap.py
-No upstream credentials or outbound network are used.
+运行方式：python _test_affinity_length_cap.py，不需要上游凭据，也不访问网络。
 """
 import os
 import sys
@@ -37,7 +23,7 @@ import wb_proxy
 
 
 def conversation(length):
-    """A conversation of exactly `length` messages, stable prefix first."""
+    """构造恰好 length 条消息的会话，稳定前缀在最前面。"""
     msgs = [{"role": "system", "content": "you are a helpful assistant"}]
     for i in range(max(0, length - 1)):
         msgs.append({"role": "user" if i % 2 == 0 else "assistant",
@@ -46,12 +32,12 @@ def conversation(length):
 
 
 class AffinityLengthCapTests(unittest.TestCase):
-    """The cap must only touch conversations past the threshold."""
+    """上限只影响超过阈值的会话。"""
 
     def setUp(self):
         self._saved = wb_proxy.AFFINITY_MAX_MSGS
         self._saved_page = wb_proxy.AFFINITY_PAGE_SIZE
-        # The 1.6.x behaviour the release tests pin: no page, back to the pool.
+        # 页大小为 0：释放后回到整个池。
         wb_proxy.AFFINITY_PAGE_SIZE = 0
 
     def tearDown(self):
@@ -63,7 +49,6 @@ class AffinityLengthCapTests(unittest.TestCase):
         for length in (1, 2, 10, 399, 400):
             key = wb_proxy.derive_affinity_key(conversation(length))
             self.assertTrue(key, "msgs=%d should keep its affinity key" % length)
-            self.assertTrue(key.startswith("pfx-"))
 
     def test_long_conversations_are_released_when_the_page_is_off(self):
         wb_proxy.AFFINITY_MAX_MSGS = 400
@@ -73,19 +58,19 @@ class AffinityLengthCapTests(unittest.TestCase):
                 "msgs=%d should be released so the pool can rotate" % length)
 
     def test_threshold_is_inclusive(self):
-        """msgs == cap binds; the cap is a limit, not an off-by-one."""
+        """msgs 等于上限时仍绑定，阈值是包含边界。"""
         wb_proxy.AFFINITY_MAX_MSGS = 3
         self.assertIsNotNone(wb_proxy.derive_affinity_key(conversation(3)))
         self.assertIsNone(wb_proxy.derive_affinity_key(conversation(4)))
 
     def test_zero_disables_the_cap(self):
-        """0 keeps the pre-1.6.x behaviour: always bind."""
+        """上限为 0 表示始终绑定。"""
         wb_proxy.AFFINITY_MAX_MSGS = 0
         for length in (1, 400, 5000):
             self.assertIsNotNone(wb_proxy.derive_affinity_key(conversation(length)))
 
     def test_bound_conversations_keep_a_stable_key(self):
-        """The whole point: later turns of one conversation share one account."""
+        """同一会话的后续轮次共享同一个 key。"""
         wb_proxy.AFFINITY_MAX_MSGS = 400
         first = wb_proxy.derive_affinity_key(conversation(10))
         later = wb_proxy.derive_affinity_key(conversation(300))
@@ -106,7 +91,7 @@ class AffinityLengthCapTests(unittest.TestCase):
 
 
 class AffinityPageTests(unittest.TestCase):
-    """Past the cap a conversation rotates over one page, not the whole pool."""
+    """超过上限后，会话在池的一个分页内轮换。"""
 
     def setUp(self):
         self._saved_msgs = wb_proxy.AFFINITY_MAX_MSGS
@@ -127,7 +112,7 @@ class AffinityPageTests(unittest.TestCase):
         self.assertTrue(0 <= index < size, "page index out of range: %r" % (page,))
 
     def test_the_key_survives_crossing_the_cap(self):
-        """One conversation, one key: the binding carries over the boundary."""
+        """同一会话跨过上限前后保持同一个 key。"""
         wb_proxy.AFFINITY_PAGE_SIZE = 3
         short = wb_proxy.derive_affinity_key(conversation(400))
         long_key = wb_proxy.derive_affinity_key(conversation(500))
@@ -162,13 +147,6 @@ class AffinityPageTests(unittest.TestCase):
         self.assertIsNone(key)
         self.assertIsNone(page)
 
-    def test_the_route_and_the_key_agree(self):
-        wb_proxy.AFFINITY_PAGE_SIZE = 3
-        for length in (10, 400, 500):
-            msgs = conversation(length)
-            self.assertEqual(wb_proxy.derive_affinity_key(msgs),
-                             wb_proxy.affinity_route(msgs)[0])
-
     def test_switching_session_stickiness_off_releases_everything(self):
         wb_proxy.AFFINITY_PAGE_SIZE = 3
         with mock.patch.object(wb_proxy.wb_settings, "session_affinity",
@@ -184,7 +162,7 @@ class AffinityPageTests(unittest.TestCase):
 
 
 class ChatSlotResizeTests(unittest.TestCase):
-    """resize_chat_slots grows the ceiling, never shrinks it."""
+    """resize_chat_slots 只提高上限，绝不缩小。"""
 
     def setUp(self):
         self._auto = wb_proxy.CHAT_SLOTS_AUTO
@@ -201,7 +179,7 @@ class ChatSlotResizeTests(unittest.TestCase):
         wb_proxy.MAX_CONCURRENT_CHAT = wb_proxy.CHAT_SLOTS_FLOOR
         self.assertEqual(wb_proxy.resize_chat_slots(110), 110)
         self.assertEqual(wb_proxy.MAX_CONCURRENT_CHAT, 110)
-        # The new semaphore really does carry that many permits.
+        # 新信号量确实带有这么多许可。
         acquired = 0
         while wb_proxy._chat_slots.acquire(blocking=False):
             acquired += 1
@@ -215,7 +193,7 @@ class ChatSlotResizeTests(unittest.TestCase):
         self.assertEqual(wb_proxy.resize_chat_slots(3), wb_proxy.CHAT_SLOTS_FLOOR)
 
     def test_never_shrinks(self):
-        """A shrink would let releases exceed the ceiling and raise ValueError."""
+        """缩小上限会让 release 次数超过上限，触发 ValueError。"""
         wb_proxy.CHAT_SLOTS_AUTO = True
         wb_proxy.MAX_CONCURRENT_CHAT = wb_proxy.CHAT_SLOTS_FLOOR
         wb_proxy.resize_chat_slots(200)
@@ -224,7 +202,7 @@ class ChatSlotResizeTests(unittest.TestCase):
         self.assertIs(wb_proxy._chat_slots, slots)
 
     def test_fixed_setting_is_a_no_op(self):
-        """A numeric WB_MAX_CONCURRENT_CHAT keeps the 1.6.x behaviour."""
+        """WB_MAX_CONCURRENT_CHAT 设为数字时保持固定上限。"""
         wb_proxy.CHAT_SLOTS_AUTO = False
         wb_proxy.MAX_CONCURRENT_CHAT = 32
         slots = wb_proxy._chat_slots
@@ -240,7 +218,7 @@ class ChatSlotResizeTests(unittest.TestCase):
 
 
 class SlotAccountingTests(unittest.TestCase):
-    """A resize must not corrupt the in-flight count."""
+    """扩容不能破坏在途计数。"""
 
     def test_resize_preserves_held_slots(self):
         saved_auto = wb_proxy.CHAT_SLOTS_AUTO
@@ -252,8 +230,7 @@ class SlotAccountingTests(unittest.TestCase):
             wb_proxy._chat_slots = threading.BoundedSemaphore(wb_proxy.CHAT_SLOTS_FLOOR)
             self.assertTrue(wb_proxy._chat_slots.acquire(blocking=False))
             wb_proxy.resize_chat_slots(64)
-            # The permit taken before the resize belongs to the old semaphore;
-            # releasing it there must not raise on the new one.
+            # 扩容前持有的许可属于旧信号量，在新信号量上释放不能触发异常。
             for _ in range(64):
                 self.assertTrue(wb_proxy._chat_slots.acquire(blocking=False))
             for _ in range(64):

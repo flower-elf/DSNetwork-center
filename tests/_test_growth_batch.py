@@ -267,11 +267,13 @@ class TasksRunRouteTests(unittest.TestCase):
         self.pool = _RoutePool(self.accounts)
         for target, value in (("POOL", self.pool),
                               ("log", lambda *a, **k: None),
-                              ("add_log_entry", lambda *a, **k: None),
-                              ("invalidate_tasks_cache", lambda: None)):
+                              ("add_log_entry", lambda *a, **k: None)):
             patcher = mock.patch.object(wb_proxy, target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        tasks_patcher = mock.patch.object(T, "invalidate_tasks_cache", lambda: None)
+        tasks_patcher.start()
+        self.addCleanup(tasks_patcher.stop)
 
     def call(self, payload):
         handler = self.Handler()
@@ -280,16 +282,38 @@ class TasksRunRouteTests(unittest.TestCase):
         self.assertEqual(code, 200)
         return body
 
-    def test_busy_account_is_reported_as_failure(self):
-        # 拦截层返回忙碌时，聚合响应不能谎报成功。
-        def busy(account, gap=1.0):
-            return {"ok": False, "busy": True, "msg": "该账号的成长任务正在执行，请稍后再试",
-                    "logs": ["⏭ 该账号的成长任务正在执行，跳过本次"], "earned_credit": 0}
-        with mock.patch.object(wb_tasks, "run_growth_tasks", busy):
-            body = self.call({"uid": "c1"})
-        self.assertFalse(body["ok"])
-        self.assertEqual(body["busy_accounts"], ["c1"])
-        self.assertIn("成长任务", body["msg"])
+    def test_busy_is_reported_as_failure_at_every_entry(self):
+        """三个入口的忙碌结果都不谎报 ok=True，且点名忙碌账号。"""
+        with self.subTest(entry="成长任务"):
+            # 拦截层返回忙碌时，聚合响应不能谎报成功。
+            def busy(account, gap=1.0):
+                return {"ok": False, "busy": True, "msg": "该账号的成长任务正在执行，请稍后再试",
+                        "logs": ["⏭ 该账号的成长任务正在执行，跳过本次"], "earned_credit": 0}
+            with mock.patch.object(wb_tasks, "run_growth_tasks", busy):
+                body = self.call({"uid": "c1"})
+            self.assertFalse(body["ok"])
+            self.assertEqual(body["busy_accounts"], ["c1"])
+            self.assertIn("成长任务", body["msg"])
+        with self.subTest(entry="猫猫旅行"):
+            def busy(account):
+                return {"ok": False, "busy": True, "msg": "该账号的猫猫旅行正在执行，请稍后再试"}
+            with mock.patch.object(wb_tasks, "do_cat_travel", busy):
+                handler = self.Handler()
+                handler._route_tasks_travel({"uid": "c1"})
+            body = handler.captured[1]
+            self.assertFalse(body["ok"])
+            self.assertEqual(body["busy_accounts"], ["c1"])
+            self.assertTrue(body["results"][0]["busy"])
+        with self.subTest(entry="连登管家"):
+            def busy(account):
+                return {"ok": False, "busy": True, "msg": "该账号的连登管家正在执行，请稍后再试"}
+            with mock.patch.object(wb_tasks, "run_streak_bonus", busy):
+                handler = self.Handler()
+                handler._route_tasks_streak_bonus({"uid": "c1"})
+            body = handler.captured[1]
+            self.assertFalse(body["ok"])
+            self.assertEqual(body["busy_accounts"], ["c1"])
+            self.assertIn("成长任务", body["msg"])
 
     def test_partial_busy_keeps_ok_and_lists_busy(self):
         def mixed(account, gap=1.0):
@@ -301,28 +325,6 @@ class TasksRunRouteTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(body["busy_accounts"], ["c1"])
         self.assertEqual(body["credit_added"], 50)
-
-    def test_travel_reports_busy_as_failure(self):
-        def busy(account):
-            return {"ok": False, "busy": True, "msg": "该账号的猫猫旅行正在执行，请稍后再试"}
-        with mock.patch.object(wb_tasks, "do_cat_travel", busy):
-            handler = self.Handler()
-            handler._route_tasks_travel({"uid": "c1"})
-        body = handler.captured[1]
-        self.assertFalse(body["ok"])
-        self.assertEqual(body["busy_accounts"], ["c1"])
-        self.assertTrue(body["results"][0]["busy"])
-
-    def test_streak_reports_busy_as_failure(self):
-        def busy(account):
-            return {"ok": False, "busy": True, "msg": "该账号的连登管家正在执行，请稍后再试"}
-        with mock.patch.object(wb_tasks, "run_streak_bonus", busy):
-            handler = self.Handler()
-            handler._route_tasks_streak_bonus({"uid": "c1"})
-        body = handler.captured[1]
-        self.assertFalse(body["ok"])
-        self.assertEqual(body["busy_accounts"], ["c1"])
-        self.assertIn("成长任务", body["msg"])
 
 
 class ActivityReportGateTests(unittest.TestCase):
@@ -373,7 +375,7 @@ class ActivityReportGateTests(unittest.TestCase):
         runner.start()
         try:
             self.assertTrue(started.wait(5), "任务执行应该已经持锁进入查询")
-            res = self._account().report_activity()
+            res = wb_tasks.report_activity(self._account())
             self.assertTrue(res.get("busy"))
             self.assertFalse(res.get("ok"))
             self.assertEqual(self.calls, [], "被拒绝的上报不得发出任何请求")
@@ -385,7 +387,7 @@ class ActivityReportGateTests(unittest.TestCase):
 
     def test_activity_report_runs_after_release(self):
         self._stub_upstream()
-        res = self._account().report_activity()
+        res = wb_tasks.report_activity(self._account())
         self.assertTrue(res.get("ok"))
         self.assertEqual(res.get("streak_days"), 5)
         self.assertEqual(self.calls, ["report"])

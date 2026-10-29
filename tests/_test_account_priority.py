@@ -21,14 +21,14 @@ PRIORITY_ERROR = "priority must be a whole number between 0 and 9999"
 
 
 def account(uid, realm="intl", **fields):
-    """The plain token keeps jwt_exp() at 0."""
+    """纯文本令牌让 jwt_exp() 保持 0。"""
     data = {"uid": uid, "accessToken": "t", "realm": realm}
     data.update(fields)
     return wb_accounts.Account(data)
 
 
 def pool_with(*accounts):
-    """A pool over these accounts, detached from any accounts directory."""
+    """由这些账号组成的池子，不依附任何账号目录。"""
     pool = wb_accounts.AccountPool(os.path.join(_TMP, "pools"))
     pool.accounts = list(accounts)
     return pool
@@ -75,7 +75,7 @@ class PriorityStorageTests(unittest.TestCase):
 
 
 class PickOrderTests(unittest.TestCase):
-    """Lower numbers are preferred; equal numbers keep the rotation order."""
+    """数字小的优先；数字相同时保持轮询顺序。"""
 
     def test_the_lowest_number_takes_every_pick_while_it_can_serve(self):
         pool = pool_with(account("uid-200", priority=200),
@@ -164,7 +164,7 @@ class PersistenceTests(unittest.TestCase):
 
 
 class SessionAffinityTests(unittest.TestCase):
-    """A bound session outranks a better priority number while it can serve."""
+    """会话绑定的账号只要还能服务，就优先于优先级数字更好的账号。"""
 
     def setUp(self):
         self.small = account("uid-small", priority=50)
@@ -326,12 +326,12 @@ class ParsePriorityTests(unittest.TestCase):
     def test_whole_numbers_in_range_pass(self):
         for value in (0, 100, 9999):
             with self.subTest(value=value):
-                self.assertEqual(P.parse_account_priority(value), (value, ""))
+                self.assertEqual(wb_accounts.parse_account_priority(value), (value, ""))
 
     def test_everything_else_is_rejected_with_the_same_message(self):
         for value in (True, False, "50", 1.5, -1, 10000, None):
             with self.subTest(value=value):
-                got, problem = P.parse_account_priority(value)
+                got, problem = wb_accounts.parse_account_priority(value)
                 self.assertIsNone(got)
                 self.assertEqual(problem, PRIORITY_ERROR,
                                  "value %r reported %r" % (value, problem))
@@ -377,12 +377,12 @@ class ParseAccountSetTests(unittest.TestCase):
     """/accounts/set 先校验全部字段，再写入任何一项。"""
 
     def test_invalid_later_field_rejects_the_whole_payload(self):
-        changes, problem = P.parse_account_set({"priority": 5, "weight": 999})
+        changes, problem = wb_accounts.parse_account_set({"priority": 5, "weight": 999})
         self.assertIsNone(changes)
         self.assertEqual(problem, "weight out of range (1-100)")
 
     def test_valid_fields_are_normalised(self):
-        changes, problem = P.parse_account_set({
+        changes, problem = wb_accounts.parse_account_set({
             "weight": "5", "priority": 7, "concurrencyLimit": "12",
             "enabled": 1,
         })
@@ -391,12 +391,12 @@ class ParseAccountSetTests(unittest.TestCase):
                                    "concurrencyLimit": 12, "enabled": True})
 
     def test_empty_payload_names_the_fields(self):
-        changes, problem = P.parse_account_set({})
+        changes, problem = wb_accounts.parse_account_set({})
         self.assertIsNone(changes)
         self.assertIn("nothing to update", problem)
 
     def test_published_limits_match_server_constants(self):
-        limits = P.account_limits()
+        limits = wb_accounts.account_limits()
         self.assertEqual(limits["priorityMax"], wb_accounts.MAX_ACCOUNT_PRIORITY)
         self.assertEqual(limits["concurrencyMax"],
                          wb_accounts.MAX_ACCOUNT_CONCURRENCY)
@@ -451,6 +451,50 @@ class SetRouteAtomicTests(unittest.TestCase):
         self.assertEqual(handler.code, 200)
         self.assertEqual(P.POOL.get("uid-set").priority, 5)
         self.assertEqual(P.POOL.get("uid-set").weight, 2)
+
+
+class PoolUpsertTests(unittest.TestCase):
+    def test_same_uid_updates_credentials_without_duplicating(self):
+        with tempfile.TemporaryDirectory(prefix="wb-upsert-") as directory:
+            pool = wb_accounts.AccountPool(directory)
+            original = account(
+                "uid-upsert", note="保留", priority=7, concurrencyLimit=3,
+                weight=4, disabledModels=["glm-5.3"])
+            pool.add(original)
+            added_at = pool.get("uid-upsert").added_at
+
+            replacement = account(
+                "uid-upsert", realm="cn", nickname="新昵称",
+                accessToken="new-token")
+            pool.add(replacement)
+
+            self.assertEqual(len(pool.accounts), 1)
+            stored = pool.get("uid-upsert")
+            self.assertIsNot(stored, original)
+            self.assertEqual(stored.access_token, "new-token")
+            self.assertEqual(stored.nickname, "新昵称")
+            self.assertEqual(stored.realm, "cn")
+            self.assertEqual(stored.added_at, added_at)
+            self.assertEqual(stored.note, "保留")
+            self.assertEqual(stored.priority, 7)
+            self.assertEqual(stored.concurrency_limit, 3)
+            self.assertEqual(stored.weight, 4)
+            self.assertEqual(stored.disabled_models, ["glm-5.3"])
+
+            reloaded = wb_accounts.AccountPool(directory)
+            reloaded.load()
+            self.assertEqual(len(reloaded.accounts), 1)
+            self.assertEqual(reloaded.get("uid-upsert").access_token, "new-token")
+
+    def test_new_panel_fields_still_override_old_values(self):
+        with tempfile.TemporaryDirectory(prefix="wb-upsert-") as directory:
+            pool = wb_accounts.AccountPool(directory)
+            pool.add(account("uid-upsert", priority=7, note="旧备注"))
+            pool.add(account("uid-upsert", priority=2, note="新备注"))
+
+            stored = pool.get("uid-upsert")
+            self.assertEqual(stored.priority, 2)
+            self.assertEqual(stored.note, "新备注")
 
 
 if __name__ == "__main__":

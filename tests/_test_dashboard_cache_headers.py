@@ -1,15 +1,14 @@
-"""面板首页的条件请求：缓存 + 每次回源校验，而不是每次重下整页。
+"""面板首页的条件请求：缓存 + 每次回源校验，不重下整页。
 
-注册背景：GET / 过去答的是 `Cache-Control: no-store` 且没有任何校验符，于是
-每次打开面板都要把整个静态页面重下一遍。这个页面是服务端逐字节原样发出的
-纯静态资源、不含任何机密，所以可以放心让浏览器存一份、每次使用前回源校验：
-ETag + `no-cache`，客户端手里的副本是最新的就回 304（无 body）。
+GET / 是服务端逐字节原样发出的纯静态资源、不含机密，可以让浏览器存一份、每次使用前
+回源校验：ETag + `no-cache`，客户端副本最新就回 304（无 body）。无校验符的
+`no-store` 会让每次打开面板都重下整页。
 
-套件在空闲端口上起一个真实网关，但跑在源码树的临时副本里：条件请求的逻辑长在
-HTTP 处理器里，只有真发请求才看得见；而校验 mtime 变化、文件缺失这些分支又
-必须改写被服务的页面，副本让这些操作不碰检出目录。
+套件在空闲端口上起一个真实网关，跑在源码树的临时副本里：条件请求的逻辑长在 HTTP
+处理器里，只有真发请求才看得见；校验 mtime 变化、文件缺失这些分支又要改写被服务的
+页面，副本让这些操作不碰检出目录。
 
-    python tests/_test_dashboard_cache_headers.py
+用 python tests/_test_dashboard_cache_headers.py 运行。
 """
 import http.client
 import json
@@ -27,7 +26,7 @@ if not os.path.exists(PY):
     PY = sys.executable
 sys.path.insert(0, HERE)
 
-import _lifecycle as life            # noqa: E402  (spare port + managed process)
+import _lifecycle as life            # noqa: E402  空闲端口与受管进程
 
 PASS = 0
 FAIL = 0
@@ -49,7 +48,7 @@ tree = os.path.join(work, "gateway")
 # 整棵源码树复制到临时目录（跳过测试和缓存）：网关从 __file__ 旁边读
 # app/web/index.html，只有副本才能随便改写、甚至删掉，去验 404 分支。
 shutil.copytree(ROOT, tree, ignore=shutil.ignore_patterns(
-    "__pycache__", ".git", ".github", "tests"))
+    "__pycache__", ".git", ".github", "tests", ".test-artifacts"))
 store = os.path.join(work, "accounts")
 os.makedirs(store)
 settings_path = os.path.join(store, "settings.json")
@@ -69,9 +68,8 @@ def set_language(value):
         json.dump(data, fh)
 
 
-# Managed spawn: its own group/session, so the stop_managed() in the finally
-# below takes the whole tree - a gateway that leaves a helper behind also leaves
-# its port held.
+# 受管启动：独立的进程组或会话，finally 里的 stop_managed() 因此能收掉整棵
+# 进程树；漏掉的辅助进程还会占着端口。
 proc = life.spawn_managed(
     [PY, os.path.join(tree, "app", "wb_proxy.py"), "--port", str(port),
      "--host", "127.0.0.1", "--accounts-dir", store],

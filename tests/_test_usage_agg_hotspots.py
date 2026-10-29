@@ -5,21 +5,21 @@
 页数标签。各钉一组：
 
   1. perf_stats 的窗口预过滤（复用 _line_outside_window）必须是**语义中性**
-     的：把预过滤关掉（monkeypatch 成恒 False，等价于改动前的路径）跑同一
+     的：把预过滤关掉（monkeypatch 成恒 False，走对照路径）跑同一
      份日志，聚合结果必须与开着时逐字段相同；同时 json.loads 的调用次数要
      真的降下来（计数桩），证明省掉的解析真实存在、不是被悄悄退化。手改过
      的行——at 不是第一个键、重复 at、整数 at、坏 JSON、转义引号——全部
      混在日志里：预过滤只许丢「下面的窗口判断本来也会丢」的行，丢错任何
      一行，对拍立刻失败。
-  2. count_usage_rows 的增量折叠与旧的全量扫描逐字对拍：参考实现（旧算法
+  2. count_usage_rows 的增量折叠与全量扫描逐字对拍：参考实现（全量算法
      原样复制在本文件里）对每一个 realm 各扫一遍全文件，增量实现复用同一条
      进度；冷启动、追加、截断、同尺寸重写、换文件、文件消失，以及
      None/"intl"/"cn"/"all" 的组合，两边必须逐个相等。折叠推进到文件尾之后，
      0 新字节的调用一个 json.loads 都不许发生（增量成立的直接证据）。
 
-唯一一处有意的口径收敛：日志末尾没有换行的半行不再计入总数（旧实现会把
-正在写入的半行也数进去），与 _scan_usage_from / _scan_daily_usage 的整行
-纪律一致——等它写完整再数，收敛后的数字与旧实现相同（下面单独钉住）。
+唯一一处有意的口径收敛：日志末尾没有换行的半行不计入总数（参考实现会把
+正在写的半行也数进去），与 _scan_usage_from / _scan_daily_usage 的整行
+纪律一致——等它写完整再数，常规场景的数字与参考实现相同（下面单独断言）。
 
 无网络：日志在临时目录里现造。
 """
@@ -42,12 +42,14 @@ os.environ["WB_PROXY_USAGE_DIR"] = USAGE_DIR
 os.environ["ACCOUNTS_DIR"] = ACCOUNTS_DIR
 
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_perf as PF
 
 P.ACCOUNTS_DIR = ACCOUNTS_DIR
 P.POOL = None                     # 归属只走行自己的字段/模型前缀，可确定
 P.CURRENT_REALM = "intl"
 # 计数 TTL 归零：本套件每次都要走「未缓存」路径，TTL 行为另有专门断言。
-P._COUNT_TTL = 0.0
+U._COUNT_TTL = 0.0
 # 关闭 checkpoint：本套件只测这两个读者，别让落盘状态掺进来。
 os.environ["WB_USAGE_CACHE"] = "0"
 
@@ -168,7 +170,7 @@ write_log(LOG_LINES)
 print("[1] perf_stats 窗口预过滤：与关掉预过滤（旧路径）逐字段对拍")
 
 _real_json = P.json
-_orig_line_outside = P._line_outside_window
+_orig_line_outside = U._line_outside_window
 
 
 class JsonCounter(object):
@@ -192,19 +194,20 @@ class JsonCounter(object):
 
 
 def perf_with(sample, realm, since, until, prefilter=True):
-    """(结果, json.loads 次数)。prefilter=False 即改动前的路径。"""
+    """(结果, json.loads 次数)。prefilter=False 即对照路径。"""
     counter = JsonCounter()
     old_loads = _real_json.loads
     _real_json.loads = counter.loads_hook
     try:
-        if prefilter:
-            P._line_outside_window = _orig_line_outside
-        else:
-            P._line_outside_window = lambda *a, **k: False
+        repl = _orig_line_outside if prefilter else (lambda *a, **k: False)
+        # 被测的是性能模块，它按值导入预过滤函数，必须连同它的绑定一起替换。
+        U._line_outside_window = repl
+        PF._line_outside_window = repl
         try:
-            out = P._perf_stats_uncached(sample, realm, since=since, until=until)
+            out = PF._perf_stats_uncached(sample, realm, since=since, until=until)
         finally:
-            P._line_outside_window = _orig_line_outside
+            U._line_outside_window = _orig_line_outside
+            PF._line_outside_window = _orig_line_outside
     finally:
         _real_json.loads = old_loads
     return out, counter.loads
@@ -244,9 +247,9 @@ check("对拍：八个窗口/realm/采样组合全部逐字段一致", ok_same)
 check("预过滤真的省解析（有可省行时严格变少，无省可省时持平）", ok_loads)
 
 # 直接钉几个数字：预过滤不许把窗口内的行丢掉，也不许把窗外行算进来。
-perf_today = P._perf_stats_uncached(5000, None, since=TODAY0, until=None)
-perf_all = P._perf_stats_uncached(5000, None)
-perf_cn_today = P._perf_stats_uncached(5000, "cn", since=TODAY0, until=None)
+perf_today = PF._perf_stats_uncached(5000, None, since=TODAY0, until=None)
+perf_all = PF._perf_stats_uncached(5000, None)
+perf_cn_today = PF._perf_stats_uncached(5000, "cn", since=TODAY0, until=None)
 check("today 窗口只数窗口内（含重复 at 行的最后值、整数 at 行）",
       perf_today["sampled"] == 9, perf_today["sampled"])
 check("all 数到全部可解析行", perf_all["sampled"] == len(LOG_LINES) - 1,
@@ -276,7 +279,7 @@ print("[2] count_usage_rows 增量折叠：与旧全量扫描（参考实现）�
 
 
 def ref_count(realm=None):
-    """改动前 _count_usage_rows_uncached 的逐字复制（参考实现）。"""
+    """_count_usage_rows_uncached 原算法的逐字复制（参考实现）。"""
     needles = ()
     if realm:
         needles = ('"realm": "%s"' % realm, '"realm":"%s"' % realm)
@@ -295,7 +298,7 @@ def ref_count(realm=None):
                 if '"realm"' in line:
                     continue          # realm 字段存在但值不同
                 try:
-                    if P.row_matches_realm(json.loads(line), realm):
+                    if U.row_matches_realm(json.loads(line), realm):
                         n += 1
                 except Exception:
                     pass
@@ -308,7 +311,7 @@ def ref_count(realm=None):
 
 def count_via_uncached(realm):
     """走未缓存入口（含 realm_scope 归一化），绕开 TTL 缓存。"""
-    return P._count_usage_rows_uncached(P.realm_scope(realm))
+    return U._count_usage_rows_uncached(U.realm_scope(realm))
 
 
 def compare_all(label):
@@ -317,7 +320,7 @@ def compare_all(label):
     ok = True
     for realm in (None, "intl", "cn", "all"):
         got = count_via_uncached(realm)
-        want = ref_count(P.realm_scope(realm))
+        want = ref_count(U.realm_scope(realm))
         detail[realm] = (got, want)
         ok = ok and got == want
     check(label, ok, detail)
@@ -333,7 +336,7 @@ check("没有 realm 字段的老行按模型前缀归属（gpt-* -> intl，minim
       (count_via_uncached("intl"), ref_count("intl"),
        count_via_uncached("cn"), ref_count("cn")))
 check("realm_scope('all') 与 None 同值（总数）",
-      P.count_usage_rows("all") == P.count_usage_rows(None))
+      U.count_usage_rows("all") == U.count_usage_rows(None))
 
 # 追加：增量只数新字节，结果与全量对拍
 append_log([
@@ -343,16 +346,16 @@ append_log([
 ])
 compare_all("追加后：增量结果仍与全量一致")
 check("折叠推进到了文件尾（没有每次重扫全文件）",
-      P._count_state["offset"] == os.path.getsize(USAGE_LOG),
-      (P._count_state["offset"], os.path.getsize(USAGE_LOG)))
+      U._count_state["offset"] == os.path.getsize(USAGE_LOG),
+      (U._count_state["offset"], os.path.getsize(USAGE_LOG)))
 
 # 0 新字节：一个 json.loads 都不许发生
 counter = JsonCounter()
 old_loads = _real_json.loads
 _real_json.loads = counter.loads_hook
 try:
-    n_none = P._count_usage_rows_uncached(None)
-    n_cn = P._count_usage_rows_uncached("cn")
+    n_none = U._count_usage_rows_uncached(None)
+    n_cn = U._count_usage_rows_uncached("cn")
 finally:
     _real_json.loads = old_loads
 check("0 新字节的调用完全不解析日志（loads=0）", counter.loads == 0,
@@ -365,7 +368,7 @@ counter2 = JsonCounter()
 old_loads = _real_json.loads
 _real_json.loads = counter2.loads_hook
 try:
-    P._count_usage_rows_uncached(None)
+    U._count_usage_rows_uncached(None)
 finally:
     _real_json.loads = old_loads
 check("计数桩自检：有新字节时确实解析了新增行（loads>0）",
@@ -384,7 +387,7 @@ needle = '"realm": "intl"'
 pos = text.rfind(needle)            # 最后一行的 realm 字段
 check("变异点落在文件尾部（tail 签名看得到）",
       pos >= 0 and len(text) - pos < 64, (pos, len(text)))
-# 等长替换：intl -> intx，这一行从 intl 桶里消失（任何查询都不再命中它）。
+# 等长替换：intl -> intx，这一行从 intl 桶里消失（任何查询都不命中它）。
 # 如果进度没有作废，intl 的计数会停在旧值——对拍立刻抓住。
 mutated = text[:pos] + '"realm": "intx"' + text[pos + len(needle):]
 check("变异保持字节数不变（size 校验对它是瞎的）",
@@ -401,17 +404,17 @@ compare_all("日志消失：所有 realm 都是 0（与全量一致）")
 write_log(LOG_LINES)
 compare_all("日志重建：结果与全量一致")
 
-# 半行（没有换行的尾巴）：留给下一趟，等写完整再数。旧实现会把正在写的半行
-# 也数进总数，这是本改动有意收敛的一处 ≤1 行瞬时差异（与 _scan_usage_from
+# 半行（没有换行的尾巴）：留给下一趟，等写完整再数。参考实现会把正在写的
+# 半行也数进总数，这是有意收敛的一处 ≤1 行瞬时差异（与 _scan_usage_from
 # 的整行纪律一致）；realm 计数两边本来就都不含它。
 with io.open(USAGE_LOG, "a", encoding="utf-8", newline="\n") as fh:
     fh.write('{"at": %d, "model": "m-a"' % (TODAY0 + 1400))
 check("半行不数：总数停在最后一个完整行", count_via_uncached(None) == len(LOG_LINES),
       (count_via_uncached(None), len(LOG_LINES)))
 check("半行不数：realm 计数与全量一致（半行对 realm 无贡献）",
-      all(count_via_uncached(r) == ref_count(P.realm_scope(r))
+      all(count_via_uncached(r) == ref_count(U.realm_scope(r))
           for r in ("intl", "cn")),
-      {r: (count_via_uncached(r), ref_count(P.realm_scope(r)))
+      {r: (count_via_uncached(r), ref_count(U.realm_scope(r)))
        for r in ("intl", "cn")})
 append_log([', "realm": "intl"}'])
 check("半行补全后总数与全量一致（收敛到旧实现的数字）",
@@ -422,9 +425,9 @@ check("半行补全后 realm 计数也一致",
       (count_via_uncached("intl"), ref_count("intl")))
 
 # 非法 UTF-8 的坏行：折叠停在它前面，这一次返回已数到的部分，下一次重数也
-# 停在同一个位置（结果稳定）；坏行被截掉后折叠继续。旧实现的文本层按块解码，
-# 坏行落在第一块里时整次报 0、落在后面时给部分数——新实现稳定地给出坏行之前
-# 的行数，任何情况下都不会更差。
+# 停在同一个位置（结果稳定）；坏行被截掉后折叠继续。参考实现的文本层按块
+# 解码，坏行落在第一块里时整次报 0、落在后面时给部分数——增量实现稳定地
+# 给出坏行之前的行数，任何情况下都不会更差。
 partial = count_via_uncached(None)
 size_good = os.path.getsize(USAGE_LOG)
 with open(USAGE_LOG, "ab") as fh:
@@ -445,17 +448,17 @@ check("截掉坏行后再追加：折叠继续（+1）",
       (count_via_uncached(None), partial + 1))
 
 # TTL 缓存：默认 TTL 内不重算，过期后重算并跟上新行
-P._COUNT_TTL = 30.0
-P._count_cache.clear()
-first = P.count_usage_rows("cn")
+U._COUNT_TTL = 30.0
+U._count_cache.clear()
+first = U.count_usage_rows("cn")
 append_log([jline(row(TODAY0 + 1500, "m-b", "u2", "cn"))])
-check("TTL 内命中缓存（不重算）", P.count_usage_rows("cn") == first,
-      (P.count_usage_rows("cn"), first))
-P._COUNT_TTL = 0.0
-P._count_cache.clear()
+check("TTL 内命中缓存（不重算）", U.count_usage_rows("cn") == first,
+      (U.count_usage_rows("cn"), first))
+U._COUNT_TTL = 0.0
+U._count_cache.clear()
 check("TTL 过期后重算并跟上新行",
-      P.count_usage_rows("cn") == ref_count("cn"),
-      (P.count_usage_rows("cn"), ref_count("cn")))
+      U.count_usage_rows("cn") == ref_count("cn"),
+      (U.count_usage_rows("cn"), ref_count("cn")))
 
 shutil.rmtree(_TMP, ignore_errors=True)
 print()

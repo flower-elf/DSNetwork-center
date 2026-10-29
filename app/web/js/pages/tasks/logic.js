@@ -1,6 +1,6 @@
 // 任务页的纯逻辑：调度器文案、成长任务状态、猫猫旅行状态、积分变动记录；只依赖 core/format.js 与账号页的 logic 模块，可以在 Node 里直接测试。
 
-import { fmtCredit, fmtDateTime, fmtNumber, realmLabel } from '../../core/format.js';
+import { fmtCredit, fmtDateTime, fmtNumber, fmtTime, realmLabel } from '../../core/format.js';
 
 /** 调度器状态整理成页面上要显示的四段文字。 */
 export function schedulerView(status, realm) {
@@ -53,9 +53,7 @@ export function growthTaskView(task) {
 export function travelEtaText(travel, now = Date.now()) {
   const remain = Number((travel && travel.arrive_at) || 0) - Number((travel && travel.server_now) || 0);
   if (!(remain > 0)) return '';
-  const d = new Date(now + remain * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  return pad(d.getHours()) + ':' + pad(d.getMinutes());
+  return fmtTime(now + remain * 1000);
 }
 
 export function travelView(travel, now = Date.now()) {
@@ -92,6 +90,11 @@ export function growthAccountOptions(accounts, current) {
   return { options, selected };
 }
 
+/** 账号选择器的取值：「全部国内账号」时留空，由网关逐个执行。 */
+export function checkinSelection(growthUid) {
+  return growthUid && growthUid !== 'all' ? growthUid : undefined;
+}
+
 export function creditEventRows(events) {
   return (events || []).map((event) => {
     const delta = Number(event.delta) || 0;
@@ -119,7 +122,6 @@ export function growthEmptyText(realm) {
   return '当前没有读到成长任务。请确认至少有一个可用的国内版账号，然后点右上角的「刷新」重试。';
 }
 
-/** 调度器日志行的展示上限，取状态接口返回的最后若干条。 */
 export function schedulerLogLines(status, limit = 20) {
   const logs = Array.isArray(status && status.logs) ? status.logs : [];
   return logs.slice(-limit);

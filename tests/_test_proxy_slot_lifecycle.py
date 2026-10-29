@@ -1,4 +1,4 @@
-"""槽位 id 绝不能被回收给另一个槽位:账号记住自己绑定的 id,回收会让它的出口 IP 在面板看不到异常的情况下改变。
+"""槽位 id 绝不能被回收给另一个槽位：账号记住自己绑定的 id，回收会让它的出口 IP 在面板看不到异常的情况下改变。运行 python tests/_test_proxy_slot_lifecycle.py。
 """
 
 import os
@@ -37,7 +37,6 @@ def account(uid, slot):
     })
 
 
-# ---- [1] deleting a slot releases the accounts bound to it --------------
 print("[1] deleting a slot unbinds its accounts")
 work = make_store()
 slots = wb_settings.set_proxy_slots(work, [
@@ -61,7 +60,6 @@ check("account fell back to direct", pool.accounts[0].proxy == "", pool.accounts
 check("binding cleared on disk", pool.accounts[0].proxy_slot == "")
 shutil.rmtree(work, ignore_errors=True)
 
-# ---- [2] a removed id is never reused, even within one save -------------
 print("[2] a freed id is not reused by a newly added slot")
 work = make_store()
 wb_settings.set_proxy_slots(work, [
@@ -71,7 +69,7 @@ wb_settings.set_proxy_slots(work, [
 pool = wb_accounts.AccountPool(work)
 pool.add(account("u1", "slot-2"))
 
-# 同一次保存里删掉 slot-2 又新增:被释放的 id 不能被再次发出
+# 同一次保存里删掉 slot-2 又新增：被释放的 id 不能被再次发出
 new_list = wb_settings.set_proxy_slots(work, [
     {"id": "slot-1", "name": "A", "url": "http://10.0.0.1:17901", "enabled": True},
     {"id": "", "name": "C", "url": "http://10.0.0.9:17909", "enabled": True},
@@ -87,7 +85,6 @@ check("account did not adopt the new slot",
 check("account is direct", pool.accounts[0].proxy == "", pool.accounts[0].proxy)
 shutil.rmtree(work, ignore_errors=True)
 
-# ---- [3] the counter survives a reload and keeps growing ----------------
 print("[3] the counter is persisted and only grows")
 work = make_store()
 first = wb_settings.set_proxy_slots(work, [
@@ -104,7 +101,6 @@ for n in range(3):
 check("every generation got a distinct id", len(seen) == 4, repr(sorted(seen)))
 shutil.rmtree(work, ignore_errors=True)
 
-# ---- [4] bulk disable keeps every binding (issue #89) --------------------
 print("[4] set-all-disabled keeps the bindings")
 work = make_store()
 slots = wb_settings.set_proxy_slots(work, [

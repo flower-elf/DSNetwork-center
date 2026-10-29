@@ -40,7 +40,6 @@ CONTEXT_FALLBACK = {
     "hy3-preview": (262144, 64000),
     "hy4-preview": (1000000, 64000),
     "hy4-preview-x": (1000000, 64000),
-    # DeepSeek
     "deepseek-v4-pro": (1000000, 384000),
     "deepseek-v4-flash": (1000000, 384000),
     "deepseek-v4.1-flash": (1000000, 384000),
@@ -53,7 +52,7 @@ CONTEXT_FALLBACK = {
     "gpt-5.4": (1050000, 128000),
     "gpt-5.3-codex": (400000, 128000),
     "gemini-3.5-flash": (1048576, 65536),
-    # Global route alias
+    # 全局路由别名
     "auto": (168000, 0),
 }
 

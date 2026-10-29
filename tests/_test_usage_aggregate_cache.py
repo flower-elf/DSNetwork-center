@@ -24,6 +24,8 @@ os.environ["WB_PROXY_USAGE_DIR"] = USAGE_DIR
 os.environ["ACCOUNTS_DIR"] = ACCOUNTS_DIR
 
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_cache as C
 import wb_accounts
 import wb_pricing
 
@@ -36,12 +38,12 @@ wb_pricing.set_settings_dir(ACCOUNTS_DIR)
 USAGE_LOG = P.USAGE_LOG
 # 一类状态一份文件。套件按 kind 读写这些文件，个别用例会直接改坏某一类文件，
 # 验证一类损坏不影响其余类。
-KIND_FILES = {kind: P._usage_cache_kind_path(kind)
-              for kind in P._USAGE_CACHE_KINDS}
+KIND_FILES = {kind: C._usage_cache_kind_path(kind)
+              for kind in C._USAGE_CACHE_KINDS}
 # 写盘计数：粗粒度文件系统上的 mtime 只到秒，同一秒内的两次写无法区分，所以
 # 直接统计写入调用。
 _WRITES = []
-_real_write_kind = P._usage_cache_write_kind
+_real_write_kind = C._usage_cache_write_kind
 
 
 def _counting_write_kind(kind, entries):
@@ -50,10 +52,10 @@ def _counting_write_kind(kind, entries):
     return result
 
 
-P._usage_cache_write_kind = _counting_write_kind
+C._usage_cache_write_kind = _counting_write_kind
 # snapshot 的结果带有进程自己的 _usage["started"]，冻结它让父进程与子进程的
 # 输出可比。
-P._usage["started"] = FROZEN
+U._usage["started"] = FROZEN
 
 PASS = FAIL = 0
 
@@ -249,13 +251,13 @@ def cache_env_off():
 def live():
     """五个入口的原始结果，覆盖三份状态与三个 realm 视图。"""
     return {
-        "snap": P._usage_snapshot_uncached(),
-        "snap_intl": P._usage_snapshot_uncached(realm="intl"),
-        "snap_cn": P._usage_snapshot_uncached(realm="cn"),
-        "byacct": P._usage_by_account_uncached(),
-        "analytics": P._compute_usage_analytics_uncached(),
-        "analytics_intl": P._compute_usage_analytics_uncached(realm="intl"),
-        "analytics_cn": P._compute_usage_analytics_uncached(realm="cn"),
+        "snap": U._usage_snapshot_uncached(),
+        "snap_intl": U._usage_snapshot_uncached(realm="intl"),
+        "snap_cn": U._usage_snapshot_uncached(realm="cn"),
+        "byacct": U._usage_by_account_uncached(),
+        "analytics": U._compute_usage_analytics_uncached(),
+        "analytics_intl": U._compute_usage_analytics_uncached(realm="intl"),
+        "analytics_cn": U._compute_usage_analytics_uncached(realm="cn"),
     }
 
 
@@ -275,18 +277,18 @@ def live_canon():
 
 def restart():
     """清掉三份状态、TTL 缓存与「已读过 checkpoint」的记忆，模拟一次进程重启。"""
-    P._usage_snap_state.clear()
-    P._byacct_state.update({"buckets": None, "offset": 0, "key": None, "tail": b""})
-    P._analytics_state.clear()
-    P._snap_cache.clear()
-    P._byacct_cache.update({"at": 0.0, "data": None})
-    P._analytics_cache.clear()
-    P._usage_cache_forget()
-    P._usage_cache_progress.clear()
-    P._usage_cache_checkpointed.clear()
-    P._usage_cache_last_attempt = time.time()
-    P._usage_cache_digest_memo.clear()
-    P._realm_disk_cache.update({"key": None, "map": None})
+    U._usage_snap_state.clear()
+    U._byacct_state.update({"buckets": None, "offset": 0, "key": None, "tail": b""})
+    U._analytics_state.clear()
+    U._snap_cache.clear()
+    U._byacct_cache.update({"at": 0.0, "data": None})
+    U._analytics_cache.clear()
+    C._usage_cache_forget()
+    C._usage_cache_progress.clear()
+    C._usage_cache_checkpointed.clear()
+    C._usage_cache_last_attempt = time.time()
+    C._usage_cache_digest_memo.clear()
+    U._realm_disk_cache.update({"key": None, "map": None})
 
 
 RUNNER = r'''
@@ -296,21 +298,23 @@ FROZEN = __FROZEN__
 _t.time = lambda: FROZEN
 sys.path.insert(0, __ROOT__)
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_cache as C
 import wb_pricing
 wb_pricing.set_data_dir(P.USAGE_DIR)
 wb_pricing.set_settings_dir(P.ACCOUNTS_DIR)
 out = {
-    "snap": P._usage_snapshot_uncached(),
-    "snap_intl": P._usage_snapshot_uncached(realm="intl"),
-    "snap_cn": P._usage_snapshot_uncached(realm="cn"),
-    "byacct": P._usage_by_account_uncached(),
-    "analytics": P._compute_usage_analytics_uncached(),
-    "analytics_intl": P._compute_usage_analytics_uncached(realm="intl"),
-    "analytics_cn": P._compute_usage_analytics_uncached(realm="cn"),
+    "snap": U._usage_snapshot_uncached(),
+    "snap_intl": U._usage_snapshot_uncached(realm="intl"),
+    "snap_cn": U._usage_snapshot_uncached(realm="cn"),
+    "byacct": U._usage_by_account_uncached(),
+    "analytics": U._compute_usage_analytics_uncached(),
+    "analytics_intl": U._compute_usage_analytics_uncached(realm="intl"),
+    "analytics_cn": U._compute_usage_analytics_uncached(realm="cn"),
 }
 with open(os.environ["WB_CHILD_OUT"], "w", encoding="utf-8") as fh:
     # 不排序：键序本身就是要比的东西（父进程会连键序一起比对）。
-    json.dump({"checkpointed": P._usage_cache_checkpointed, "results": out}, fh,
+    json.dump({"checkpointed": C._usage_cache_checkpointed, "results": out}, fh,
               ensure_ascii=False)
 print("child ok")
 '''
@@ -363,7 +367,7 @@ def cache_data():
     与单文件视图同形，用例里 _entry 的调用写法保持不变。
     """
     merged = {}
-    for kind in P._USAGE_CACHE_KINDS:
+    for kind in C._USAGE_CACHE_KINDS:
         try:
             with io.open(KIND_FILES[kind], encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -380,11 +384,11 @@ def save_cache(data):
 
     空表不写文件，与生产侧一致，没内容的类别不落盘。
     """
-    for kind in P._USAGE_CACHE_KINDS:
+    for kind in C._USAGE_CACHE_KINDS:
         entries = data.get(kind) or []
         if not entries:
             continue
-        payload = {"schema": P._USAGE_CACHE_SCHEMA, "kind": kind,
+        payload = {"schema": C._USAGE_CACHE_SCHEMA, "kind": kind,
                    "written_at": FROZEN, "entries": entries}
         io.open(KIND_FILES[kind], "w", encoding="utf-8", newline="\n").write(
             json.dumps(payload, ensure_ascii=False))
@@ -442,14 +446,14 @@ print("[1] 往返：写盘 → 模拟重启加载 → 与不落盘逐字节一�
 check("写盘成功", make_checkpoint())
 stored = cache_data()
 check("每个写出的 kind 文件都是 schema=当前版本、kind 标签正确的 JSON 对象",
-      all(kind_file_data(k)["schema"] == P._USAGE_CACHE_SCHEMA
+      all(kind_file_data(k)["schema"] == C._USAGE_CACHE_SCHEMA
           and kind_file_data(k)["kind"] == k
           and isinstance(kind_file_data(k)["entries"], list)
-          for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])),
+          for k in C._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])),
       {k: (kind_file_data(k).get("schema"), kind_file_data(k).get("kind"))
-       for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])})
+       for k in C._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])})
 check("schema 版本是 v5（一类一份的布局 + 「用到的价」指纹）",
-      P._USAGE_CACHE_SCHEMA == 5, P._USAGE_CACHE_SCHEMA)
+      C._USAGE_CACHE_SCHEMA == 5, C._USAGE_CACHE_SCHEMA)
 check("三份状态都写进去了（每个 realm 一份）",
       len(stored["snapshot"]) == 3 and len(stored["by_account"]) == 1
       and len(stored["analytics"]) == 3,
@@ -469,7 +473,7 @@ check("写盘是原子替换：没有留下临时文件",
 # 落盘时不能排序：文件里的键序必须是折叠的插入顺序。排序会让加载回来的键
 # 变成字母序，响应字节随之与冷启动不同。
 stored_keys = list(_entry(stored, "snapshot", None)["snap"].keys())
-fold_keys = list(P._usage_snap_state[None]["snap"].keys())
+fold_keys = list(U._usage_snap_state[None]["snap"].keys())
 check("落盘的键顺序就是折叠的插入顺序（不是字母序）",
       stored_keys == fold_keys and stored_keys != sorted(stored_keys),
       (stored_keys[:6], sorted(stored_keys)[:6]))
@@ -477,7 +481,7 @@ check("落盘的键顺序就是折叠的插入顺序（不是字母序）",
 cache_env_nowrite()
 restart()
 LOADED_RAW, err = live_raw()
-ADOPTED = dict(P._usage_cache_checkpointed)
+ADOPTED = dict(C._usage_cache_checkpointed)
 check("模拟重启后加载到了 checkpoint（三份都被采用）", adopted_all(ADOPTED), ADOPTED)
 check("加载后结果与不落盘逐字节一致", canon(LOADED_RAW or {}) == GOLDEN,
       err or first_diff(GOLDEN, canon(LOADED_RAW or {})))
@@ -518,7 +522,7 @@ check("增长后的真值确实变了", GROWN != GOLDEN)
 cache_env_nowrite()
 restart()
 LOADED_GROWN_RAW, err = live_raw()
-ADOPTED_GROWN = dict(P._usage_cache_checkpointed)
+ADOPTED_GROWN = dict(C._usage_cache_checkpointed)
 check("加载旧 checkpoint 后只折增量，结果等于全量", canon(LOADED_GROWN_RAW or {}) == GROWN,
       err or first_diff(GROWN, canon(LOADED_GROWN_RAW or {})))
 check_same_shape("续扫（增量折叠）vs 全量冷折叠", GROWN_RAW, LOADED_GROWN_RAW)
@@ -604,8 +608,8 @@ def mutate_kind_file(kind, mutate, label, others=("analytics", "by_account")):
     check(label, got == GOLDEN, err or first_diff(GOLDEN, got or ""))
     if others:
         check(label + "：其余类照常采用",
-              all(k in P._usage_cache_checkpointed for k in others),
-              P._usage_cache_checkpointed)
+              all(k in C._usage_cache_checkpointed for k in others),
+              C._usage_cache_checkpointed)
 
 
 # 4.1 文件本身读不出来：五个 kind 文件一起改坏，等于没有任何 checkpoint
@@ -826,9 +830,9 @@ got, err = live_canon()
 check("价格表变了：checkpoint 作废、结果按新价重算", got == GOLDEN_PRICE,
       err or first_diff(GOLDEN_PRICE, got or ""))
 check("价格表变了：带指纹的两份确实没有被采用",
-      "snapshot" not in P._usage_cache_checkpointed
-      and "analytics" not in P._usage_cache_checkpointed,
-      P._usage_cache_checkpointed)
+      "snapshot" not in C._usage_cache_checkpointed
+      and "analytics" not in C._usage_cache_checkpointed,
+      C._usage_cache_checkpointed)
 
 write_pricing(PRICING)
 make_checkpoint()
@@ -844,9 +848,9 @@ got, err = live_canon()
 check("CURRENT_REALM 变了：checkpoint 作废", got == GOLDEN_REALM,
       err or first_diff(GOLDEN_REALM, got or ""))
 check("CURRENT_REALM 变了：带指纹的两份确实没有被采用",
-      "snapshot" not in P._usage_cache_checkpointed
-      and "analytics" not in P._usage_cache_checkpointed,
-      P._usage_cache_checkpointed)
+      "snapshot" not in C._usage_cache_checkpointed
+      and "analytics" not in C._usage_cache_checkpointed,
+      C._usage_cache_checkpointed)
 P.CURRENT_REALM = OLD_REALM
 
 # 4.8 日志被截断 / 截断后重写 / 被替换
@@ -860,7 +864,7 @@ restart()
 got, err = live_canon()
 check("日志被截到 0：offset 落在文件外，走全量（结果为空）", got == EMPTY,
       err or first_diff(EMPTY, got or ""))
-check("日志被截到 0：确实没有被采用", not P._usage_cache_checkpointed)
+check("日志被截到 0：确实没有被采用", not C._usage_cache_checkpointed)
 
 write_log(ROWS)
 make_checkpoint()
@@ -885,7 +889,7 @@ restart()
 got, err = live_canon()
 check("同尺寸重写：tail 签名挡住 checkpoint，结果按新内容重算",
       got == REWRITTEN, err or first_diff(REWRITTEN, got or ""))
-check("同尺寸重写：确实没有被采用", not P._usage_cache_checkpointed)
+check("同尺寸重写：确实没有被采用", not C._usage_cache_checkpointed)
 
 write_log(ROWS)
 make_checkpoint()
@@ -910,15 +914,15 @@ restart()
 got, err = live_canon()
 check("日志不存在：checkpoint 作废，结果为空", got == NO_LOG,
       err or first_diff(NO_LOG, got or ""))
-check("日志不存在：确实没有被采用", not P._usage_cache_checkpointed)
+check("日志不存在：确实没有被采用", not C._usage_cache_checkpointed)
 write_log(ROWS)
 
 print()
 print("[5] 目录不可写 / 被占位：不能崩，结果正确")
 cache_env_force()
 restart()
-real_kind_path = P._usage_cache_kind_path
-real_path = P._usage_cache_path
+real_kind_path = C._usage_cache_kind_path
+real_path = C._usage_cache_path
 missing_dir = os.path.join(_TMP, "no-such-dir")
 
 
@@ -926,8 +930,8 @@ def _missing_kind_path(kind):
     return os.path.join(missing_dir, "usage-aggregate-cache-%s.json" % kind)
 
 
-P._usage_cache_kind_path = _missing_kind_path
-P._usage_cache_path = lambda: os.path.join(missing_dir,
+C._usage_cache_kind_path = _missing_kind_path
+C._usage_cache_path = lambda: os.path.join(missing_dir,
                                            "usage-aggregate-cache.json")
 try:
     got, err = live_canon()
@@ -935,8 +939,8 @@ try:
           err or first_diff(GOLDEN, got or ""))
     check("写盘路径不可用：没有创建任何文件", not os.path.exists(missing_dir))
 finally:
-    P._usage_cache_kind_path = real_kind_path
-    P._usage_cache_path = real_path
+    C._usage_cache_kind_path = real_kind_path
+    C._usage_cache_path = real_path
 # 读路径被目录占位：open 会抛 OSError，必须被吞掉
 make_checkpoint()
 clear_cache_files()
@@ -998,28 +1002,28 @@ restart()
 live()
 check("计时器到点 + 从零折满（确有推进）：写一次", bool(cache_files()))
 check("写出来的还是完整的 checkpoint（每份自带 schema 与 kind 标签）",
-      all(kind_file_data(k)["schema"] == P._USAGE_CACHE_SCHEMA
+      all(kind_file_data(k)["schema"] == C._USAGE_CACHE_SCHEMA
           and kind_file_data(k)["kind"] == k
-          for k in P._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])))
+          for k in C._USAGE_CACHE_KINDS if os.path.exists(KIND_FILES[k])))
 
 # 空闲不重写：进度已与 checkpoint 同步，等满一个时间窗口后再刷新，日志没有
 # 新字节时不许再写。计时器到点就无条件写会让面板开着时每 900s 白写一份逐字节
 # 相同的 120KB checkpoint，纯属写放大。
 cache_env(enabled=1, min_bytes=10 ** 9, min_seconds=900)
 writes_before = _WRITES.count("snapshot")
-P._usage_cache_last_attempt -= 901
+C._usage_cache_last_attempt -= 901
 live()
 check("计时器到点 + 无推进：不写（空闲不重写）",
       _WRITES.count("snapshot") == writes_before)
 # 从真实调用路径再走一遍：带 range=today 的 usage_snapshot 是面板轮询每几秒
 # 就碰一次的路径，经由日桶分支进入 _usage_cache_maybe_save。
-P._usage_cache_last_attempt -= 901
-P.usage_snapshot(range="today", ttl=0)
+C._usage_cache_last_attempt -= 901
+U.usage_snapshot(range="today", ttl=0)
 check("无新字节的 usage_snapshot(range=today) 不重写 checkpoint",
       _WRITES.count("snapshot") == writes_before)
 # 有推进但不足字节阈值：计时器分支照常写，只有空闲重写被跳过。
 append_log([row(FROZEN - 100, "m-a", "u1", 500, 50)])
-P._usage_cache_last_attempt -= 901
+C._usage_cache_last_attempt -= 901
 live()
 check("计时器到点 + 有新字节（不足字节阈值）：写一次",
       _WRITES.count("snapshot") == writes_before + 1)
@@ -1089,11 +1093,11 @@ try:
     NINE = canon(NINE_RAW)
 
     # 判据：同一份磁盘 + 同一份配置，三种启动状态算出的指纹必须一模一样。
-    fp_none = P._realm_inputs()
+    fp_none = U._realm_inputs()
     P.POOL = wb_accounts.AccountPool(REAL_ACCOUNTS)      # 建好了，还没 load()
-    fp_unloaded = P._realm_inputs()
+    fp_unloaded = U._realm_inputs()
     P.POOL.load()
-    fp_loaded = P._realm_inputs()
+    fp_loaded = U._realm_inputs()
     check("指纹与池的加载状态无关（未建/未加载/已加载都相同）",
           fp_none == fp_unloaded == fp_loaded, (fp_none, fp_unloaded, fp_loaded))
     check("指纹就是磁盘上的 uid→realm",
@@ -1104,14 +1108,14 @@ try:
     stored = cache_data()
     check("落盘的 realm 指纹就是磁盘那份",
           _entry(stored, "snapshot", None)["realm_inputs"]
-          == P._realm_inputs_key(fp_loaded),
+          == C._realm_inputs_key(fp_loaded),
           _entry(stored, "snapshot", None)["realm_inputs"])
     P.POOL = wb_accounts.AccountPool(REAL_ACCOUNTS)      # 重启：池还没 load()
     cache_env_nowrite()
     restart()
     got, err = live_canon()
     check("池未就绪的进程仍然命中 checkpoint（含带 realm 指纹的两份）",
-          adopted_all(P._usage_cache_checkpointed), P._usage_cache_checkpointed)
+          adopted_all(C._usage_cache_checkpointed), C._usage_cache_checkpointed)
     check("池未就绪时的结果与冷折叠一致", got == NINE, err or first_diff(NINE, got or ""))
     # 池加载完之后：载荷里的 accounts_map 与 account 由活池派生，数字部分必须
     # 仍与全量折叠一致，对应运行 10 分钟后的状态。
@@ -1128,9 +1132,9 @@ try:
     # 磁盘变了，realm 已改：指纹必须跟着变，池没跟上时不许写盘。
     write_account("u-2", "intl")
     check("账号文件改了，指纹跟着变",
-          P._realm_inputs() != fp_loaded, P._realm_inputs())
+          U._realm_inputs() != fp_loaded, U._realm_inputs())
     check("池还停在旧归属（磁盘与池不一致）",
-          not P._realm_fold_reproducible(P._account_realm_map()))
+          not U._realm_fold_reproducible(U._account_realm_map()))
     clear_cache_files()
     cache_env_force()
     restart()
@@ -1142,7 +1146,7 @@ try:
     write_account("u-2", "cn")          # 改回来
     cache_env_off()
     restart()
-    check("改回来之后指纹回到原值", P._realm_inputs() == fp_loaded, P._realm_inputs())
+    check("改回来之后指纹回到原值", U._realm_inputs() == fp_loaded, U._realm_inputs())
 
     # 池整个不存在而磁盘上有账号：折叠根本不查账号映射，冷进程无法复现这种
     # 折叠。此时不信任也不写，等池就绪后再用。

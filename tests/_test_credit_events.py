@@ -18,6 +18,7 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_accounts as A
 import wb_proxy as P
+import wb_usage as U
 
 
 def billing(remain, size=1000):
@@ -57,7 +58,7 @@ class CreditEventTests(unittest.TestCase):
         })
         self.account.path = os.path.join(self.accounts, "uid-cn.json")
         self.account.save(self.accounts)
-        self.addCleanup(A.set_credit_events_provider, P.credit_events_file)
+        self.addCleanup(A.set_credit_events_provider, U.credit_events_file)
 
     def fetch(self, remain):
         with mock.patch.object(P, "USAGE_DIR", self.usage):
@@ -174,7 +175,7 @@ class CreditEventTests(unittest.TestCase):
 
 
 class LedgerFixtureMixin(object):
-    """Handle writes used by the reader tests, including a corrupt line."""
+    """处理读取测试要用的写入，包括一行损坏的数据。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="wb-credit-events-read-")
@@ -195,7 +196,7 @@ class LedgerFixtureMixin(object):
 
     def read(self, realm=None, limit=200, offset=0):
         with mock.patch.object(P, "USAGE_DIR", self.usage):
-            return P.read_credit_events(realm=realm, limit=limit, offset=offset)
+            return U.read_credit_events(realm=realm, limit=limit, offset=offset)
 
 
 class CreditEventReadTests(LedgerFixtureMixin, unittest.TestCase):

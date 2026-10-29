@@ -1,11 +1,10 @@
-"""Tests for orphan function_call_output items whose output carries images.
+"""孤儿 function_call_output（无 call_id）携带图片时的转换测试。
 
-An output list with image parts makes _flatten_content() return structured
-chat parts (a list). The orphan (no call_id) branch used to call .strip()
-on that list and raise AttributeError, which socketserver swallows and the
-connection is dropped without a response (issue observed with Codex
-Desktop: every /v1/responses retry died as a bare 502).
+output 带图片分片时 _flatten_content() 返回结构化 parts 列表；孤儿分支必须原样保留
+这些分片，一旦对列表调用 .strip() 会抛 AttributeError，socketserver 吞掉异常后连接被
+直接断开（Codex Desktop 实测每次重试都得到裸 502）。
 """
+import json
 import os
 import sys
 import unittest
@@ -16,14 +15,13 @@ import wb_proxy as P
 
 class OrphanFunctionCallOutputTests(unittest.TestCase):
     def test_orphan_output_with_image_parts_becomes_multimodal_user_message(self):
-        # The orphan branch must keep the structured parts instead of calling
-        # .strip() on the list _flatten_content() returns for multimodal input.
+        # 孤儿分支必须保留结构化 parts，不能对其调用 .strip()。
         payload = {"model": "deepseek-v4.1-flash", "input": [
             {"type": "function_call_output",
              "output": [{"type": "input_image",
                          "image_url": "data:image/png;base64,iVBORw0KGgo="}]},
         ]}
-        chat = P.responses_to_chat(payload)  # raised AttributeError before the fix
+        chat = P.responses_to_chat(payload)
         messages = chat["messages"]
         self.assertEqual(len(messages), 1)
         self.assertEqual(messages[0]["role"], "user")
@@ -49,7 +47,8 @@ class OrphanFunctionCallOutputTests(unittest.TestCase):
         ]}
         chat = P.responses_to_chat(payload)
         messages = chat["messages"]
-        self.assertIn("done", messages[0]["content"])
+        self.assertTrue(messages[0]["content"].endswith(
+            json.dumps({"type": "output_text", "text": "done"}, ensure_ascii=False)))
 
     def test_function_call_output_with_call_id_unchanged(self):
         payload = {"model": "deepseek-v4.1-flash", "input": [

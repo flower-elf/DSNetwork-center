@@ -19,20 +19,20 @@ REAL_RUNNER = os.path.join(HERE, "run_all.py")
 FILLER_LINES = 40
 
 #: 边界刻意放宽：只需区分被 --timeout 截断与等到探针结束，后者要睡十分钟。
-HANG_TIMEOUT = 5
+HANG_TIMEOUT = 2
 HANG_SECONDS = 600
 HANG_BUDGET = 60
 
 #: 测试框架自身对沙箱 runner 设的上界，刻意远低于 HANG_SECONDS：runner 一旦
-#: 不再遵守自己的挂钟，测试框架绝不能继续等下去。
-SANDBOX_BUDGET = 15
+#: 不遵守自己的挂钟，测试框架绝不能继续等下去。
+SANDBOX_BUDGET = 6
 
 #: 孙进程活过本轮检查但活不过整个测试会话，宿主拒绝树杀时也不会留下十分钟
 #: 的孤儿进程。
 ORPHAN_SECONDS = 120
 
 #: run_all.py 中施加单套件挂钟的那一行。负向用例把它从自己的副本里删掉，
-#: 被测 runner 于是不再遵守 --timeout，只能由测试框架自身的上界结束运行。
+#: 被测 runner 于是不遵守 --timeout，只能由测试框架自身的上界结束运行。
 TIMEOUT_ANCHOR = "code = proc.wait(timeout=timeout)"
 
 _WINDOWS = os.name == "nt"
@@ -134,8 +134,8 @@ def _parse_proc_stat(data):
 def _proc_process_tree(proc_root="/proc"):
     """从 /proc 形状的树里读出 {pid: parent pid}。
 
-    根目录作为参数，Linux 分支因此能在任意平台上用合成树验证，而不是只在
-    CI 上失败。返回形状必须与 Windows 分支一致：_descendants 只读一份映射，
+    根目录作为参数，Linux 分支因此能在任意平台上用合成树验证，不必等 CI 才
+    暴露。返回形状必须与 Windows 分支一致：_descendants 只读一份映射，
     不应关心它由哪个平台填充。
     """
     try:
@@ -198,8 +198,8 @@ def new_group_kwargs():
 def kill_owned_tree(proc):
     """终止测试框架持有的 runner 及其整棵进程树，然后回收。
 
-    刻意不依赖被测代码和 taskkill：runner 不再遵守自身超时、宿主拒绝其树杀
-    时，走的正是这条路径。
+    刻意不依赖被测代码和 taskkill：被测 runner 不遵守自身超时、宿主又拒绝其
+    树杀时，走的正是这条路径。
 
     本函数从不抛出异常。它运行在已经失败的路径上，此处抛异常会跳过后续清理，
     恰好留下本函数要消除的孤儿进程。
@@ -374,7 +374,7 @@ class Scenario(object):
 
         runner 由测试框架在自有进程组中以 Popen 启动，而不用
         subprocess.run 的 timeout 参数：后者只约束直接子进程，runner 一旦
-        不再遵守 --timeout，探针树就会被留下。这里的外层上界会拿下整棵树并
+        不遵守 --timeout，探针树就会被留下。这里的外层上界会拿下整棵树并
         在抛出前完成回收。
 
         输出写入文件而非管道：否则活过本次运行的探针会一直持有管道，让读取
@@ -407,10 +407,9 @@ class Scenario(object):
             return proc.returncode, fh.read(), seconds
 
     def kill_registered(self):
-        """Kill any probe that registered a pid and is still running.
+        """终止所有登记过 pid 且仍在运行的探针。
 
-        Deepest first: a grandchild is nobody's child once its parent is gone,
-        and on Windows the tree walk could no longer reach it.
+        按先深后浅的顺序：父进程消失后，Windows 上的树遍历就找不到孙进程。
         """
         try:
             entries = sorted(os.listdir(self.pids_dir))
@@ -443,8 +442,7 @@ class RunnerContractTests(unittest.TestCase):
         self._pids_root = tempfile.mkdtemp(prefix="runall-contract-pids-")
 
     def tearDown(self):
-        # Order matters: the harness takes its processes back before any file
-        # it needs to find them by is deleted.
+        # 顺序不能换：测试框架先收回自己的进程，再删除用来查找进程的文件。
         for scenario in self._scenarios:
             scenario.stop_owned()
             scenario.kill_registered()
@@ -456,23 +454,22 @@ class RunnerContractTests(unittest.TestCase):
         self._scenarios.append(created)
         return created
 
-    # -- the copy under test ------------------------------------------------
+    # -- 受测的 runner 副本 ------------------------------------------------
 
     def test_the_sandbox_runner_is_the_real_one(self):
-        """Every other check is meaningless unless the copy is byte-identical."""
+        """副本与仓库的 run_all.py 逐字节一致，其他检查才有意义。"""
         scenario = self.scenario("identity")
         with open(REAL_RUNNER, "rb") as real, open(scenario.runner, "rb") as copy:
             self.assertEqual(real.read(), copy.read(),
                              "the sandbox runner is not the repository's run_all.py")
 
-    # -- the tree walk the cleanup depends on -------------------------------
+    # -- 清理依赖的进程树遍历 ----------------------------------------------
 
     def test_the_process_table_is_pid_to_parent(self):
-        """Both platform branches must hand _descendants the same shape.
+        """两个平台分支必须给 _descendants 同一种映射形状。
 
-        Windows walks Toolhelp32 and POSIX parses /proc. A mismatch between the
-        two only shows up on the platform the author is not sitting in front
-        of, which is exactly how a cleanup path rots unnoticed.
+        Windows 走 Toolhelp32，POSIX 解析 /proc。两者不一致时只在另一个
+        平台上暴露，清理路径就是这样悄悄失效的。
         """
         table = _process_tree()
         if table is None:
@@ -488,16 +485,16 @@ class RunnerContractTests(unittest.TestCase):
                       "_descendants dropped the root it was given")
 
     def test_the_proc_stat_parser_survives_an_awkward_command_name(self):
-        """The Linux branch is the one a local Windows run cannot exercise."""
+        """Linux 分支靠这条用例检查，本机 Windows 运行走不到。"""
         line = b"4242 (python (weird) name) S 99 4242 4242 0 -1 4194560 0 0"
         self.assertEqual(_parse_proc_stat(line), 99)
         self.assertEqual(_parse_proc_stat(b"7 (sh) R 1 7 7 0 -1 0 0"), 1)
 
     def test_the_proc_reader_gives_the_same_shape_as_the_other_platform(self):
-        """A synthetic /proc, so the Linux reader is checked everywhere.
+        """用合成的 /proc 在所有平台检查 Linux 读取分支。
 
-        The two branches have to agree on {pid: parent pid}; when they did not,
-        nothing on Windows noticed and the cleanup path only fell over on CI.
+        两个分支给出的 {pid: parent pid} 映射必须一致，不一致只会在另一个
+        平台上暴露。
         """
         root = tempfile.mkdtemp(prefix="fake-proc-")
         try:
@@ -506,8 +503,7 @@ class RunnerContractTests(unittest.TestCase):
                 with open(os.path.join(root, str(pid), "stat"), "wb") as fh:
                     fh.write(b"%d (python) S %d %d %d 0 -1 0 0"
                              % (pid, ppid, pid, pid))
-            # Neither of these may contribute a row: a non-numeric directory
-            # and a stat file that cannot be parsed.
+            # 这两项都不能出现在结果里：非数字目录，以及无法解析的 stat 文件。
             os.makedirs(os.path.join(root, "not-a-pid"))
             os.makedirs(os.path.join(root, "44"))
             with open(os.path.join(root, "44", "stat"), "wb") as fh:
@@ -520,20 +516,21 @@ class RunnerContractTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_the_proc_reader_reports_no_table_when_proc_is_absent(self):
-        """macOS and friends: no /proc means "fall back", not "empty tree"."""
+        """没有 /proc 时返回 None，供调用方退回进程组清理；macOS 走这条分支。"""
         self.assertIsNone(_proc_process_tree(os.path.join(tempfile.gettempdir(),
                                                           "no-such-proc-root")))
 
     def test_descendants_are_returned_deepest_first(self):
-        """The order decides what is reachable when: kill a parent first and
-        its child becomes nobody's child, which on Windows means the tree walk
-        can no longer find it."""
+        """顺序决定杀进程后还能找到谁。
+
+        先杀父进程，它的子进程就无人认领，Windows 上的树遍历再也找不到。
+        """
         table = {10: 1, 11: 10, 12: 11, 13: 10, 99: 1}
         self.assertEqual(_descendants(10, table), [12, 11, 13, 10])
         self.assertEqual(_descendants(12, table), [12])
         self.assertEqual(_descendants(77, table), [77])
 
-    # -- argument validation ------------------------------------------------
+    # -- 参数校验 ----------------------------------------------------------
 
     def test_a_non_positive_jobs_value_is_a_usage_error(self):
         scenario = self.scenario("jobs")
@@ -554,7 +551,7 @@ class RunnerContractTests(unittest.TestCase):
                               output)
 
     def test_a_pattern_that_matches_nothing_is_not_a_pass(self):
-        """A typo must not be reported as "0 passed, 0 failed" and exit 0."""
+        """打错筛选词不能报成“0 passed, 0 failed”并以 0 退出。"""
         scenario = self.scenario("nomatch")
         code, output, _ = scenario.run("no-such-suite-" + uuid.uuid4().hex,
                                        timeout=60)
@@ -562,10 +559,10 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("no suite matches", output)
         self.assertNotIn("0 passed", output)
 
-    # -- failure reporting --------------------------------------------------
+    # -- 失败汇报 ----------------------------------------------------------
 
     def test_a_failing_probe_reports_the_real_error(self):
-        """The probe really runs and really exits non-zero; nothing is mocked."""
+        """探针真实运行并以非零码退出；没有使用任何模拟。"""
         scenario = self.scenario("failing")
         name = scenario.add("fail", (
             "import sys\n"
@@ -580,7 +577,7 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("--- last 25 lines of %s ---" % name, output)
 
     def test_the_failure_line_survives_a_node_style_tail(self):
-        """A JS suite dies with a bare "Node.js v20.20.2"; name the reason."""
+        """JS 套件失败时末行只有“Node.js v20.20.2”，报错行必须写出原因。"""
         scenario = self.scenario("nodetail")
         name = scenario.add("nodetail", (
             "import sys\n"
@@ -597,7 +594,7 @@ class RunnerContractTests(unittest.TestCase):
                       line[0])
         self.assertNotIn("Node.js v20.20.2", line[0])
 
-    # -- log retention ------------------------------------------------------
+    # -- 日志留存 ----------------------------------------------------------
 
     def test_logs_dir_keeps_the_full_output_not_just_the_tail(self):
         scenario = self.scenario("logs")
@@ -615,8 +612,7 @@ class RunnerContractTests(unittest.TestCase):
         self.assertTrue(os.path.exists(kept), "no log kept in %s" % scenario.logs_dir)
         with open(kept, encoding="utf-8") as fh:
             kept_text = fh.read()
-        # The runner echoes only the last line of a passing suite, so the first
-        # line proves the kept log is the whole output rather than that echo.
+        # runner 对通过的套件只回显最后一行，因此首行可以证明留存日志是完整输出。
         self.assertNotIn(sentinel, output)
         self.assertIn(sentinel, kept_text)
         self.assertIn("filler %d" % (FILLER_LINES - 1), kept_text)
@@ -634,10 +630,10 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("full output: %s" % os.path.join(scenario.logs_dir,
                                                        name + ".log"), output)
 
-    # -- the wall clock -----------------------------------------------------
+    # -- 挂钟超时 ----------------------------------------------------------
 
     def test_a_hanging_probe_is_bounded_and_its_tree_is_reaped(self):
-        """The probe sleeps for ten minutes; --timeout has to end it."""
+        """探针要睡十分钟；必须由 --timeout 结束它。"""
         scenario = self.scenario("hang")
         name = scenario.add("hang", TREE_PROBE % (ORPHAN_SECONDS, HANG_SECONDS))
         pid_file = scenario.pid_file("hang")
@@ -659,9 +655,8 @@ class RunnerContractTests(unittest.TestCase):
                             "the timed-out suite's grandchild %d survived; "
                             "tree cleanup did not happen" % grand)
         else:
-            # The runner falls back to killing the direct child here, so the
-            # descendant check cannot be made on this host. Say so loudly
-            # instead of turning a refused kill into a green check.
+            # 宿主拒绝树杀时 runner 退回只杀直接子进程，本机无法检查后代进程。
+            # 必须打印说明，不能把被拒绝的杀进程当作通过。
             print("  [NOTE] %s; only the direct child is checked here" % why,
                   flush=True)
         try:
@@ -672,13 +667,11 @@ class RunnerContractTests(unittest.TestCase):
                 terminate_pid(grand)
 
     def test_a_broken_runner_is_abandoned_boundedly_and_leaves_nothing(self):
-        """The harness must clean up without the runner's cooperation.
+        """测试框架必须在 runner 不配合时独立完成清理。
 
-        The copied runner is regressed so its own wall clock never fires: the
-        probe sleeps for ten minutes and nothing inside run_all.py will stop
-        it. Only the harness's own bound can end the run, and it has to take
-        the probe and its grandchild with it - otherwise the failure path of
-        this very suite is what leaks processes.
+        副本被改成挂钟永不触发，探针睡十分钟，只有测试框架自己的上界能结束
+        运行。结束时必须连探针和孙进程一起收掉，否则泄漏进程的正是本套件的
+        失败路径。
         """
         scenario = self.scenario("broken")
         scenario.break_timeout()
@@ -702,7 +695,7 @@ class RunnerContractTests(unittest.TestCase):
                         "the grandchild %d outlived the harness timeout"
                         % pids["child"])
 
-    # -- serial and parallel agree -----------------------------------------
+    # -- 串行与并行结果一致 ------------------------------------------------
 
     def test_jobs_1_and_4_agree_on_the_pass_fail_set(self):
         scenario = self.scenario("jobsagree")
@@ -723,7 +716,7 @@ class RunnerContractTests(unittest.TestCase):
         self.assertEqual(parallel_code, 1, parallel)
         self.assertIn("2 passed, 2 failed", serial)
         self.assertIn("2 passed, 2 failed", parallel)
-        # Completion order is not fixed under --jobs > 1, so compare the sets.
+        # --jobs 大于 1 时完成顺序不固定，因此比较集合。
         self.assertEqual(_failed_set(serial), _failed_set(parallel),
                          "serial and parallel disagreed:\n%s\n%s"
                          % (serial, parallel))

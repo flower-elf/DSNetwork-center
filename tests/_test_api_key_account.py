@@ -108,7 +108,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(account.can_checkin())
         self.assertFalse(account.can_report_activity())
         self.assertIn("API key", account.checkin().get("error", ""))
-        self.assertIn("API key", account.report_activity().get("error", ""))
+        self.assertIn("API key", T.report_activity(account).get("error", ""))
 
     def test_growth_summary_returns_empty_without_network(self):
         account = api_key_account()

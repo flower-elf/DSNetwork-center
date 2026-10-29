@@ -1,24 +1,4 @@
-"""Adding an API Key must never retire a key the user did not remove.
-
-The panel saves by submitting its whole in-memory key list. Two things made
-that lose keys:
-
-  * the save replaced the stored list, so any row the submission did not carry
-    was soft-deleted. The panel's list can be stale or incomplete - a second
-    browser tab, a save that raced the post-save reload, a reload that failed -
-    and then "add a key" silently retired a key nobody removed;
-  * a field the submission omitted (realm / enabled / name) was reset instead
-    of kept, which wiped a key's exit binding the same way the older `models`
-    bug (issue #92) wiped its model limits.
-
-The fix is an explicit-delete upsert: the panel names the ids it removed in
-`deleted_api_key_ids`, the server retires exactly those and leaves every other
-stored key alone. An older client that sends no such field keeps the old
-replace-by-omission contract, so nothing about it changes.
-
-No network access required.
-
-    python tests/_test_api_key_save_merge.py
+"""测 API Key 整表保存的合并契约：只停用 deleted_api_key_ids 点名的 key，提交中省略的字段沿用原值。运行 python tests/_test_api_key_save_merge.py，无需网络。
 """
 import os
 import sys
@@ -32,7 +12,7 @@ import wb_settings as S
 
 
 class FakeRequest(object):
-    """Just enough of the handler for the pieces under test."""
+    """保存路径的最小 Handler 桩。"""
 
     _handle_settings_save = proxy.Handler._handle_settings_save
 
@@ -73,10 +53,10 @@ class KeySaveMergeTests(unittest.TestCase):
     def _all(self):
         return {e["id"]: e for e in S.api_keys(self.dir, include_deleted=True)}
 
-    # --- storage contract -------------------------------------------------
+    # 存储契约
 
     def test_replace_mode_retires_an_omitted_key(self):
-        """No delete list: the old contract still retires by omission."""
+        """不带删除列表时沿用旧契约：提交中缺失的 key 会被停用。"""
         S.set_api_keys(self.dir, [
             {"id": "k1", "name": "a", "key": "key-aaaa1111", "realm": "intl"},
             {"id": "k2", "name": "b", "key": "key-bbbb2222", "realm": "cn"},
@@ -89,7 +69,7 @@ class KeySaveMergeTests(unittest.TestCase):
         self.assertEqual(self._all()["k2"]["key"], "")
 
     def test_upsert_mode_keeps_an_omitted_key(self):
-        """A delete list turns the save into an upsert: omission is not deletion."""
+        """带删除列表时保存变为 upsert：提交中缺失不等于删除。"""
         S.set_api_keys(self.dir, [
             {"id": "k1", "name": "a", "key": "key-aaaa1111", "realm": "intl"},
             {"id": "k2", "name": "b", "key": "key-bbbb2222", "realm": "cn"},
@@ -114,11 +94,7 @@ class KeySaveMergeTests(unittest.TestCase):
         self.assertNotEqual(self._all()["k2"]["deleted_at"], "")
 
     def test_upsert_mode_does_not_duplicate_a_resubmitted_secret(self):
-        """The race: the same key resubmitted under a fresh id.
-
-        The panel saved it, then added another key before the post-save reload
-        landed, so it submitted the first key again with an empty id. One live
-        row with that secret must remain, and no phantom retired duplicate.
+        """竞态场景：同一 secret 带着空 id 被重新提交。面板存完第一把 key 后，在保存后的重载完成前又添加了一把，第一把因此再次进入提交；该 secret 必须只留一行存活，不产生停用的重复行。
         """
         S.set_api_keys(self.dir, [
             {"id": "old1", "name": "第一把", "key": "key-first-1111"},
@@ -133,7 +109,7 @@ class KeySaveMergeTests(unittest.TestCase):
         secrets = sorted(e["key"] for e in live)
         self.assertEqual(secrets, ["key-first-1111", "key-second-2222"])
 
-    # --- handler contract -------------------------------------------------
+    # Handler 契约
 
     def test_handler_preserves_realm_enabled_and_name_when_omitted(self):
         S.set_api_keys(self.dir, [
@@ -142,8 +118,7 @@ class KeySaveMergeTests(unittest.TestCase):
             {"id": "k2", "name": "国内停用", "key": "key-cn-2222",
              "realm": "cn", "models": [], "enabled": False},
         ])
-        # An older client that knows only id/name/key/enabled - and here omits
-        # even the name on the first row.
+        # 旧看板只认识 id/name/key/enabled，这里连第一行的 name 也省略。
         self._save({"api_keys": [
             {"id": "k1", "key": "", "enabled": True},
             {"id": "k2", "name": "国内停用", "key": "", "enabled": True},
@@ -154,7 +129,7 @@ class KeySaveMergeTests(unittest.TestCase):
         self.assertEqual(live["k1"]["realm"], "intl")
         self.assertEqual(live["k1"]["models"], ["deepseek/*"])
         self.assertEqual(live["k2"]["realm"], "cn")
-        # enabled was sent explicitly as true here, so it is honoured.
+        # 这里显式提交了 enabled 为 true，因此按提交值生效。
         self.assertEqual(live["k2"]["enabled"], True)
 
     def test_handler_keeps_concurrency_limit_when_omitted_or_validates_it(self):
@@ -193,14 +168,13 @@ class KeySaveMergeTests(unittest.TestCase):
         self.assertEqual(live["k2"]["realm"], "cn")
 
     def test_handler_end_to_end_two_quick_adds_keep_both_keys(self):
-        """The reported flow: add a key, save, add another, save."""
-        # First save: the panel's only row is the brand-new key.
+        """复现上报的操作流：加一把 key 保存，再加一把保存。"""
+        # 第一次保存：面板里只有这把新 key。
         self._save({"api_keys": [
             {"id": "", "name": "第一把", "realm": "intl", "models": [],
              "enabled": True, "key": "key-first-1111"},
         ], "deleted_api_key_ids": []})
-        # Second save races the reload: the first key is still id-less locally,
-        # so it is submitted again alongside the second.
+        # 第二次保存与重载竞态：第一把 key 本地仍无 id，于是与第二把一起再次提交。
         self._save({"api_keys": [
             {"id": "", "name": "第一把", "realm": "intl", "models": [],
              "enabled": True, "key": "key-first-1111"},

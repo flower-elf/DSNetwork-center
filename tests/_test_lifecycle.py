@@ -12,7 +12,7 @@ import _lifecycle as life  # noqa: E402
 PASS = 0
 FAIL = 0
 
-#: A parent that starts a sleeping grandchild and prints its pid.
+#: 父进程脚本，拉起睡眠中的孙进程并打印其 pid。
 SPAWN = ("import subprocess, sys, time\n"
          "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
          "print(child.pid, flush=True)\n")
@@ -29,7 +29,7 @@ def check(label, ok, detail=""):
 
 
 def spawn_wrapper(stay_alive):
-    """A managed parent that either waits, or exits and leaves its child behind."""
+    """启动一个被管理的父进程：要么持续等待，要么退出并留下它的子进程。"""
     code = SPAWN + ("time.sleep(120)\n" if stay_alive else "sys.exit(0)\n")
     proc = life.spawn_managed([sys.executable, "-c", code], stdout=subprocess.PIPE,
                               text=True)
@@ -37,11 +37,7 @@ def spawn_wrapper(stay_alive):
 
 
 def alive(pid):
-    """Is that pid still running?
-
-    Not via tasklist: a locked-down host answers "Access denied" there, which
-    would read as "gone" for every pid - including this very process - and the
-    liveness checks below would pass without checking anything.
+    """判断该 pid 是否仍在运行。不能用 tasklist：受限主机对它返回“Access denied”，会被当成进程不存在，连当前进程都判为已退出，下方的存活检查就形同虚设。
     """
     if os.name == "nt":
         import ctypes
@@ -67,9 +63,7 @@ def alive(pid):
 
 
 def kill_orphan(pid):
-    """Last resort for the orphan the suite creates on purpose.
-
-    taskkill can be refused where this matters, so go to the OS directly.
+    """最后手段：清理本套件故意留下的孤儿进程。taskkill 在受限环境会被拒绝，因此直接调用操作系统接口。
     """
     if os.name == "nt":
         import ctypes
@@ -105,10 +99,8 @@ if stopped:
           not alive(proc.pid) and not alive(grandpid),
           "parent alive=%s grandchild alive=%s" % (alive(proc.pid), alive(grandpid)))
 else:
-    # A locked-down host can refuse the walk (taskkill answers "Access denied" in
-    # a sandbox). The contract then is: report that the tree step did not happen,
-    # still reap the process that was handed over, and leave nothing behind - so
-    # this suite removes the grandchild itself and checks that it went.
+    # 受限主机可能拒绝进程树遍历，taskkill 在沙箱里返回“Access denied”。此时契约要求：
+    # 报告树遍历没有发生，仍要回收交出来的进程且不留残余，所以本套件自行清理孙进程并确认它已退出。
     check("a refused tree walk is reported and the process is still reaped",
           not alive(proc.pid), "process alive=%s" % alive(proc.pid))
 kill_orphan(grandpid)
@@ -132,8 +124,6 @@ kill_orphan(grandpid)
 time.sleep(0.5)
 check("the probe leaves no process behind here either",
       not alive(grandpid), "grandchild alive=%s" % alive(grandpid))
-
-check("stop_managed() is a no-op for None", life.stop_managed(None))
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

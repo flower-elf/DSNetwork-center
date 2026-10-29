@@ -6,20 +6,12 @@ import { fmtCredit, realmLabel } from '../core/format.js';
 import { toast } from '../ui/toast.js';
 import { confirmDialog } from '../ui/dialog.js';
 import { pageHeader, notice, emptyState, loadErrorPage, loadErrorInline, busyClick } from '../ui/widgets.js';
-import { accountHeader, accountOptions, buildChatBody, hasCreditRecord, sessionCredit, usageParts } from './playground/logic.js';
+import { accountHeader, accountOptions, buildChatBody, canSend, hasCreditRecord, parseJson, sessionCredit, usageParts, withAnswer } from './playground/logic.js';
 import { streamChat } from './playground/stream.js';
 
 // 测试台页：用面板会话直接调试 /v1/chat/completions，请求会真实消耗账号积分；流式分片累积在 playground/logic.js，SSE 解析在 playground/stream.js。
 
 let seq = 0;
-
-function parseJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
 
 export function mount(host, ctx) {
   const realm = getState().viewRealm;
@@ -105,10 +97,6 @@ export function mount(host, ctx) {
     await Promise.all([loadModels(), loadAccounts()]);
   }
 
-  function withAnswer(index, answer, elapsedMs) {
-    return state.messages.map((m, i) => (i === index ? { ...m, ...answer, elapsedMs } : m));
-  }
-
   async function send() {
     const text = state.input.trim();
     if (!text || state.streaming || !state.model) return;
@@ -131,18 +119,18 @@ export function mount(host, ctx) {
         body,
         signal: controller.signal,
         onUpdate: (partial) => {
-          state.messages = withAnswer(index, partial, Date.now() - startedAt);
+          state.messages = withAnswer(state.messages, index, partial, Date.now() - startedAt);
           scheduleDraw();
         },
       });
-      state.messages = withAnswer(index, { ...answer, streaming: false }, Date.now() - startedAt);
+      state.messages = withAnswer(state.messages, index, { ...answer, streaming: false }, Date.now() - startedAt);
       if (answer.stopped) {
         const partial = !!(answer.content || answer.reasoning);
         toast.info('已终止本次回答', partial ? '已经收到的内容保留在对话里' : '上游还没有返回内容');
       }
     } catch (err) {
       const status = err && err.status ? err.status : 0;
-      state.messages = withAnswer(index, { error: err.message || String(err), streaming: false }, Date.now() - startedAt);
+      state.messages = withAnswer(state.messages, index, { error: err.message || String(err), streaming: false }, Date.now() - startedAt);
       if (status === 401 || status === 403) await probeSession();
     } finally {
       state.streaming = false;
@@ -221,7 +209,7 @@ export function mount(host, ctx) {
   function composer() {
     const models = state.models || [];
     const creditRecorded = hasCreditRecord(state.messages);
-    const disabled = !state.model || (!state.streaming && !state.input.trim());
+    const disabled = !canSend({ model: state.model, text: state.input, streaming: state.streaming });
     return html`
       <form class="pg-composer" @submit=${(e) => { e.preventDefault(); send(); }}>
         <div class="pg-composer-fields">
@@ -315,7 +303,7 @@ export function mount(host, ctx) {
       el.style.height = Math.min(132, Math.max(28, el.scrollHeight)) + 'px';
     }
     const send = sendRef.value;
-    if (send) send.disabled = !state.model || (!state.streaming && !state.input.trim());
+    if (send) send.disabled = !canSend({ model: state.model, text: state.input, streaming: state.streaming });
   }
 
   function draw() {

@@ -1,9 +1,9 @@
-"""时间序列的分钟环：step=60 的窗口（span<=6h）不再整段扫描。
+"""时间序列的分钟环：step=60 的窗口（span<=6h）由分钟环作答。
 
 usage_timeseries() 的桶宽由窗口跨度决定：span<=6h 给 step=60（自定义区间，
 面板 datetime-local 给的起点就是整分钟）。日桶/小时桶都锚在本地午夜上，
-答不了这种任意分钟格点的窗口，于是这一档一直退回整段扫描（真机 6h 窗口
-881ms 级，每次 TTL 过期都要重扫一遍）。这一套钉住补上的「最近 6 小时分钟环」：
+答不了这种任意分钟格点的窗口，这些窗口只能整段扫描（真机 6h 窗口
+881ms 级，每次 TTL 过期都要重扫一遍）。这一套断言新加的「最近 6 小时分钟环」：
 
   * 切分：每行折进「它 at 所属的 epoch 分钟」，与日/小时桶同一 realm 过滤、
     同一折叠口径（completed 计令牌、client_aborted 不计 credit）；
@@ -11,17 +11,16 @@ usage_timeseries() 的桶宽由窗口跨度决定：span<=6h 给 step=60（自�
     不建也不留；更早的窗口一律退回整段扫描（正确性优先）；
   * 等价：step=60 的窗口在环可用时与整段扫描逐字节一致（跨午夜、跨小时、
     空窗口、realm 过滤、显式 bucket_seconds=60 与自动选择两条路径、起点是
-    int 或 float 都钉住）；环不可用的窗口（起点不在分钟格点、超出 6h、
+    int 或 float 两种起点类型都覆盖）；环不可用的窗口（起点不在分钟格点、超出 6h、
     hi < max_at、旧 checkpoint 的完整线之前）退回扫描，结果同样一致；
   * checkpoint：环随 series 状态落盘（紧凑的位置数组），新进程采用后窗口与
     冷折逐字节一致；坏环（形状/类型/乱序）整份拒绝并退回扫描；旧版
     checkpoint（没有 minutes 键）按「环只从采用点之后完整」处理；
   * 计数桩：环服务的窗口一次都不碰 _usage_timeseries_scan（省下的工作真实
     存在），退回扫描的窗口必须碰它；
-  * 开关：WB_USAGE_DAY_BUCKETS=0 时不折环、窗口与改动前逐字节一致。
+  * 开关：WB_USAGE_DAY_BUCKETS=0 时不折环，窗口结果与整段扫描逐字节一致。
 
-No network: the usage log, the pricing table and the settings file are
-synthesised in a temp directory.
+不联网：usage 日志、计价表与 settings 文件在临时目录里现造。
 """
 import io
 import json
@@ -52,6 +51,8 @@ import time as _time
 _time.time = lambda: FROZEN
 
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_cache
 import wb_pricing
 
 P.ACCOUNTS_DIR = ACCOUNTS_DIR
@@ -61,7 +62,7 @@ wb_pricing.set_settings_dir(ACCOUNTS_DIR)
 USAGE_LOG = P.USAGE_LOG
 # checkpoint 在 v4 里一类一份文件（T8 的拆分）：这里给出合并视图与按类读写，
 # 用例里 data["snapshot"] / data["series"] / data["analytics"] 的写法不用改。
-KIND_FILES = {kind: P._usage_cache_kind_path(kind) for kind in P._USAGE_CACHE_KINDS}
+KIND_FILES = {kind: U._usage_cache_kind_path(kind) for kind in U._USAGE_CACHE_KINDS}
 
 
 def cache_files():
@@ -72,7 +73,7 @@ def clear_cache_files():
     for path in KIND_FILES.values():
         if os.path.exists(path):
             os.unlink(path)
-P._usage["started"] = FROZEN
+U._usage["started"] = FROZEN
 
 PASS = FAIL = 0
 
@@ -219,7 +220,7 @@ def cache_env(enabled=None, min_bytes=None, min_seconds=None, days=None):
 
 
 def cache_env_off():
-    """改动前的口径：checkpoint 关掉、日桶关掉（= 逐行扫描 + 全量冷折）。"""
+    """对照口径：checkpoint 关掉、日桶关掉（= 逐行扫描 + 全量冷折）。"""
     cache_env(enabled=0, min_bytes=0, min_seconds=0, days=0)
 
 
@@ -239,23 +240,23 @@ def cache_env_force():
 
 def restart():
     """清掉所有状态、TTL 缓存与「已读过 checkpoint」的记忆，模拟进程重启。"""
-    P._usage_snap_state.clear()
-    P._byacct_state.update({"buckets": None, "offset": 0, "key": None, "tail": b""})
-    P._analytics_state.clear()
-    P._series_state.clear()
-    P._snap_cache.clear()
-    P._byacct_cache.update({"at": 0.0, "data": None})
-    P._analytics_cache.clear()
-    P._series_cache.clear()
-    P._usage_cache_forget()
-    P._usage_cache_progress.clear()
-    P._usage_cache_checkpointed.clear()
-    P._usage_cache_last_attempt = time.time()
-    P._usage_cache_digest_memo.clear()
+    U._usage_snap_state.clear()
+    U._byacct_state.update({"buckets": None, "offset": 0, "key": None, "tail": b""})
+    U._analytics_state.clear()
+    U._series_state.clear()
+    U._snap_cache.clear()
+    U._byacct_cache.update({"at": 0.0, "data": None})
+    U._analytics_cache.clear()
+    U._series_cache.clear()
+    U._usage_cache_forget()
+    U._usage_cache_progress.clear()
+    U._usage_cache_checkpointed.clear()
+    wb_usage_cache._usage_cache_last_attempt = time.time()
+    U._usage_cache_digest_memo.clear()
 
 
 def window(since, until=None, bucket=None, realm="all", ttl=0):
-    return P.usage_timeseries(realm=realm, range="custom", since=since,
+    return U.usage_timeseries(realm=realm, range="custom", since=since,
                               until=until, bucket_seconds=bucket, ttl=ttl)
 
 
@@ -271,7 +272,7 @@ def scan_ref(since, until=None, bucket=None, realm="all"):
 
 def series_state():
     """realm=all 的窗口折出来的那份状态（状态键是 None）。"""
-    return P._series_state.get(None)
+    return U._series_state.get(None)
 
 
 def ring(state):
@@ -283,17 +284,17 @@ class ScanCounter(object):
 
     def __init__(self):
         self.calls = 0
-        self.original = P._usage_timeseries_scan
+        self.original = U._usage_timeseries_scan
 
     def __enter__(self):
         def counting(*args, **kwargs):
             self.calls += 1
             return self.original(*args, **kwargs)
-        P._usage_timeseries_scan = counting
+        U._usage_timeseries_scan = counting
         return self
 
     def __exit__(self, *exc):
-        P._usage_timeseries_scan = self.original
+        U._usage_timeseries_scan = self.original
         return False
 
 
@@ -307,13 +308,14 @@ FROZEN = __FROZEN__
 _t.time = lambda: FROZEN
 sys.path.insert(0, __ROOT__)
 import wb_proxy as P
+import wb_usage as U
 import wb_pricing
 wb_pricing.set_data_dir(P.USAGE_DIR)
 wb_pricing.set_settings_dir(P.ACCOUNTS_DIR)
 
 
 def win(since, until=None, bucket=None, realm="all"):
-    return P.usage_timeseries(realm=realm, range="custom", since=since,
+    return U.usage_timeseries(realm=realm, range="custom", since=since,
                               until=until, bucket_seconds=bucket, ttl=0)
 
 
@@ -321,11 +323,11 @@ out = {"main": win(__MAIN_LO__, __MAIN_HI__),
        "edge": win(__EDGE_LO__, __EDGE_HI__),
        "now": win(__NOW_LO__),
        "cn": win(__MAIN_LO__, __MAIN_HI__, realm="cn")}
-state = P._series_state.get(None) or {}
+state = U._series_state.get(None) or {}
 out["ring_keys"] = sorted(state.get("minutes") or {})
 out["minutes_from"] = state.get("minutes_from")
 with open(os.environ["WB_CHILD_OUT"], "w", encoding="utf-8") as fh:
-    json.dump({"checkpointed": P._usage_cache_checkpointed, "results": out}, fh,
+    json.dump({"checkpointed": U._usage_cache_checkpointed, "results": out}, fh,
               ensure_ascii=False)
 print("child ok")
 '''
@@ -363,7 +365,7 @@ def run_child():
 def cache_data():
     """五个 kind 文件的合并视图：{kind: entries}（缺失/读不出的当空表）。"""
     merged = {}
-    for kind in P._USAGE_CACHE_KINDS:
+    for kind in U._USAGE_CACHE_KINDS:
         try:
             with io.open(KIND_FILES[kind], encoding="utf-8") as fh:
                 data = json.load(fh)
@@ -376,11 +378,11 @@ def cache_data():
 
 def save_cache(data):
     """把合并视图写回 kind 文件（保持 v4 的包装形状；空表不写）。"""
-    for kind in P._USAGE_CACHE_KINDS:
+    for kind in U._USAGE_CACHE_KINDS:
         entries = data.get(kind) or []
         if not entries:
             continue
-        payload = {"schema": P._USAGE_CACHE_SCHEMA, "kind": kind,
+        payload = {"schema": U._USAGE_CACHE_SCHEMA, "kind": kind,
                    "written_at": time.time(), "entries": entries}
         io.open(KIND_FILES[kind], "w", encoding="utf-8", newline="\n").write(
             json.dumps(payload, ensure_ascii=False))
@@ -443,8 +445,8 @@ check("环的键是 epoch 分钟整数，at == 键*60",
 check("环里没有超过 max_at 的桶",
       all(k * 60 <= state["max_at"] for k in minutes), max(minutes))
 check("保留线：最早的桶不早于 max_at - 6h",
-      min(minutes) * 60 >= state["max_at"] - P._SERIES_MINUTE_WINDOW,
-      (min(minutes) * 60, state["max_at"] - P._SERIES_MINUTE_WINDOW))
+      min(minutes) * 60 >= state["max_at"] - U._SERIES_MINUTE_WINDOW,
+      (min(minutes) * 60, state["max_at"] - U._SERIES_MINUTE_WINDOW))
 check("前天/昨天的行不建桶（环只留最近 6 小时）",
       (DAY1 + 3600) // 60 not in minutes and (DAY2 // 60) not in minutes)
 check("环的桶数与密集区行数相符（每 120 秒一行 => 约一半分钟被占）",
@@ -455,7 +457,7 @@ check("边界行（max_at - 6h 整点）在环里",
       EDGE_AT // 60 in minutes, sorted(minutes)[:2])
 # 折叠途中的上限：环不会无限长（冷折时先涨后剪）。
 check("折叠途中的环有上限（<= 上限值）",
-      len(minutes) <= P._SERIES_MINUTE_RING_CAP, len(minutes))
+      len(minutes) <= U._SERIES_MINUTE_RING_CAP, len(minutes))
 
 print()
 print("[2] 等价：step=60 的窗口在环可用时与整段扫描逐字节一致")
@@ -481,14 +483,14 @@ for label, kwargs in cases:
           got == ref and counter.calls == 0,
           (first_diff(ref, got), counter.calls))
 # 起点是 int / float 两条：公开入口把 since 归一成 float（_epoch_or_none），
-# 所以 int 那条要直接调切片与扫描来钉（整段扫描的桶 at 是 lo + k*60，类型
-# 跟着 lo 走，切片必须对齐）。
+# 所以 int 那条要直接调切片与扫描来断言（整段扫描的桶 at 是 lo + k*60，类型
+# 跟着 lo 走，切片的类型必须一致）。
 cache_env_nowrite()
 restart()
 window(MAIN_LO, MAIN_HI)
 state = series_state()
-int_slice = P._series_slice(state, None, int(MAIN_LO), int(MAIN_HI), 60, TODAY_KEY)
-int_scan = P._usage_timeseries_scan(None, int(MAIN_LO), int(MAIN_HI), 60)
+int_slice = U._series_slice(state, None, int(MAIN_LO), int(MAIN_HI), 60, TODAY_KEY)
+int_scan = U._usage_timeseries_scan(None, int(MAIN_LO), int(MAIN_HI), 60)
 check("int 起点：切片服务，且与整段扫描逐字节一致",
       int_slice is not None and canon(int_slice) == canon(int_scan),
       first_diff(canon(int_scan), canon(int_slice or {})))
@@ -547,23 +549,23 @@ for label, kwargs in fallback:
     check(label + "：退回扫描、结果一致（扫描 >=1 次）",
           got == ref and counter.calls >= 1,
           (first_diff(ref, got), counter.calls))
-# 直接用 _series_slice 钉住拒绝条件（不看输出，看它自己返回 None）。
+# 直接用 _series_slice 断言拒绝条件（不看输出，看它自己返回 None）。
 cache_env_nowrite()
 restart()
 window(MAIN_LO, MAIN_HI)
 state = series_state()
 check("_series_slice 对非格点起点返回 None",
-      P._series_slice(state, None, MAIN_LO + 30, MAIN_HI, 60, TODAY_KEY) is None)
+      U._series_slice(state, None, MAIN_LO + 30, MAIN_HI, 60, TODAY_KEY) is None)
 check("_series_slice 对超出保留线的起点返回 None",
-      P._series_slice(state, None, EDGE_LO - 60, EDGE_HI, 60, TODAY_KEY) is None)
+      U._series_slice(state, None, EDGE_LO - 60, EDGE_HI, 60, TODAY_KEY) is None)
 check("_series_slice 对 hi < max_at 返回 None",
-      P._series_slice(state, None, MAIN_LO, MAIN_HI - 600, 60, TODAY_KEY) is None)
+      U._series_slice(state, None, MAIN_LO, MAIN_HI - 600, 60, TODAY_KEY) is None)
 check("_series_slice 对格点窗口返回切片",
-      P._series_slice(state, None, MAIN_LO, MAIN_HI, 60, TODAY_KEY) is not None)
+      U._series_slice(state, None, MAIN_LO, MAIN_HI, 60, TODAY_KEY) is not None)
 check("_series_minute_grid_ok 只放行 60 的整数倍",
-      P._series_minute_grid_ok(MAIN_LO) and P._series_minute_grid_ok(float(MAIN_LO))
-      and not P._series_minute_grid_ok(MAIN_LO + 30)
-      and not P._series_minute_grid_ok(MAIN_LO + 0.5))
+      U._series_minute_grid_ok(MAIN_LO) and U._series_minute_grid_ok(float(MAIN_LO))
+      and not U._series_minute_grid_ok(MAIN_LO + 30)
+      and not U._series_minute_grid_ok(MAIN_LO + 0.5))
 
 print()
 print("[4] 迟写行：保留线以内的补写折进环，线以外的丢掉")
@@ -608,7 +610,7 @@ entry = series_entry(stored, None)
 minutes_rows = entry.get("minutes")
 check("series 条目带 minutes（升序的位置数组）",
       isinstance(minutes_rows, list) and len(minutes_rows) > 10
-      and all(isinstance(r, list) and len(r) == 1 + len(P._SERIES_MINUTE_FIELDS)
+      and all(isinstance(r, list) and len(r) == 1 + len(U._SERIES_MINUTE_FIELDS)
               for r in minutes_rows),
       (type(minutes_rows).__name__,
        len(minutes_rows) if isinstance(minutes_rows, list) else None))
@@ -629,7 +631,7 @@ full_bytes = len(json.dumps(full_rows, separators=(",", ":")))
 check("满环的落盘体积 <= 16KB（体积预算）", full_bytes <= 16000, full_bytes)
 check("落盘体积比字典形状小得多（同一批桶）",
       full_bytes < len(json.dumps([dict(zip(
-          ("at",) + P._SERIES_MINUTE_FIELDS,
+          ("at",) + U._SERIES_MINUTE_FIELDS,
           [k * 60, 14, 0, 840, 420, 140, 70, 1470, 0.35]))
           for k in range(30000000, 30000000 + 361)],
           separators=(",", ":"))))
@@ -640,8 +642,8 @@ cache_env_read()
 restart()
 LOADED_MAIN = canon(window(MAIN_LO, MAIN_HI))
 check("重启（本进程，采用 checkpoint）后窗口与冷折逐字节一致",
-      LOADED_MAIN == BASE_MAIN and "series" in P._usage_cache_checkpointed,
-      (first_diff(BASE_MAIN, LOADED_MAIN), sorted(P._usage_cache_checkpointed)))
+      LOADED_MAIN == BASE_MAIN and "series" in U._usage_cache_checkpointed,
+      (first_diff(BASE_MAIN, LOADED_MAIN), sorted(U._usage_cache_checkpointed)))
 child, adopted = run_child()
 check("新进程加载到了 checkpoint（含 series）",
       "series" in adopted, sorted(adopted))

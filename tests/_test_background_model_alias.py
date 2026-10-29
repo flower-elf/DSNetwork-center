@@ -1,22 +1,12 @@
-"""Background-model redirection for desktop clients' off-thread traffic.
+"""桌面客户端的模型选择只作用于主聊天线程，后台任务（记忆生成、氛围建议、临时生成、自动化等）由内置的 model-routing-config（codex-apps/protocol/src/model-routing-config.ts）发往写死的模型；这些请求与正常流量共用同一个 key，UI 里即使选了免费模型也照样消耗付费额度。
 
-A desktop client's model picker only governs the MAIN chat thread. Its built-in
-"model routing config" (codex-apps/protocol/src/model-routing-config.ts) sends
-background work - memory generation, ambient suggestions, ephemeral
-generation, automations - to its own hard-coded models. Those requests arrive
-on this gateway under the same key as normal traffic, so on a shared key they
-keep burning paid credits even when a free model is selected in the UI.
-
-``WB_BACKGROUND_MODEL_NAMES`` (comma list, default covers the known set) marks
-the models to intercept; ``WB_BACKGROUND_MODEL_TARGET`` (default
-``deepseek-v4.1-flash``) is the free replacement. The rewrite happens at the
-single POST dispatch point, before any account is chosen, so both OpenAI-shaped
-routes and the Anthropic-shaped one are covered.
-
-Run with: python _test_background_model_alias.py
-No upstream credentials or outbound network are used.
+``WB_BACKGROUND_MODEL_NAMES``（逗号分隔，默认值覆盖已知模型）标记要拦截的模型，``WB_BACKGROUND_MODEL_TARGET``（默认 ``deepseek-v4.1-flash``）是免费替换目标。改写发生在唯一的 POST 分发点、选账号之前，OpenAI 形和 Anthropic 形路由都覆盖。
+Run with: python tests/run_all.py _test_background_model_alias
+不使用上游凭据，也不访问外网。
 """
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -30,15 +20,7 @@ import wb_proxy
 
 
 class BackgroundModelAliasTests(unittest.TestCase):
-    """The rewrite must be narrow: listed models only, everything else intact."""
-
-    def setUp(self):
-        self._saved_names = wb_proxy.BACKGROUND_MODEL_NAMES
-        self._saved_target = wb_proxy.BACKGROUND_MODEL_TARGET
-
-    def tearDown(self):
-        wb_proxy.BACKGROUND_MODEL_NAMES = self._saved_names
-        wb_proxy.BACKGROUND_MODEL_TARGET = self._saved_target
+    """改写必须收窄：只动列出的模型，其他字段原样保留。"""
 
     def _apply(self, payload):
         wb_proxy._apply_background_model_alias(payload)
@@ -64,10 +46,9 @@ class BackgroundModelAliasTests(unittest.TestCase):
         self.assertEqual(self._apply({"model": 42}), {"model": 42})
 
     def test_non_dict_payload_is_ignored(self):
-        # The dispatch point forwards whatever it parsed; it must never raise.
-        wb_proxy._apply_background_model_alias(None)
-        wb_proxy._apply_background_model_alias("not-a-body")
-        wb_proxy._apply_background_model_alias(["also", "not", "a-body"])
+        """分发点会转发任何解析结果，这里不能抛异常，也不改写负载。"""
+        for payload in (None, "not-a-body", ["also", "not", "a-body"]):
+            self.assertIsNone(wb_proxy._apply_background_model_alias(payload))
 
     def test_other_body_fields_survive_the_rewrite(self):
         body = self._apply({"model": "gpt-5.6-terra", "stream": True,
@@ -79,19 +60,33 @@ class BackgroundModelAliasTests(unittest.TestCase):
         self.assertEqual(body["messages"], [{"role": "user", "content": "hi"}])
 
     def test_names_and_target_are_env_overridable(self):
-        # The defaults are module constants, so an operator can also flip them
-        # at runtime; the env parsing is covered by a fresh tuple here.
-        names = tuple(
-            m.strip().lower()
-            for m in "Model-A, model-b".split(",")
-            if m.strip()
+        # 默认名单与目标在启动时从环境变量解析；子进程重新导入模块，验证自定义
+        # 名单与目标模型生效。
+        code = (
+            "import json, wb_proxy\n"
+            "body = {'model': 'MODEL-B'}\n"
+            "wb_proxy._apply_background_model_alias(body)\n"
+            "untouched = {'model': 'gpt-5.6-terra'}\n"
+            "wb_proxy._apply_background_model_alias(untouched)\n"
+            "print(json.dumps({'names': list(wb_proxy.BACKGROUND_MODEL_NAMES),\n"
+            "                  'target': wb_proxy.BACKGROUND_MODEL_TARGET,\n"
+            "                  'rewritten': body['model'],\n"
+            "                  'untouched': untouched['model']}))\n"
         )
-        wb_proxy.BACKGROUND_MODEL_NAMES = names
-        wb_proxy.BACKGROUND_MODEL_TARGET = "some-free-model"
-        body = self._apply({"model": "MODEL-B"})
-        self.assertEqual(body["model"], "some-free-model")
-        untouched = self._apply({"model": "gpt-5.6-terra"})
-        self.assertEqual(untouched["model"], "gpt-5.6-terra")
+        env = dict(os.environ)
+        env["WB_BACKGROUND_MODEL_NAMES"] = "Model-A, model-b"
+        env["WB_BACKGROUND_MODEL_TARGET"] = "some-free-model"
+        app_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app")
+        env["PYTHONPATH"] = os.pathsep.join(
+            [app_dir] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        out = subprocess.run([sys.executable, "-c", code], env=env,
+                             capture_output=True, check=True)
+        data = json.loads(out.stdout.decode("utf-8").strip().splitlines()[-1])
+        self.assertEqual(data["names"], ["model-a", "model-b"])
+        self.assertEqual(data["target"], "some-free-model")
+        self.assertEqual(data["rewritten"], "some-free-model")
+        self.assertEqual(data["untouched"], "gpt-5.6-terra")
 
 
 if __name__ == "__main__":

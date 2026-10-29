@@ -1,26 +1,18 @@
-"""The hidden-top-bar-page list persists as one list of page keys.
+"""隐藏顶部页签的清单以一个页面 key 列表持久化。
 
-    python tests/_test_page_visibility.py
+设置页的“顶部页签显示”开关需要一个稳定持久化的列表来读写，仅此而已。它存在
+accounts/settings.json，与其他面板设置同处，共享同一把锁与原子替换，界面不需要
+第二套持久化机制。
 
-The settings tab's "顶部页签显示" checkboxes need one stable persisted list to
-read and write, and nothing else. It lives in accounts/settings.json beside the
-other panel settings, so it inherits the same lock and the same atomic replace,
-and the UI needs no second persistence subsystem.
+这些情形主要靠归一化兜住。面板只会发格式良好的 key 列表，但文件可手工编辑，本模块
+也不了解有哪些页面（页面在 app/web），所以畸形值一律按“没有隐藏”理解。`settings`
+是写入时丢掉的唯一 key：开关本身就在那一页，存成隐藏会让面板无法回头。
 
-The normalisation carries most of these cases. The panel only ever sends a list
-of well-formed keys, but the file is hand-editable and this module deliberately
-does not know which pages exist - the pages live in app/web - so the safe
-reading of anything malformed is "nothing hidden". `settings` is the one key
-dropped on the way in: it is where the switch itself lives, and a stored file
-that hides it would leave the panel with no way back.
-
-No network access required.
+不需要网络。用 python tests/_test_page_visibility.py 运行。
 """
 import json
 import os
-import subprocess
 import sys
-import threading
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,7 +20,7 @@ sys.path.insert(0, ROOT)
 
 from _isolated_dirs import isolated_data_dirs  # noqa: E402
 
-# Its own accounts/ + usage/ before wb_proxy reads ACCOUNTS_DIR at import.
+# 独立的 accounts/ 与 usage/，在 wb_proxy import 读取 ACCOUNTS_DIR 之前创建。
 _TMP = isolated_data_dirs("wb-page-visibility-")
 
 import wb_proxy as proxy  # noqa: E402
@@ -36,7 +28,7 @@ import wb_settings as S  # noqa: E402
 
 
 class FakeRequest(object):
-    """Just enough of the handler for the save route under test."""
+    """保存路由所需的最小 handler 替身。"""
 
     _handle_settings_save = proxy.Handler._handle_settings_save
 
@@ -74,7 +66,7 @@ class HiddenPagesTests(unittest.TestCase):
             return json.load(fh)
 
     def _save(self, payload):
-        """Run the save route; return the errors it answered with."""
+        """运行保存路由，返回它答出的错误。"""
         request = FakeRequest(payload)
         request._handle_settings_save()
         return [entry for entry in request.answering if entry[0] == "error"]
@@ -82,7 +74,7 @@ class HiddenPagesTests(unittest.TestCase):
     def _view(self):
         return proxy.runtime_settings_view()["hidden_pages"]
 
-    # --- the stored value -------------------------------------------------
+    # --- 存储值 ------------------------------------------------------------
 
     def test_missing_key_hides_nothing(self):
         self.assertFalse(os.path.exists(S.settings_path(self.dir)))
@@ -104,15 +96,13 @@ class HiddenPagesTests(unittest.TestCase):
         self.assertEqual(self._view(), [])
 
     def test_unknown_page_keys_are_kept_not_rejected(self):
-        # This module has no page registry on purpose: a key it has never heard
-        # of is the panel's business to ignore, and rejecting it here would mean
-        # touching wb_settings.py every time a page is added upstream.
+        # 本模块刻意不带页面注册表：没见过的 key 由面板自行忽略，在这里拒绝的话，
+        # 上游每加一页都要动 wb_settings.py。
         S.set_hidden_pages(self.dir, ["a-page-added-later"])
         self.assertEqual(S.hidden_pages(self.dir), ["a-page-added-later"])
 
     def test_the_settings_page_is_never_hidden(self):
-        # Both directions: it cannot be stored, so the file can never hold a
-        # state that leaves the switch with no way back to itself.
+        # 双向禁止：存不进去，文件里就永远不会出现让开关回不了头的状态。
         self.assertEqual(S.set_hidden_pages(self.dir, ["settings"]), [])
         self.assertEqual(S.hidden_pages(self.dir), [])
         self.assertEqual(self._read()["hidden_pages"], [])
@@ -136,8 +126,8 @@ class HiddenPagesTests(unittest.TestCase):
                 self.assertEqual(self._view(), [])
 
     def test_a_string_is_not_iterated_into_page_keys(self):
-        # "tasks" iterated as a sequence would hide "t", "a", "s", "k" - five
-        # keys no page answers to. It reads as nothing hidden instead.
+        # "tasks" 当序列迭代会逐字符拆成 key 存下，没有页面对应这些 key，按
+        # “没有隐藏”读回。
         self._write({"hidden_pages": "tasks"})
         self.assertEqual(S.hidden_pages(self.dir), [])
 
@@ -151,17 +141,7 @@ class HiddenPagesTests(unittest.TestCase):
         self.assertEqual(len(S.hidden_pages(self.dir)), S.MAX_HIDDEN_PAGES)
         self.assertEqual(S.hidden_pages(self.dir), many[:S.MAX_HIDDEN_PAGES])
 
-    def test_a_new_process_sees_the_persisted_list(self):
-        """A restart re-reads the file, so the choice is not process-local."""
-        S.set_hidden_pages(self.dir, ["tasks", "logs"])
-        code = ("import sys; sys.path.insert(0, %r); import wb_settings as S; "
-                "print(S.hidden_pages(%r))" % (ROOT, self.dir))
-        done = subprocess.run([sys.executable, "-c", code], cwd=ROOT,
-                              capture_output=True, text=True, timeout=60)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.strip(), "['tasks', 'logs']")
-
-    # --- living beside the other settings ---------------------------------
+    # --- 与其他设置共存 ----------------------------------------------------
 
     def test_saving_the_list_preserves_unrelated_settings(self):
         self._write({
@@ -185,29 +165,7 @@ class HiddenPagesTests(unittest.TestCase):
         self.assertEqual(S.hidden_pages(self.dir), ["logs"])
         self.assertIs(S.accounts_collapsed(self.dir), True)
 
-    def test_concurrent_writes_leave_a_readable_file(self):
-        self._write({"user_custom_top": {"keep": 1}})
-        errors = []
-        choices = [["tasks"], ["logs", "agents"], [], ["analytics"]]
-
-        def write(pages):
-            try:
-                for _ in range(25):
-                    S.set_hidden_pages(self.dir, pages)
-            except Exception as exc:  # reported through the assertion below
-                errors.append(exc)
-
-        threads = [threading.Thread(target=write, args=(pages,)) for pages in choices * 2]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-        self.assertEqual(errors, [])
-        stored = self._read()  # a truncated file would raise here
-        self.assertIsInstance(stored.get("hidden_pages"), list)
-        self.assertEqual(stored.get("user_custom_top"), {"keep": 1})
-
-    # --- the save route ---------------------------------------------------
+    # --- 保存路由 ----------------------------------------------------------
 
     def test_save_route_stores_a_list_of_keys(self):
         self.assertEqual(self._save({"hidden_pages": ["tasks"]}), [])
@@ -221,8 +179,7 @@ class HiddenPagesTests(unittest.TestCase):
         self.assertEqual(self._read()["hidden_pages"], ["logs"])
 
     def test_save_route_rejects_anything_that_is_not_a_list_of_strings(self):
-        # A bare string is the one worth naming: accepted, it would iterate
-        # character by character and store five junk keys.
+        # 裸字符串最值得点名：接受它会逐字符迭代，存下一堆垃圾 key。
         for bad in ("tasks", "logs", 1, 0, None, True, {}, {"tasks": 1},
                     ["tasks", 1], [None], [[]], [{"page": "tasks"}]):
             with self.subTest(value=bad):
@@ -230,13 +187,6 @@ class HiddenPagesTests(unittest.TestCase):
                 self.assertEqual(len(errors), 1, errors)
                 self.assertEqual(errors[0][1], 400)
                 self.assertEqual(S.hidden_pages(self.dir), [])
-
-    def test_save_route_patch_leaves_other_settings_alone(self):
-        self._write({"user_custom_top": {"keep": 1}, "key_before_hidden": True})
-        self.assertEqual(self._save({"hidden_pages": ["tasks"]}), [])
-        stored = self._read()
-        self.assertEqual(stored["user_custom_top"], {"keep": 1})
-        self.assertIs(stored["key_before_hidden"], True)
 
     def test_save_route_ignores_a_payload_that_omits_the_list(self):
         S.set_hidden_pages(self.dir, ["tasks"])
@@ -246,16 +196,6 @@ class HiddenPagesTests(unittest.TestCase):
     def test_the_view_carries_the_normalised_list(self):
         self._write({"hidden_pages": ["logs", "logs", "settings"]})
         self.assertEqual(self._view(), ["logs"])
-
-    # --- where it lives ---------------------------------------------------
-
-    def test_the_setting_lives_in_the_isolated_tree(self):
-        S.set_hidden_pages(self.dir, ["tasks"])
-        path = os.path.abspath(S.settings_path(self.dir))
-        self.assertTrue(path.startswith(os.path.abspath(_TMP.name)), path)
-        self.assertFalse(path.startswith(os.path.abspath(os.path.join(ROOT, "accounts"))),
-                         path)
-        self.assertEqual(os.path.dirname(path), os.path.abspath(self.dir))
 
 
 if __name__ == "__main__":

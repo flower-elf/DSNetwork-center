@@ -1,14 +1,4 @@
-"""The pricing refresh interval: minutes as the stored unit, the one-time
-migration from the old hours key, and the loop that consumes it.
-
-The setting used to be counted in hours (`pricing_refresh_hours`). Reading
-that number as minutes would turn 6 hours into 6 minutes, so an upgrade has to
-convert it (x60), write the new key and drop the old one - once. These tests
-pin the conversion, the 0-disables contract, the cap, the invalid-value
-fallback, and the refresher's wait arithmetic.
-
-No network: the refresher's fetch is stubbed out, and the loop tests only
-observe how long a cycle takes.
+"""测计价刷新间隔的契约：存储单位是分钟，旧的小时键一次性迁移。迁移按 x60 换算、写入新键并删除旧键，只做一次；还要断言 0 表示停用、上限、非法值回落，以及刷新循环的等待算术。不联网，抓取被替身接管，循环测试只观察一个周期的时长。用 python tests/run_all.py _test_pricing_refresh 运行。
 """
 import json
 import os
@@ -34,7 +24,7 @@ def _write_settings(path, data):
 
 
 class PricingRefreshSettingTests(unittest.TestCase):
-    """Minutes are the unit in storage; a legacy hours value is converted."""
+    """存储单位是分钟，旧的小时值会被换算。"""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="wb-refresh-setting-")
@@ -52,8 +42,7 @@ class PricingRefreshSettingTests(unittest.TestCase):
     def test_the_conversion_does_not_run_again(self):
         _write_settings(self.dir, {"pricing_refresh_hours": 6})
         wb_settings.pricing_refresh_minutes(self.dir)
-        # A stale legacy key - a rolled-back install writing one - must not
-        # resurrect an hours value over the migrated one.
+        # 回滚安装可能写出过期的旧键，它不得把小时值复活到已迁移的新值之上。
         data = _read_settings(self.dir)
         data["pricing_refresh_hours"] = 12
         _write_settings(self.dir, data)
@@ -69,8 +58,8 @@ class PricingRefreshSettingTests(unittest.TestCase):
         self.assertEqual(wb_settings.pricing_refresh_minutes(self.dir), 30.0)
 
     def test_the_old_cap_remeasures_to_a_month_of_minutes(self):
-        # The cap was 720 hours; in the new unit that is 43200 minutes and has
-        # to survive rather than clamp to the same raw number.
+        # 旧上限是 720 小时，新单位下是 43200 分钟，必须原样保留，
+        # 不能按同一个裸数截断。
         _write_settings(self.dir, {"pricing_refresh_hours": 720})
         self.assertEqual(wb_settings.pricing_refresh_minutes(self.dir), 43200.0)
 
@@ -113,7 +102,7 @@ class PricingRefreshSettingTests(unittest.TestCase):
 
 
 class PriceRefresherTests(unittest.TestCase):
-    """The refresher waits minutes, and a live change is picked up at once."""
+    """刷新器按分钟等待，改动当场生效。"""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="wb-refresher-")
@@ -156,8 +145,8 @@ class PriceRefresherTests(unittest.TestCase):
         self.assertNotIn("interval_hours", status)
 
     def test_the_loop_cycles_on_minutes(self):
-        # 0.02 minutes = 1.2 s. A loop still sleeping hours * 3600 would not
-        # produce a second call inside the deadline.
+        # 0.02 分钟等于 1.2 秒。循环如果还按小时乘 3600 睡，截止时间内
+        # 不会有第二次调用。
         refresher = self._refresher(0.02)
         refresher.start()
         self.assertGreaterEqual(self._wait_for_calls(self.calls, 2, 8.0), 2)
@@ -166,7 +155,7 @@ class PriceRefresherTests(unittest.TestCase):
     def test_set_interval_cuts_a_long_wait_short(self):
         refresher = self._refresher(60)
         refresher.start()
-        # The first boot fetches immediately, then the loop parks for an hour.
+        # 启动时先立即抓取一次，然后循环停等一小时。
         time.sleep(0.3)
         self.assertEqual(len(self.calls), 1)
         refresher.set_interval(0.02)

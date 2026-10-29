@@ -3,6 +3,7 @@ import { html, live, nothing } from '../../core/dom.js';
 import { icon } from '../../core/icons.js';
 import { toast, toastError } from '../../ui/toast.js';
 import { COST_PRICE_FIELDS, costEstimateDirty, costEstimatePayload, costEstimateState } from './logic.js';
+import { numberRow, settingCard } from './rows.js';
 
 export function createCostTab(page) {
   const form = { creditPrice: '0', rows: [] };
@@ -87,25 +88,17 @@ export function createCostTab(page) {
     }
   }
 
-  function creditRow() {
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">积分折算单价</div>
-          <div class="setting-desc">
-            1 积分折合多少元，用来把消耗的积分换算成支出。填写 0 表示积分不计支出，省了多少等于官方价格合计。
-          </div>
-          ${errors.creditPrice ? html`<div class="field-error">${errors.creditPrice}</div>` : nothing}
-        </div>
-        <div class="setting-control">
-          <input class="input input-num" type="number" min="0" step="0.0001" .value=${live(form.creditPrice)}
-                 aria-label="积分折算单价"
-                 ?disabled=${saving}
-                 @input=${(e) => { form.creditPrice = e.target.value; errors.creditPrice = ''; markDirty(); }}>
-          <span class="setting-unit">元 / 积分</span>
-        </div>
-      </div>`;
-  }
+  // 字段行共用的表单状态：模型价格表的每一行另有自己的错误位，不走这里。
+  const ctl = {
+    form,
+    get saving() { return saving; },
+    errors,
+    change: (field, value) => {
+      form[field] = value;
+      if (field in errors) errors[field] = '';
+      markDirty();
+    },
+  };
 
   function modelTable() {
     return html`
@@ -150,28 +143,23 @@ export function createCostTab(page) {
   return {
     seed,
     render() {
-      const dirty = isDirty();
-      return html`
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <h2 class="card-title">${icon('Calculator')}费用估算</h2>
-              <div class="card-sub">
-                官方价格按每百万 Token 填写，用于计算「如果直接调用官方 API 要花多少钱」；默认内置 deepseek-v4.1-flash 的官方高峰时段价格。未配置价格的模型按 0 计，不参与估算。
-                <span class="text-2xs ${dirty ? 'tone-warning' : 'muted'}">${dirty ? '(有未保存的改动)' : ''}</span>
-              </div>
-            </div>
-            <div class="row-wrap">
-              <button class="btn btn-outline btn-sm" ?disabled=${saving || !dirty} @click=${revert}>
-                ${icon('Undo2')}撤销
-              </button>
-              <button class="btn btn-primary btn-sm" ?disabled=${saving || !dirty} @click=${saveAll}>
-                ${saving ? icon('LoaderCircle', 'spin') : icon('Save')}保存
-              </button>
-            </div>
-          </div>
+      return settingCard({
+        iconName: 'Calculator',
+        title: '费用估算',
+        desc: '官方价格按每百万 Token 填写，用于计算「如果直接调用官方 API 要花多少钱」；默认内置 deepseek-v4.1-flash 的官方高峰时段价格。未配置价格的模型按 0 计，不参与估算。',
+        dirty: isDirty(),
+        saving,
+        onRevert: revert,
+        onSave: saveAll,
+        body: html`
           <div class="setting-list">
-            ${creditRow()}
+            ${numberRow(ctl, {
+              name: '积分折算单价',
+              field: 'creditPrice',
+              suffix: '元 / 积分',
+              step: '0.0001',
+              desc: '1 积分折合多少元，用来把消耗的积分换算成支出。填写 0 表示积分不计支出，省了多少等于官方价格合计。',
+            })}
           </div>
           <div class="card-head">
             <div>
@@ -185,8 +173,8 @@ export function createCostTab(page) {
           ${modelTable()}
           <p class="field-hint">
             内置价格只有 deepseek-v4.1-flash，其余模型需要在这里填写后才会进入费用估算。
-          </p>
-        </div>`;
+          </p>`,
+      });
     },
     /** 有未保存的改动时先问一句：保存、放弃或取消这次跳转。 */
     async canLeave() {

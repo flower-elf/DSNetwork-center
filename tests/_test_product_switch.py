@@ -16,7 +16,7 @@ sys.path.insert(0, ROOT)
 
 from _isolated_dirs import isolated_data_dirs  # noqa: E402
 
-# Its own accounts/ before wb_proxy reads ACCOUNTS_DIR at import.
+# 在 wb_proxy 导入读取 ACCOUNTS_DIR 之前，先准备套件自己的 accounts/ 目录。
 _TMP = isolated_data_dirs("wb-product-switch-")
 
 import wb_accounts as A  # noqa: E402
@@ -27,7 +27,7 @@ UIDS = ("intl-aaa-1", "intl-bbb-2", "cn-ccc-3")
 
 
 class FakeRequest(object):
-    """Just enough of the handler for the route under test."""
+    """够被测路由使用的最小 Handler 替身。"""
 
     _route_accounts_product = proxy.Handler._route_accounts_product
 
@@ -69,8 +69,8 @@ class ProductSwitchTests(unittest.TestCase):
             }))
         proxy.ACCOUNTS_DIR = self.dir
         proxy.POOL = self.pool
-        # The route logs every switch; that is the point of the log, but 8 tests
-        # of it bury the suite's own output.
+        # 这条路由记录每次切换，这正是日志的用途，但 8 个用例的日志会淹没
+        # 套件自己的输出。
         real_log = proxy.log
         proxy.log = lambda *a, **k: None
         self.addCleanup(setattr, proxy, "log", real_log)
@@ -118,7 +118,7 @@ class ProductSwitchTests(unittest.TestCase):
         self.assertEqual(set(self.products().values()), {"workbuddy"})
 
     def test_the_switch_survives_a_restart(self):
-        """set_product() 只改记忆体；这条路由必须当场落盘。"""
+        """set_product() 只改内存；这条路由必须当场落盘。"""
         FakeRequest({"product": "cli"}).call()
         self.assertEqual(set(self.reload().values()), {"cli"})
 

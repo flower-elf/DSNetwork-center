@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Chat Completions must not lose a tool call the model printed as text.
+"""Chat Completions 路径的泄漏工具调用回收测试。
 
-Upstream sometimes answers a tools request with the call spelled out inside
-`content` -- a full-width DSML block, or a hybrid of plain XML open tags and
-DSML close tags -- instead of structured `tool_calls`. /v1/chat/completions
-used to forward that text verbatim, so the client saw prose, found no call, and
-ended the turn with nothing to run: reported as "it keeps stopping by itself".
-The Responses path already parsed the DSML spelling; these cases pin the same
-recovery on the Chat Completions path, streaming and not.
+上游偶发不给结构化 tool_calls，改把调用以全角 DSML 块或普通 XML 开标签加 DSML
+闭标签的混合写法印在 content 文本里；这些用例把非流式与流式两条路径的回收行为锁住。
 """
 import json
 import os
@@ -20,6 +15,7 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402
 _TMP = isolated_data_dirs("wb-dsml-chat-")
 
 import wb_proxy as P  # noqa: E402
+import wb_sanitize as S
 
 PASS = 0
 FAIL = 0
@@ -39,7 +35,7 @@ BAR = "\uff5c\uff5c"
 
 
 def dsml_block(tool="run_shell", param="command", value="ls -l"):
-    """The spelling the suite already pins for the Responses path."""
+    """与 Responses 路径用例相同的 DSML 拼写格式。"""
     return (
         "<%sDSML%s calls>"
         "<%sDSML%s invoke name=\"%s\">"
@@ -49,9 +45,7 @@ def dsml_block(tool="run_shell", param="command", value="ls -l"):
          BAR, BAR, BAR, BAR, BAR, BAR)
 
 
-# The shape observed in the wild: the opening tags are plain XML and the closing
-# tags are DSML, and the first parameter's close tag is swallowed whole by the
-# closing tags that follow it.
+# 实测到的混合写法：开标签是普通 XML，闭标签是 DSML，第一个参数的闭标签被随后的成串闭标签吞掉。
 HYBRID = (
     "<run_code>"
     "<parameter name=\"code\">print(1)</parameter>\n"
@@ -60,7 +54,7 @@ HYBRID = (
 ) % (BAR, BAR, BAR, BAR, BAR, BAR, BAR, BAR)
 
 print("[1] parse_leaked_tool_calls recovers both spellings")
-calls, clean = P.parse_leaked_tool_calls(HYBRID)
+calls, clean = S.parse_leaked_tool_calls(HYBRID)
 check("hybrid yields one call", calls is not None and len(calls) == 1, calls)
 check("hybrid call name", bool(calls) and calls[0]["name"] == "run_code", calls)
 args = json.loads(calls[0]["arguments"]) if calls else {}
@@ -69,7 +63,7 @@ check("hybrid description argument", args.get("description") == "say hi", args)
 check("hybrid markup stripped",
       "<parameter" not in clean and "DSML" not in clean, clean)
 
-calls2, clean2 = P.parse_leaked_tool_calls(dsml_block())
+calls2, clean2 = S.parse_leaked_tool_calls(dsml_block())
 check("dsml yields one call", calls2 is not None and len(calls2) == 1, calls2)
 check("dsml call name", bool(calls2) and calls2[0]["name"] == "run_shell", calls2)
 check("dsml command argument",
@@ -78,10 +72,10 @@ check("dsml command argument",
 check("dsml markup stripped", "<" not in clean2, clean2)
 
 print("[2] prose is left alone")
-calls3, clean3 = P.parse_leaked_tool_calls("just a normal answer")
+calls3, clean3 = S.parse_leaked_tool_calls("just a normal answer")
 check("prose yields no call", calls3 is None, calls3)
 check("prose unchanged", clean3 == "just a normal answer", clean3)
-calls4, _ = P.parse_leaked_tool_calls("use a <parameter>less approach")
+calls4, _ = S.parse_leaked_tool_calls("use a <parameter>less approach")
 check("a bare word does not fabricate a call", calls4 is None, calls4)
 
 print("[3] repair_leaked_tool_calls moves the call onto the message")

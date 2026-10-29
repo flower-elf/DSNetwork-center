@@ -1,17 +1,4 @@
-"""Pin the egress-level transient backoff (issue #271).
-
-Account-level governance punishes the *account* for three consecutive hard
-failures (30 minutes, doubling to 6h). When the failure is a transport blip on
-the outbound path, that accounting charges every account sharing the path: the
-incident behind issue #271 saw 196 `URLError`s over four hours park 13 accounts
-for up to ~3h. With the switch on, transport failures and 502/503/504 are
-charged to the *egress* instead - one shared counter, seconds-level backoff,
-cleared by a served request - and the account's fails/degrade counters are left
-alone. A 500 stays on the account (it can be a real fault tied to the
-credential); 401/403/429 already have their own paths.
-
-No network: accounts are built from dicts, the upstream call is stubbed, and
-time.sleep is recorded instead of slept.
+"""测 issue #271 的出口级瞬时退避契约：开关打开后，传输故障与 502/503/504 记到出口的共享计数器上，秒级退避，一次成功请求即清零，账号的 fails/degrade 计数不动；500 仍记在账号上，401/403/429 走各自路径。事故实测数据是 4 小时内 196 个 URLError 把共享同一出口的 13 个账号封停最长约 3 小时。本测试不联网，直接运行本文件即可：账号由 dict 构造，上游调用打桩，time.sleep 只记录不睡眠。
 """
 import io
 import json
@@ -28,17 +15,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import wb_accounts as A
 import wb_egress
 import wb_proxy
+import wb_usage as U
 import wb_settings
 import wb_upstream_pool
 
 
 class EgressKeyTests(unittest.TestCase):
-    """The egress identity must match the connection pool's key exactly."""
+    """出口身份必须与连接池的 key 完全一致。"""
 
     URL = "https://www.workbuddy.ai/v2/chat/completions"
 
     def test_direct_is_one_shared_egress(self):
-        # No proxy: every account goes out the same way, so they share a key.
+        # 不走代理时所有账号同一出口，共享一个 key。
         self.assertEqual(wb_upstream_pool.egress_key(self.URL, ""),
                          ("https", "www.workbuddy.ai", 443, ""))
 
@@ -48,27 +36,26 @@ class EgressKeyTests(unittest.TestCase):
                                "http://10.0.0.9:8080"))
 
     def test_two_slots_pointing_at_one_address_share_a_bucket(self):
-        # Two slots with the same address must not be split into two counters.
+        # 指向同一地址的两个槽位不能拆成两个计数器。
         self.assertEqual(
             wb_upstream_pool.egress_key(self.URL, "http://10.0.0.9:8080"),
             wb_upstream_pool.egress_key(self.URL, " http://10.0.0.9:8080 "))
 
     def test_bypassed_proxy_folds_to_direct(self):
-        # The pool folds a system-bypassed proxy back to direct; accounting must
-        # fold it the same way or one physical path becomes two counters.
+        # 连接池把被系统绕过的代理折算回直连，出口记账必须同样折算，否则一条物理路径会变成两个计数器。
         with mock.patch.object(wb_upstream_pool, "_proxy_bypassed",
                                return_value=True):
             key = wb_upstream_pool.egress_key(self.URL, "http://10.0.0.9:8080")
         self.assertEqual(key, ("https", "www.workbuddy.ai", 443, ""))
 
     def test_non_http_proxy_keeps_its_own_identity(self):
-        # socks5 does not go through the pool, but it is still a distinct egress.
+        # socks5 不经过连接池，但仍是独立的出口。
         key = wb_upstream_pool.egress_key(self.URL, "socks5://10.0.0.9:1080")
         self.assertEqual(key[3], "socks5://10.0.0.9:1080")
 
 
 class EgressBackoffTests(unittest.TestCase):
-    """The seconds-level ladder and the shared counter."""
+    """秒级退避阶梯与共享计数器。"""
 
     def setUp(self):
         wb_egress.reset()
@@ -81,7 +68,7 @@ class EgressBackoffTests(unittest.TestCase):
                          wb_egress.EGRESS_BACKOFF_MAX)
 
     def test_backoff_is_three_orders_below_the_account_ladder(self):
-        # The account breaker starts at 30 minutes; this must start at seconds.
+        # 账号级熔断 30 分钟起步，出口退避必须从秒级起步。
         self.assertLess(wb_egress.EGRESS_BACKOFF_MAX, A.BREAKER_COOLDOWN)
 
     def test_note_transient_grows_one_shared_counter(self):
@@ -89,7 +76,7 @@ class EgressBackoffTests(unittest.TestCase):
         first = wb_egress.note_transient(key)
         second = wb_egress.note_transient(key)
         self.assertEqual(wb_egress.streak(key), 2)
-        # Jitter keeps the two apart, but the ladder underneath must have grown.
+        # 抖动让两次返回值不同，但底层阶梯必须已经涨了一档。
         self.assertGreaterEqual(first, 1.0 * wb_egress.EGRESS_JITTER_LOW)
         self.assertLessEqual(first, 1.0 * wb_egress.EGRESS_JITTER_HIGH)
         self.assertGreaterEqual(second, 2.0 * wb_egress.EGRESS_JITTER_LOW)
@@ -102,7 +89,7 @@ class EgressBackoffTests(unittest.TestCase):
         self.assertEqual(wb_egress.streak(key), 2)
         wb_egress.note_success(key)
         self.assertEqual(wb_egress.streak(key), 0)
-        # ...and the ladder restarts at its base, not at the old rung.
+        # 且阶梯从基础档重新起步，不延续之前的档位。
         wait = wb_egress.note_transient(key)
         self.assertLessEqual(wait, 1.0 * wb_egress.EGRESS_JITTER_HIGH)
 
@@ -122,7 +109,7 @@ class _Sock(object):
 
 
 class _Response(object):
-    """Just enough of the urllib response for open_upstream's success path."""
+    """urllib response 的最小替身，只覆盖 open_upstream 成功路径用到的接口。"""
 
     def __init__(self, sock):
         self._sock = sock
@@ -145,7 +132,7 @@ class _Response(object):
 
 
 class _OpenUpstreamHarness(unittest.TestCase):
-    """Drive the real open_upstream() with a stubbed pool and upstream."""
+    """用打桩的连接池和上游调用驱动真实的 open_upstream()。"""
 
     def setUp(self):
         wb_egress.reset()
@@ -207,7 +194,7 @@ class _OpenUpstreamHarness(unittest.TestCase):
         return pool
 
     def run_request(self, urlopen, egress_backoff=None):
-        """Call open_upstream once; return (raised, payload) or (None, result)."""
+        """调用一次 open_upstream；抛异常时返回 (exc, None)，成功时返回 (None, result)。"""
         if egress_backoff is not None:
             wb_settings.set_egress_backoff_enabled(self.dir, egress_backoff)
         old_pool, old_urlopen = wb_proxy.POOL, A.urlopen
@@ -220,7 +207,7 @@ class _OpenUpstreamHarness(unittest.TestCase):
                         {"model": "deepseek-v4.1-flash",
                          "messages": [{"role": "user", "content": "hi"}]},
                         target_realm="intl")
-                except Exception as exc:  # noqa: BLE001 - the point is to inspect
+                except Exception as exc:  # noqa: BLE001 - 这里就是要拿到异常来检查
                     return exc, None
                 return None, result
         finally:
@@ -228,7 +215,7 @@ class _OpenUpstreamHarness(unittest.TestCase):
 
 
 class SwitchOnTests(_OpenUpstreamHarness):
-    """With egress_backoff_enabled on, the path - not the account - is charged."""
+    """开关打开后，失败记在出口路径上，账号不承担惩罚。"""
 
     def test_transport_error_charges_the_egress_not_the_account(self):
         account = self.add_account("u-egress")
@@ -238,14 +225,13 @@ class SwitchOnTests(_OpenUpstreamHarness):
 
         raised, _result = self.run_request(urlopen, egress_backoff=True)
         self.assertIsNotNone(raised)
-        # The account is untouched: no fails, no degrade, no breaker.
+        # 账号不受影响：无 fails、无 degrade、无熔断。
         self.assertEqual(account.fails, 0)
         self.assertEqual(account.degrade_count, 0)
         self.assertEqual(account.breaker_until, 0.0)
         self.assertEqual(account.degrade_until, 0.0)
-        # The egress counter moved instead - exactly once, even though the
-        # retry round re-picked the same account - and every sleep stayed
-        # seconds-level.
+        # 变的是出口计数器，只加一次：重试一轮重新选中同一账号也一样，而且所有
+        # 睡眠都在秒级。
         key = wb_upstream_pool.egress_key(
             account.chat_base_url() + wb_proxy.CHAT_PATH, account.proxy)
         self.assertEqual(wb_egress.streak(key), 1)
@@ -253,10 +239,9 @@ class SwitchOnTests(_OpenUpstreamHarness):
         self.assertLessEqual(max(self.sleeps), wb_proxy.EGRESS_SLEEP_MAX)
 
     def test_one_request_charges_a_shared_egress_once(self):
-        # tried.clear() re-picks the account after a transient, so without the
-        # per-request guard a single client request would push the shared
-        # counter up several rungs (the other half of issue #271's "one request
-        # charges one account twice").
+        # tried.clear() 会在瞬时故障后重新选账号，没有每次请求的守卫，一次客户端
+        # 请求就会把共享计数器推上好几档（issue #271 “one request charges one
+        # account twice” 的另一半）。
         account = self.add_account("u-once")
 
         def urlopen(req, timeout=30, proxy=""):
@@ -284,7 +269,7 @@ class SwitchOnTests(_OpenUpstreamHarness):
 
         with mock.patch.object(wb_settings, "free_model_credit_fallback", return_value=True), \
                 mock.patch.object(wb_proxy, "parse_rate_limit_reset", return_value=reset), \
-                mock.patch.object(wb_proxy, "apply_daily_guards", return_value=0), \
+                mock.patch.object(U, "apply_daily_guards", return_value=0), \
                 mock.patch.object(wb_proxy, "upstream_timeouts", return_value=(2, 2)):
             raised, result = self.run_request(urlopen)
 
@@ -294,9 +279,9 @@ class SwitchOnTests(_OpenUpstreamHarness):
         self.assertEqual(result[0]._wb_billed_model, "deepseek-v4.1-flash-sg")
         self.assertGreater(account.cap_until("deepseek-v4.1-flash"), time.time())
         saved = []
-        with mock.patch.object(wb_proxy, "_persist_usage",
+        with mock.patch.object(U, "_persist_usage",
                                side_effect=lambda row, _label: saved.append(dict(row))):
-            wb_proxy.record_upstream_usage(
+            U.record_upstream_usage(
                 result[0], "deepseek-v4.1-flash",
                 {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3})
         self.assertEqual(saved[0]["model"], "deepseek-v4.1-flash-sg")
@@ -326,9 +311,10 @@ class SwitchOnTests(_OpenUpstreamHarness):
 
         def urlopen(req, timeout=30, proxy=""):
             model = json.loads(req.data.decode())["model"]
-            uid = dict((k.lower(), v) for k, v in req.header_items()).get("x-user-id")
-            sent.append((model, uid))
-            if uid == first.uid:
+            headers = dict((k.lower(), v) for k, v in req.header_items())
+            sent.append((model, headers.get("x-user-id"),
+                         headers.get("x-model-id")))
+            if headers.get("x-user-id") == first.uid:
                 raise paid_cap
             return _Response(_Sock())
 
@@ -336,7 +322,7 @@ class SwitchOnTests(_OpenUpstreamHarness):
         wb_proxy.POOL, A.urlopen = pool, urlopen
         try:
             with mock.patch.object(wb_settings, "free_model_credit_fallback", return_value=True), \
-                    mock.patch.object(wb_proxy, "apply_daily_guards", return_value=0), \
+                    mock.patch.object(U, "apply_daily_guards", return_value=0), \
                     mock.patch.object(wb_proxy, "upstream_timeouts", return_value=(2, 2)), \
                     mock.patch.object(wb_proxy, "auto_switch_product_enabled", return_value=True), \
                     mock.patch.object(wb_proxy, "_try_switch_product",
@@ -350,16 +336,15 @@ class SwitchOnTests(_OpenUpstreamHarness):
             paid_cap.close()
 
         self.assertEqual(sent, [
-            ("deepseek-v4.1-flash-sg", first.uid),
-            ("deepseek-v4.1-flash-sg", second.uid),
+            ("deepseek-v4.1-flash-sg", first.uid, "deepseek-v4.1-flash-sg"),
+            ("deepseek-v4.1-flash-sg", second.uid, "deepseek-v4.1-flash-sg"),
         ])
         self.assertEqual(switch_attempts, [])
         self.assertEqual(response._wb_billed_model, "deepseek-v4.1-flash-sg")
         response.close()
 
     def test_two_accounts_on_one_egress_share_the_counter(self):
-        # The point of the whole change: N accounts behind one path must not
-        # each carry their own punishment.
+        # 整个改动的核心：同一路径后的 N 个账号不能各自背各自的惩罚。
         first = self.add_account("u-a")
         self.add_account("u-b")
 
@@ -388,7 +373,7 @@ class SwitchOnTests(_OpenUpstreamHarness):
         self.assertEqual(wb_egress.streak(key), 1)
 
     def test_500_stays_on_the_account(self):
-        # 500 is deliberately left with the account until it gets another look.
+        # 500 刻意仍记在账号上，留待后续观察。
         account = self.add_account("u-500")
 
         def urlopen(req, timeout=30, proxy=""):
@@ -418,7 +403,7 @@ class SwitchOnTests(_OpenUpstreamHarness):
 
 
 class SwitchOffTests(_OpenUpstreamHarness):
-    """The switch is off by default, so the old accounting must be untouched."""
+    """开关默认关闭，原有的计账行为必须保持不变。"""
 
     def test_transport_error_still_feeds_the_account(self):
         account = self.add_account("u-legacy")
@@ -428,7 +413,7 @@ class SwitchOffTests(_OpenUpstreamHarness):
 
         raised, _result = self.run_request(urlopen, egress_backoff=False)
         self.assertIsNotNone(raised)
-        # Old behaviour: the transport error grows fails and degrade_count.
+        # 开关关闭时：传输错误使 fails 与 degrade_count 增长。
         self.assertGreater(account.fails, 0)
         self.assertGreater(account.degrade_count, 0)
         key = wb_upstream_pool.egress_key(

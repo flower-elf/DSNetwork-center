@@ -175,7 +175,7 @@ export function idleKeyNames(data) {
     .sort((a, b) => compareText(a, b));
 }
 
-export function accountOptionLabel(uid, info) {
+function accountOptionLabel(uid, info) {
   const name = (info && info.nickname) || String(uid || '').slice(0, 8);
   return name + ' · ' + String(uid || '').slice(0, 6);
 }

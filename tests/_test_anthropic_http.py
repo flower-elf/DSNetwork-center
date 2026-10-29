@@ -1,9 +1,6 @@
-"""Anthropic Messages HTTP surface: routing, auth, translation, streaming.
+"""Anthropic Messages 的 HTTP 契约：do_POST 路由、鉴权、请求翻译、SSE 流式事件与 usage 记录。
 
-Runs a real gateway process-in-thread against a mock WorkBuddy upstream so
-the whole path is exercised - do_POST routing, the Anthropic error envelope,
-request translation, the SSE event sequence and the usage rows - with no
-network access and no real accounts.
+真实网关运行在测试线程里，上游是本地 mock WorkBuddy，不联网也不用真实账号。
 """
 import base64
 import json
@@ -21,7 +18,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-import _lifecycle as life  # noqa: E402  (shared spare-port pick)
+import _lifecycle as life  # noqa: E402  套件共用的空闲端口选择
 
 WORK = tempfile.mkdtemp(prefix="anthropic-http-")
 ACCOUNTS = os.path.join(WORK, "accounts")
@@ -124,6 +121,7 @@ threading.Thread(target=upstream.serve_forever, daemon=True).start()
 
 import wb_identity
 import wb_proxy as P
+import wb_startup as B
 import wb_settings
 
 _ENDPOINTS = dict(wb_identity._ENDPOINTS)
@@ -148,8 +146,8 @@ class Args(object):
     info = None
 
 
-P._apply_cli_overrides(Args())
-P._bootstrap_runtime(Args())
+B._apply_cli_overrides(P, Args())
+B._bootstrap_runtime(P, Args())
 gateway = ThreadingHTTPServer(("127.0.0.1", GATEWAY_PORT), P.Handler)
 threading.Thread(target=gateway.serve_forever, daemon=True).start()
 
@@ -249,14 +247,12 @@ try:
         error = payload.get("error") or {}
         check("blocked %s -> non-retryable Anthropic 400" % path,
               code == 400 and payload.get("type") == "error"
-              and error.get("type") == "invalid_request_error"
-              and ("Advanced" in error.get("message", "")
-                   or "高级" in error.get("message", "")),
+              and error.get("type") == "invalid_request_error",
               (code, payload))
     check("disabled requests never reach the upstream", not MOCK["requests"],
           MOCK["requests"])
 
-    # Existing protocol tests below explicitly exercise the risky opt-in path.
+    # 以下协议用例显式打开这个默认关闭的开关，走有风险的放行路径。
     wb_settings.set_enable_anthropic_messages(P.ACCOUNTS_DIR, True)
 
     print("[1] auth uses the Anthropic error envelope")

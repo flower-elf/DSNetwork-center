@@ -361,7 +361,7 @@ class PanelTestSuccessTests(unittest.TestCase):
 
         self._drive_panel_test(account)
 
-        # 下一次账号级 429 从头开始，而不是接着面板测试本应清零的 streak。
+        # 下一次账号级 429 从头开始，不接续面板测试本应清零的 streak。
         wait = account.note_soft_rate("HTTP 429 (account soft rate)")
         self.assertEqual(account.soft_streak, 1)
         self.assertEqual(wait, A.SOFT_RATE_BASE)

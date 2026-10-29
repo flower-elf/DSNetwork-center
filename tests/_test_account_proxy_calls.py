@@ -1,5 +1,5 @@
-"""Every account-identifying call must leave through the account's proxy: a dropped proxy
-argument leaks the host IP, and stubbed helpers make that fail here. No network access.
+"""每个带账号身份的调用都必须从账号的代理发出：漏传 proxy 参数会泄漏宿主 IP，
+这里用替身助手让这种错误直接失败。不访问网络。
 """
 
 import os
@@ -7,9 +7,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# checkin() writes one row into the account activity history (issue #34), so a
-# suite that exercises it has to point the usage tree somewhere disposable
-# instead of at the repo's own usage/ directory.
+# checkin() 会往账号活动历史写一行（issue #34），所以用例要把用量目录指到
+# 可丢弃的临时位置，不能用仓库自己的 usage/ 目录。
 _TMP = isolated_data_dirs("wb-account-proxy-calls-")
 
 import wb_accounts

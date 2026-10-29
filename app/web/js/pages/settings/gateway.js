@@ -1,6 +1,5 @@
 // 设置 → 网关行为：保留积分、每日限额、自动切换、打卡通道、本地网络工具、Messages 翻译路径与接口测试模型；控件先改本地草稿，由卡片上的「保存」统一提交。
 import { html, live, nothing, repeat } from '../../core/dom.js';
-import { icon } from '../../core/icons.js';
 import { getJSON } from '../../core/api.js';
 import { toast, toastError } from '../../ui/toast.js';
 import {
@@ -14,6 +13,7 @@ import {
   testModelStateText,
   validateTestModel,
 } from './logic.js';
+import { numberRow, settingCard, switchRow } from './rows.js';
 
 const SCHEDULE_FIELDS = ('checkin travel keepalive cat').split(' ');
 const SCHEDULE_LABELS = {
@@ -276,40 +276,19 @@ export function createGatewayTab(page) {
     }
   }
 
-  function switchRow({ name, desc, checked, onChange }) {
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">${name}</div>
-          <div class="setting-desc">${desc}</div>
-        </div>
-        <div class="setting-control">
-          <label class="switch">
-            <input type="checkbox" .checked=${live(checked)} ?disabled=${saving} aria-label=${name}
-                   @change=${(e) => onChange(e.target.checked)}>
-            <span></span>
-          </label>
-        </div>
-      </div>`;
-  }
+  // 字段行共用的表单状态：这一组没有环境变量覆盖，改动先清错误再按翻转情况重绘。
+  const ctl = {
+    form,
+    get saving() { return saving; },
+    errors,
+    change: (field, value) => {
+      form[field] = value;
+      if (field in errors) errors[field] = '';
+      structChanged();
+    },
+  };
 
-  function numberRow({ name, desc, field, suffix, step = '1', min = '0' }) {
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">${name}</div>
-          <div class="setting-desc">${desc}</div>
-          ${errors[field] ? html`<div class="field-error">${errors[field]}</div>` : nothing}
-        </div>
-        <div class="setting-control">
-          <input class="input input-num" type="number" min=${min} step=${step} .value=${live(form[field])}
-                 ?disabled=${saving}
-                 @input=${(e) => { form[field] = e.target.value; errors[field] = ''; structChanged(); }}>
-          <span class="setting-unit">${suffix}</span>
-        </div>
-      </div>`;
-  }
-
+  /** 排程时段输入行：逗号分隔的整点，状态放在 schedule 分组里。 */
   function hoursRow({ name, desc, field }) {
     return html`
       <div class="setting">
@@ -366,67 +345,56 @@ export function createGatewayTab(page) {
     seed,
     render() {
       const view = page.state.view || {};
-      const dirty = isDirty();
       const messagesOptions = messagesFormatOptions(form.messagesFormat, view.messages_format_default);
-      return html`
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <h2 class="card-title">${icon('Sliders')}网关行为</h2>
-              <div class="card-sub">
-                改动后点「保存」提交，点「撤销」回到上一次保存的设置。
-                <span class="text-2xs ${dirty ? 'tone-warning' : 'muted'}">${dirty ? '(有未保存的改动)' : ''}</span>
-              </div>
-            </div>
-            <div class="row-wrap">
-              <button class="btn btn-outline btn-sm" ?disabled=${saving || !dirty} @click=${revert}>
-                ${icon('Undo2')}撤销
-              </button>
-              <button class="btn btn-primary btn-sm" ?disabled=${saving || !dirty} @click=${saveAll}>
-                ${saving ? icon('LoaderCircle', 'spin') : icon('Save')}保存
-              </button>
-            </div>
-          </div>
+      return settingCard({
+        iconName: 'Sliders',
+        title: '网关行为',
+        desc: '改动后点「保存」提交，点「撤销」回到上一次保存的设置。',
+        dirty: isDirty(),
+        saving,
+        onRevert: revert,
+        onSave: saveAll,
+        body: html`
           <div class="setting-list">
             <div class="section-label">限额与配额</div>
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '保留积分', field: 'reserve', suffix: '积分',
               desc: '账号余额低于或等于该值时暂停接单，填写 0 表示关闭。与每日 Token 限额各自独立，任一命中都会暂停接单。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '每日 Token 限额', field: 'dailyLimit', suffix: 'token', step: '1000',
               desc: '账号当日消耗的 token 达到该值后暂停接单，请求自动切到其他账号，本地时间 0 点后恢复。填写 0 表示不限额。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '每日积分限额', field: 'dailyCreditLimit', suffix: '积分',
               desc: '账号当日消耗的积分达到该值后，付费模型暂停接单；免费模型照常服务。填写 0 表示不限额。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '单模型每日 Token 限额', field: 'modelDailyTokenLimit', suffix: 'token', step: '1000',
               desc: '同一账号在同一模型上当日消耗的 token 达到该值后，只暂停这个模型，账号的其他模型照常接单。填写 0 表示不限额。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '临期积分优先窗口',
               field: 'expiringWindow',
               suffix: '天',
               desc: '积分在这个天数内到期时优先分配请求，默认 7 天；填写 0 表示关闭。智能分配与轮询都使用这个窗口。',
             })}
             <div class="section-label">定时任务</div>
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '任务随机间隔',
               field: 'taskJitter',
               suffix: '秒',
               min: 2,
               desc: '定时巡检在处理每个账号前随机等待 2 秒到这个值之间的时间，避免同一批请求同时发出。默认 5 秒，最大 600 秒。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '网页通道尝试次数',
               field: 'dailyWebAttempts',
               suffix: '次',
               min: 1,
               desc: '国际版网页通道打卡一轮最多尝试几次。默认 3 次；失败后会重新创建会话。',
             })}
-            ${numberRow({
+            ${numberRow(ctl, {
               name: '网页通道单轮超时',
               field: 'dailyWebTimeout',
               suffix: '秒',
@@ -467,43 +435,37 @@ export function createGatewayTab(page) {
               desc: '夜猫子专属任务的上报整点，默认 1。',
             })}
             <div class="section-label">调度</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '会话粘性',
+              field: 'sessionAffinity',
               desc: '同一段对话固定使用同一个账号，复用上游的前缀缓存；账号不能接单时才换号。客户端没有会话标识时按对话开头识别。关闭后每一轮请求都重新选择账号。',
-              checked: form.sessionAffinity,
-              onChange: (value) => { form.sessionAffinity = value; structChanged(); },
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '智能分配',
+              field: 'smartRouting',
               desc: '关闭时按轮询顺序分配新对话。打开时按积分到期节奏与最近一小时忙闲分配，剩余额度接近耗尽的账号与模型组合会略优先。已在服务的对话不受影响。',
-              checked: form.smartRouting,
-              onChange: (value) => { form.smartRouting = value; structChanged(); },
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '429 自动切换出站身份',
+              field: 'autoSwitch',
               desc: '某账号在某模型上收到上游 429 限流时，自动在 WB / VSC / CLI 之间换身份重试，同一账号与模型 60 秒内最多切换 4 次。切换后的身份会保存，重启后继续沿用。',
-              checked: form.autoSwitch,
-              onChange: (value) => { form.autoSwitch = value; structChanged(); },
             })}
             <div class="section-label">每日活跃</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '国际版每日活跃打卡网页通道',
+              field: 'dailyWeb',
               desc: '国际版账号每日打卡时，除桌面端身份的轻量对话外，再走一次网页通道的会话。只有网页端对话计入官方的每日活跃奖励，开启后会消耗账号少量积分。',
-              checked: form.dailyWeb,
-              onChange: (value) => { form.dailyWeb = value; structChanged(); },
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '网页通道失败后重试',
+              field: 'dailyWebRetry',
               desc: '网页通道打卡一轮失败时，重新创建会话再试。关闭后只尝试一次。',
-              checked: form.dailyWebRetry,
-              onChange: (value) => { form.dailyWebRetry = value; structChanged(); },
             })}
             <div class="section-label">网络工具</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '本地网络工具（web_search / web_fetch）',
+              field: 'localWeb',
               desc: '客户端声明的 web_search / web_fetch 服务端工具在本网关代为执行：搜索走 DuckDuckGo，抓取页面时读取模型给出的 URL。开启后网关会主动出网，每轮多请求一次上游。',
-              checked: form.localWeb,
-              onChange: (value) => { form.localWeb = value; structChanged(); },
             })}
             <div class="section-label">接口</div>
             <div class="setting">
@@ -523,8 +485,8 @@ export function createGatewayTab(page) {
             ${testModelRow()}
           </div>
           ${catalogError ? html`
-            <p class="field-hint tone-warning">模型目录这次没有读取成功，下拉里只显示「默认」与已保存的值：${catalogError}</p>` : nothing}
-        </div>`;
+            <p class="field-hint tone-warning">模型目录这次没有读取成功，下拉里只显示「默认」与已保存的值：${catalogError}</p>` : nothing}`,
+      });
     },
     /** 有未保存的改动时先问一句：保存、放弃或取消这次跳转。 */
     async canLeave() {

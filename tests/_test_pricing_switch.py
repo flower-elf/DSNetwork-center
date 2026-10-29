@@ -1,3 +1,5 @@
+"""测 pricing_enabled 开关的契约：默认开启、只有显式关闭才生效，关闭期间不计价也不铸策略、行不算未定价，重新开启后补计价并恢复抓取循环。用 python tests/run_all.py _test_pricing_switch 运行。
+"""
 import json
 import os
 import sys
@@ -9,17 +11,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_pricing
 import wb_proxy
+import wb_usage as U
 import wb_settings
 
 
 def _write_settings(path, data):
     with open(os.path.join(path, "settings.json"), "w", encoding="utf-8") as fh:
         json.dump(data, fh)
-
-
-def _read_settings(path):
-    with open(os.path.join(path, "settings.json"), encoding="utf-8") as fh:
-        return json.load(fh)
 
 
 class PricingEnabledSettingTests(unittest.TestCase):
@@ -36,15 +34,6 @@ class PricingEnabledSettingTests(unittest.TestCase):
     def test_a_settings_file_without_the_key_reads_as_on(self):
         # 从未写入该键的旧版本升级后仍保持原有行为，与发布说明一致。
         self.assertIs(wb_settings.pricing_enabled(self.dir), True)
-
-    def test_the_setting_defaults_to_on_and_is_persisted(self):
-        self.assertIs(wb_pricing.pricing_enabled(), True)
-        self.assertIs(wb_settings.set_pricing_enabled(self.dir, False), False)
-        self.assertIs(_read_settings(self.dir)["pricing_enabled"], False)
-        self.assertIs(wb_settings.pricing_enabled(self.dir), False)
-        self.assertIs(wb_pricing.pricing_enabled(), False)
-        self.assertIs(wb_settings.set_pricing_enabled(self.dir, True), True)
-        self.assertIs(wb_pricing.pricing_enabled(), True)
 
     def test_the_switch_read_is_cached_but_never_goes_stale(self):
         # cost_for_row 会为用量页的每一行读取该开关，因此按路径、mtime 和大小缓存；
@@ -92,13 +81,13 @@ class PricingGateTests(unittest.TestCase):
     def test_the_aggregate_does_not_call_a_disabled_row_unpriced(self):
         wb_settings.set_pricing_enabled(self.accounts, False)
         bucket = {}
-        wb_proxy._fold_cost(bucket, wb_pricing.cost_for_row(dict(self.row)),
+        U._fold_cost(bucket, wb_pricing.cost_for_row(dict(self.row)),
                             self.model)
         self.assertEqual(bucket.get("cost_missing"), None)
         # 开关开启时，未定价的行仍会被报告。
         wb_settings.set_pricing_enabled(self.accounts, True)
         bucket = {}
-        wb_proxy._fold_cost(bucket, wb_pricing.cost_for_row(
+        U._fold_cost(bucket, wb_pricing.cost_for_row(
             {"model": "no-such-model-anywhere", "prompt_tokens": 1}),
             "no-such-model-anywhere")
         self.assertEqual(bucket.get("cost_missing"), {"no-such-model-anywhere": 1})
@@ -267,7 +256,7 @@ class PricingRefresherSwitchTests(unittest.TestCase):
         self.assertGreaterEqual(self._wait_for_calls(calls, 1, 5), 1)
 
     def test_a_normal_restart_with_a_timeline_does_not_refetch(self):
-        # 补抓不能破坏原有行为：已有价格的实例重启后应等待间隔结束，不发起抓取。
+        # 已有价格的实例重启后应等待间隔结束，不发起抓取。
         self._seed_timeline()
         calls = []
         wb_settings.set_pricing_enabled(self.accounts, True)

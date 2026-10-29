@@ -98,8 +98,9 @@ export function loadErrorInline(message, onRetry) {
     </div>`;
 }
 
+/** 提示条；kind 取 warn 或 info。 */
 export function notice(kind, content, iconName) {
-  const icons = { warn: 'TriangleAlert', info: 'Info', danger: 'CircleAlert', success: 'CircleCheck' };
+  const icons = { warn: 'TriangleAlert', info: 'Info' };
   return html`<div class="notice notice-${kind}">${icon(iconName || icons[kind])}<div class="grow">${content}</div></div>`;
 }
 
@@ -134,13 +135,17 @@ export function switchControl({ checked, disabled = false, onChange, label = '' 
     </label>`;
 }
 
-/** 分页条：共 N 条 · 第 p / P 页，unit 为计数单位。 */
-export function pager({ page, pages, total, unit = '条', onPage }) {
+/** 分页条：共 N unit · 第 p / P 页。numbers 传页码窗口（省略项写作 '...'）时多一排页码按钮。 */
+export function pager({ page, pages, total, unit = '条', onPage, numbers = [] }) {
   return html`
     <div class="pager">
       <span>共 ${total} ${unit} · 第 ${page} / ${pages} 页</span>
       <span class="pager-buttons">
         <button class="btn btn-outline btn-icon btn-xs" aria-label="上一页" ?disabled=${page <= 1} @click=${() => onPage(page - 1)}>${icon('ChevronLeft')}</button>
+        ${numbers.map((item) => item === '...'
+          ? html`<span class="pager-gap">…</span>`
+          : html`<button class="btn btn-xs ${item === page ? 'btn-primary' : 'btn-outline'}"
+                        aria-label=${'第 ' + item + ' 页'} @click=${() => onPage(item)}>${item}</button>`)}
         <button class="btn btn-outline btn-icon btn-xs" aria-label="下一页" ?disabled=${page >= pages} @click=${() => onPage(page + 1)}>${icon('ChevronRight')}</button>
       </span>
     </div>`;

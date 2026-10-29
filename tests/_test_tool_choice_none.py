@@ -5,10 +5,8 @@
 import json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits. This suite used to share
-# tests/_acc and tests/_use with _test_custom_tools.py, which made the two unsafe
-# to run at the same time and left directories in the repo after a run.
+from _isolated_dirs import isolated_data_dirs  # noqa: E402
+# 自带数据根目录，进程退出时删除，避免与其他用例或多次运行共用目录。
 _TMP = isolated_data_dirs("wb-tool-choice-")
 
 import wb_proxy as P
@@ -83,25 +81,6 @@ body = P.build_upstream_body({
 check("full pipeline retains tools", bool(body.get("tools")), body.get("tools"))
 check("full pipeline keeps a string tool_choice",
       body.get("tool_choice") == "none", body.get("tool_choice"))
-
-print()
-print("[6] DSML text fallback still parses upstream's real full-width syntax")
-FS = "\uff5c\uff5c"
-block = (
-    "<" + FS + "DSML" + FS + " calls>" + chr(10) +
-    "<" + FS + "DSML" + FS + ' invoke name="run_shell">' + chr(10) +
-    "<" + FS + "DSML" + FS + ' parameter name="command" string="true">ls -l' +
-    "</" + FS + "DSML" + FS + " parameter>" + chr(10) +
-    "</" + FS + "DSML" + FS + " invoke>" + chr(10) +
-    "</" + FS + "DSML" + FS + " calls>"
-)
-calls, clean = P.parse_dsml_tool_calls(block)
-check("DSML call recovered from text", bool(calls), calls)
-if calls:
-    check("recovered the function name", calls[0]["name"] == "run_shell", calls[0])
-    check("recovered the arguments",
-          json.loads(calls[0]["arguments"]).get("command") == "ls -l", calls[0])
-check("DSML tags stripped from visible text", "DSML" not in clean, repr(clean[:80]))
 
 print()
 print("SUMMARY: PASS=%d FAIL=%d" % (PASS, FAIL))

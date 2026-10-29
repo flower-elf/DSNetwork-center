@@ -2,6 +2,20 @@
 import { compareText, fmtCredit, fmtLatency, fmtNumber } from '../../core/format.js';
 import { availabilityTier } from '../accounts/logic.js';
 
+/** 宽松解析 JSON：不是 JSON 时把原文原样交回。 */
+export function parseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+/** 把流式回答的增量写回消息列表的指定一项，其余消息不动。 */
+export function withAnswer(messages, index, answer, elapsedMs) {
+  return messages.map((m, i) => (i === index ? { ...m, ...answer, elapsedMs } : m));
+}
+
 /** 组装 /v1/chat/completions 的请求体；系统提示词留空时不发送 system 消息，由网关补默认值。 */
 export function buildChatBody({ model, systemPrompt = '', messages = [] }) {
   if (!model) throw new Error('请先选择要调试的模型');
@@ -50,7 +64,6 @@ export function responseError(status, parsed) {
   return status ? `请求失败，HTTP ${status}` : '请求失败';
 }
 
-/** 流里带回来的错误对象。 */
 export function chunkError(chunk) {
   if (!chunk || typeof chunk !== 'object' || !chunk.error) return '';
   const raw = typeof chunk.error === 'string' ? chunk.error : chunk.error.message;

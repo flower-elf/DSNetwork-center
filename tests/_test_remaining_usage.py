@@ -18,6 +18,9 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 import wb_accounts
 import wb_settings
 import wb_proxy as P
+import wb_startup as B
+import wb_usage as U
+import wb_usage_remaining
 
 MODEL = "deepseek-v4.1-flash"
 HOUR = 3600
@@ -114,7 +117,7 @@ def clear_daily():
         os.unlink(P.ESTIMATE_DAILY_FILE)
     except OSError:
         pass
-    P._estimate_daily_cache["entry"] = ((P.ESTIMATE_DAILY_FILE, None, None), {})
+    U._estimate_daily_cache["entry"] = ((P.ESTIMATE_DAILY_FILE, None, None), {})
 
 
 def clear_log():
@@ -133,25 +136,25 @@ def clear_log():
 
 def restart_fold():
     """按进程重启的方式丢掉内存折叠状态。"""
-    with P._remaining_state_lock:
-        P._remaining_state.clear()
-        P._remaining_state.update({
+    with U._remaining_state_lock:
+        U._remaining_state.clear()
+        U._remaining_state.update({
             "events": [], "keys": set(), "usage": {}, "day": "",
             "log": {"offset": 0, "key": None, "tail": b""},
             "file": {"offset": 0, "key": None, "tail": b""},
         })
-    with P._remaining_cache_lock:
-        P._remaining_cache.update({"at": 0.0, "built_at": 0.0, "data": None})
+    with U._remaining_cache_lock:
+        U._remaining_cache.update({"at": 0.0, "built_at": 0.0, "data": None})
 
 
 def remaining_checkpoint_path():
     """remaining 状态的 checkpoint 文件，一类一份。"""
-    return P._usage_cache_kind_path("remaining")
+    return U._usage_cache_kind_path("remaining")
 
 
 def reload_checkpoint_cache():
     """忘掉已读的 checkpoint，新进程只读一次，测试需要重放。"""
-    P._usage_cache_forget()
+    U._usage_cache_forget()
 
 
 def cache_env(min_bytes=None, min_seconds=None):
@@ -172,7 +175,7 @@ def account(uid, nickname="", realm="intl"):
 
 
 def payload(accounts, now):
-    return P._remaining_payload(now=now, accounts=accounts)
+    return U._remaining_payload(now=now, accounts=accounts)
 
 
 def find_row(data, uid, model=MODEL):
@@ -265,7 +268,7 @@ class RemainingUsageTests(unittest.TestCase):
                     fh.write(json.dumps(usage_row(day + 8 * HOUR, "acct-A", tokens),
                                         ensure_ascii=False) + "\n")
                 clock["now"] = day + 9 * HOUR            # 撞线时刻
-                P.note_limit_event(account("acct-A"), MODEL,
+                U.note_limit_event(account("acct-A"), MODEL,
                                    day + 9 * HOUR + 30 * 60)
             # 进程在昨天与今天各构建过一次，前两天依次归档落盘。
             clock["now"] = days[1] + 12 * HOUR
@@ -313,12 +316,12 @@ class RemainingUsageTests(unittest.TestCase):
             # 逐条追加：真实日志就是这样长出来的，26h 缓冲的裁剪按最后一行算。
             append_log([usage_row(reset1 - 90 * 60, "acct-A", 4000),   # 截断前
                         usage_row(reset1 - 15 * 60, "acct-A", 50)])    # 截断前残行
-            P.note_limit_event(account("acct-A"), MODEL, reset1)
+            U.note_limit_event(account("acct-A"), MODEL, reset1)
             append_log([usage_row(reset1 + 90 * 60, "acct-A", 700),    # 截断后
                         usage_row(reset2 - HOUR, "acct-A", 120),       # 截断后
                         usage_row(reset1 - 90 * 60, "acct-B", 200)])   # 另一组合
             clock["now"] = reset2 - 30 * 60              # 撞线时刻：昨天 20:00
-            P.note_limit_event(account("acct-A"), MODEL, reset2)
+            U.note_limit_event(account("acct-A"), MODEL, reset2)
             append_log([usage_row(reset2 + 30 * 60, "acct-A", 180),    # 截断后
                         usage_row(day_end - HOUR, "acct-A", 300),      # 截断后
                         usage_row(day_end + 5 * 60, "acct-C", 77)])    # 今天
@@ -435,7 +438,7 @@ class RemainingUsageTests(unittest.TestCase):
         self.assertTrue(row["cooling"])
         self.assertEqual(row["remaining"], 0)
         self.assertEqual(row["reset_at"], reset)
-        self.assertEqual(row["window_start"], reset - P.LIMIT_WINDOW_SECONDS)
+        self.assertEqual(row["window_start"], reset - U.LIMIT_WINDOW_SECONDS)
         self.assertEqual(row["used"], 5000)
 
     def test_unknown_window_uses_trailing_24h(self):
@@ -454,7 +457,7 @@ class RemainingUsageTests(unittest.TestCase):
         row = find_row(data, "acct-B")
         self.assertTrue(row["estimated"])
         self.assertFalse(row["cooling"])
-        self.assertEqual(row["window_start"], now - P.LIMIT_WINDOW_SECONDS)
+        self.assertEqual(row["window_start"], now - U.LIMIT_WINDOW_SECONDS)
         self.assertEqual(row["used"], 900)
         self.assertEqual(row["budget"], 5000)
         self.assertEqual(row["remaining"], 4100)
@@ -462,7 +465,7 @@ class RemainingUsageTests(unittest.TestCase):
         # 所以同样标为估算：尾随 24h 只是下界，并不声称知道窗口。
         stale = find_row(data, "acct-A")
         self.assertTrue(stale["estimated"])
-        self.assertEqual(stale["window_start"], now - P.LIMIT_WINDOW_SECONDS)
+        self.assertEqual(stale["window_start"], now - U.LIMIT_WINDOW_SECONDS)
         self.assertEqual(stale["used"], 0)
 
     def test_budgeted_model_with_zero_usage_is_reported(self):
@@ -549,8 +552,7 @@ class RemainingUsageTests(unittest.TestCase):
         self.assertEqual(row["remaining"], 0)
 
     def test_range_sum_matches_a_naive_sum(self):
-        # The window sums are cumulative-sum lookups now; pin them against a
-        # plain sum over the same rows, head-trim and compaction included.
+        # 窗口求和是前缀和查询，用同一份行上的朴素求和逐项对照，头剪与压缩都覆盖。
         reset, detail = reset_epoch("2026-10-10 08:00:00")
         rows = [usage_row(reset - 25 * HOUR + i * 137, "acct-A", 100 + i * 7)
                 for i in range(600)]
@@ -561,29 +563,27 @@ class RemainingUsageTests(unittest.TestCase):
         def naive(lo, hi):
             return sum(r["total_tokens"] for r in rows if lo <= r["at"] <= hi)
 
-        with P._remaining_state_lock:
-            buf = P._remaining_state["usage"][("acct-A", MODEL)]
+        with U._remaining_state_lock:
+            buf = U._remaining_state["usage"][("acct-A", MODEL)]
             for lo, hi in ((rows[0]["at"] - 1, now), (reset - 24 * HOUR, now),
                            (now - HOUR, now), (rows[300]["at"], rows[400]["at"]),
                            (rows[-1]["at"] + 1, now), (rows[0]["at"], rows[5]["at"])):
-                self.assertEqual(P._range_sum(buf, lo, hi), naive(lo, hi), (lo, hi))
-            # Move the head forward: entries before it are out of the window
-            # by construction, and the sums must agree from there on.
-            P._pair_trim(buf, rows[100]["at"])
+                self.assertEqual(U._range_sum(buf, lo, hi), naive(lo, hi), (lo, hi))
+            # 头指针前移：之前的条目按构造已在窗口外，之后的求和必须一致。
+            U._pair_trim(buf, rows[100]["at"])
         self.assertEqual(buf["head"], 100)
-        with P._remaining_state_lock:
+        with U._remaining_state_lock:
             for lo, hi in ((rows[100]["at"], now), (rows[150]["at"], now),
                            (now - HOUR, now)):
-                self.assertEqual(P._range_sum(buf, lo, hi), naive(lo, hi), (lo, hi))
-            # Past the batch threshold the dead prefix is compacted away, and
-            # the cumulative sums must still subtract correctly.
-            P._pair_trim(buf, rows[550]["at"])
+                self.assertEqual(U._range_sum(buf, lo, hi), naive(lo, hi), (lo, hi))
+            # 越过批量阈值后死前缀被压缩掉，前缀和的减法仍要正确。
+            U._pair_trim(buf, rows[550]["at"])
         self.assertEqual(buf["head"], 0)
         self.assertEqual(len(buf["at"]), 50)
-        with P._remaining_state_lock:
+        with U._remaining_state_lock:
             for lo, hi in ((rows[550]["at"], now), (rows[580]["at"], now),
                            (rows[560]["at"], rows[590]["at"])):
-                self.assertEqual(P._range_sum(buf, lo, hi), naive(lo, hi), (lo, hi))
+                self.assertEqual(U._range_sum(buf, lo, hi), naive(lo, hi), (lo, hi))
 
     def test_repeated_compaction_keeps_base_absolute(self):
         """压缩记前缀必须记绝对值。
@@ -596,19 +596,19 @@ class RemainingUsageTests(unittest.TestCase):
         tokens = 3
         buf = {"at": [], "cum": [], "head": 0, "base": 0}
         for i in range(2600):
-            P._pair_append(buf, 1000000.0 + i, tokens)
+            U._pair_append(buf, 1000000.0 + i, tokens)
         # 第一次压缩：裁掉前 1500 行（死前缀超过一半才批量压）。
-        P._pair_trim(buf, 1000000.0 + 1500)
+        U._pair_trim(buf, 1000000.0 + 1500)
         self.assertEqual((buf["head"], len(buf["at"])), (0, 1100))
         self.assertEqual(buf["base"], 1500 * tokens)
         # 第二次压缩：再裁掉 700 行。base 必须是绝对值（2200 行），不是叠加。
-        P._pair_trim(buf, 1000000.0 + 2200)
+        U._pair_trim(buf, 1000000.0 + 2200)
         self.assertEqual((buf["head"], len(buf["at"])), (0, 400))
         self.assertEqual(buf["base"], 2200 * tokens)
         # 左端落在保留区之前：求和等于保留区内的和，且不可能为负。
-        self.assertEqual(P._range_sum(buf, 999000.0, 1000000.0 + 2599),
+        self.assertEqual(U._range_sum(buf, 999000.0, 1000000.0 + 2599),
                          len(buf["at"]) * tokens)
-        self.assertEqual(P._range_sum(buf, 1000000.0 + 2300, 1000000.0 + 2400),
+        self.assertEqual(U._range_sum(buf, 1000000.0 + 2300, 1000000.0 + 2400),
                          101 * tokens)
 
     def test_payload_is_served_from_cache_within_the_ttl(self):
@@ -627,20 +627,19 @@ class RemainingUsageTests(unittest.TestCase):
         old_pool = P.POOL
         P.POOL = _Pool()
         try:
-            first = P.remaining_usage(ttl=30)
+            first = U.remaining_usage(ttl=30)
             self.assertEqual(find_row(first, "acct-A")["used"], 0)
 
-            # A row appended behind the cache must NOT be picked up inside the
-            # TTL (that is the whole point: no rescan per poll)...
+            # TTL 内追加在缓存后面的行不得被看到（要点就在这：每次轮询不重扫）；
             with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(usage_row(now - HOUR, "acct-A", 123),
                                     ensure_ascii=False) + "\n")
-            cached = P.remaining_usage(ttl=30)
+            cached = U.remaining_usage(ttl=30)
             self.assertIs(cached, first)
             self.assertEqual(find_row(cached, "acct-A")["used"], 0)
 
-            # ...and an expired entry rebuilds and picks it up.
-            rebuilt = P.remaining_usage(ttl=0)
+            # 缓存过期后重建才会把它收进来。
+            rebuilt = U.remaining_usage(ttl=0)
             self.assertIsNot(rebuilt, first)
             self.assertEqual(find_row(rebuilt, "acct-A")["used"], 123)
         finally:
@@ -652,16 +651,16 @@ class RemainingUsageTests(unittest.TestCase):
             usage_row(reset - 2 * HOUR, "acct-A", 600),
             cap_row(reset - HOUR, "acct-A", detail),
         ])
-        P.remaining_usage(ttl=30)
-        tag = P.remaining_usage_etag()
+        U.remaining_usage(ttl=30)
+        tag = U.remaining_usage_etag()
         self.assertTrue(tag and tag.startswith('"'))
-        # Same cache entry -> same validator (the poll gets a 304)…
-        P.remaining_usage(ttl=30)
-        self.assertEqual(P.remaining_usage_etag(), tag)
-        # …and a rebuild mints a new one.
+        # 同一缓存条目给出同一个校验符（轮询拿到 304）；
+        U.remaining_usage(ttl=30)
+        self.assertEqual(U.remaining_usage_etag(), tag)
+        # 重建后换新的。
         time.sleep(0.01)
-        P.remaining_usage(ttl=0)
-        self.assertNotEqual(P.remaining_usage_etag(), tag)
+        U.remaining_usage(ttl=0)
+        self.assertNotEqual(U.remaining_usage_etag(), tag)
 
     def test_checkpoint_saves_and_a_restart_folds_nothing(self):
         # 重启免冷扫：折一遍写出 checkpoint，模拟重启（清内存 + 重读文件）后
@@ -680,19 +679,19 @@ class RemainingUsageTests(unittest.TestCase):
             self.assertGreater(len(first["rows"]), 0)
 
             folded = {"n": 0}
-            real_fold = P._fold_remaining
+            real_fold = wb_usage_remaining._fold_remaining
 
             def counting_fold(row, state):
                 folded["n"] += 1
                 return real_fold(row, state)
 
-            P._fold_remaining = counting_fold
+            wb_usage_remaining._fold_remaining = counting_fold
             try:
                 restart_fold()
                 reload_checkpoint_cache()
                 again = payload(accounts, now=now)
             finally:
-                P._fold_remaining = real_fold
+                wb_usage_remaining._fold_remaining = real_fold
             self.assertEqual(folded["n"], 0, "重启后不该重折任何一行")
             self.assertEqual(again, first, "checkpoint 续读的载荷应与冷折一致")
         finally:
@@ -769,7 +768,7 @@ class RemainingUsageTests(unittest.TestCase):
                 calls.append(("model", dict(limits), per_model)); return dict(limits)
 
         stats_calls = {"n": 0}
-        real_stats = P.daily_usage_stats
+        real_stats = U.daily_usage_stats
 
         def counting_stats(ttl=None):
             stats_calls["n"] += 1
@@ -781,20 +780,20 @@ class RemainingUsageTests(unittest.TestCase):
         # ACCOUNTS_DIR 是脚本自身目录、不走环境变量，这里显式指到临时目录，
         # 否则护栏读的是仓库里的 accounts/。
         P.ACCOUNTS_DIR = ACCOUNTS_DIR
-        P.daily_usage_stats = counting_stats
+        U.daily_usage_stats = counting_stats
         try:
             # 没配限额：一次折叠都不该发生，也不该碰池子。
             for key in ("daily_token_limit", "daily_credit_limit",
                         "model_daily_token_limit"):
                 wb_settings.set_limit(ACCOUNTS_DIR, key, "global", 0)
-            self.assertEqual(P.apply_daily_guards(), 0)
+            self.assertEqual(U.apply_daily_guards(), 0)
             self.assertEqual(stats_calls["n"], 0)
             self.assertEqual(calls, [])
 
             wb_settings.set_limit(ACCOUNTS_DIR, "daily_token_limit", "global", 1000)
             wb_settings.set_limit(ACCOUNTS_DIR, "model_daily_token_limit", "global", 50)
             write_log([usage_row(time.time() - HOUR, "acct-A", 700)])
-            self.assertEqual(P.apply_daily_guards(), 2)
+            self.assertEqual(U.apply_daily_guards(), 2)
             self.assertEqual(stats_calls["n"], 1, "三份限额共用一次折叠")
             self.assertEqual([c[0] for c in calls], ["token", "model"])
             # 折叠失败（读不到日志）时三份都拿到 None，绝不据此停号。
@@ -803,7 +802,7 @@ class RemainingUsageTests(unittest.TestCase):
             try:
                 # refresh=True 绕开计数器的 TTL，确保这次真的去读（读不到）。
                 # 设置保存路径会把三条护栏都推一次，值为 0 的也推。
-                self.assertEqual(P.apply_daily_guards(refresh=True), 3)
+                self.assertEqual(U.apply_daily_guards(refresh=True), 3)
             finally:
                 P.USAGE_LOG = saved
             self.assertTrue(all(c[2] is None for c in calls),
@@ -813,7 +812,7 @@ class RemainingUsageTests(unittest.TestCase):
             real_pool = wb_accounts.AccountPool(ACCOUNTS_DIR, log=None)
             real_pool.accounts = [account("acct-A")]
             P.POOL = real_pool
-            self.assertEqual(P.apply_daily_guards(refresh=True), 3)
+            self.assertEqual(U.apply_daily_guards(refresh=True), 3)
             self.assertEqual(real_pool.accounts[0].daily_token_limit, 1000)
 
             # 一次读取多键：逐值与单键入口一致，且只读一次限额表。
@@ -839,7 +838,7 @@ class RemainingUsageTests(unittest.TestCase):
         finally:
             P.POOL = old_pool
             P.ACCOUNTS_DIR = old_dir
-            P.daily_usage_stats = real_stats
+            U.daily_usage_stats = real_stats
             for key in ("daily_token_limit", "daily_credit_limit",
                         "model_daily_token_limit"):
                 try:
@@ -848,26 +847,26 @@ class RemainingUsageTests(unittest.TestCase):
                     pass
 
     def test_live_cap_event_is_persisted_and_survives_restart(self):
-        # The request path records the cap the moment it is classified: the
-        # rows that led to it are in the log but may not be scanned yet.
-        reset = time.time() + 30 * 60          # the window is spent, resets later
+        # 请求路径在判定撞线的那一刻就记下它：引发撞线的行已在日志里，但可能
+        # 还没被扫到。
+        reset = time.time() + 30 * 60          # 窗口已耗尽，稍后重置
         write_log([
-            usage_row(reset - 25 * HOUR, "acct-A", 111111),   # outside: ignored
+            usage_row(reset - 25 * HOUR, "acct-A", 111111),   # 窗口外，忽略
             usage_row(reset - 3 * HOUR, "acct-A", 4000),
             usage_row(reset - HOUR, "acct-A", 1500),
         ])
-        P.note_limit_event(account("acct-A"), MODEL, reset)
+        U.note_limit_event(account("acct-A"), MODEL, reset)
 
         data = payload([account("acct-A")], now=reset - 10 * 60)
         budget = data["budgets"][0]
-        self.assertEqual(budget["avg"], 5500)   # 4000 + 1500, live sample
+        self.assertEqual(budget["avg"], 5500)   # 4000 + 1500，实时样本
         self.assertEqual(budget["n"], 1)
         row = find_row(data, "acct-A")
         self.assertTrue(row["cooling"])
         self.assertEqual(row["remaining"], 0)
         self.assertEqual(row["reset_at"], reset)
 
-        # A restart re-reads the journal: the event (and its sample) survives.
+        # 重启重读事件日志，事件和它的样本都保留下来。
         restart_fold()
         data = payload([account("acct-A")], now=reset - 10 * 60)
         self.assertEqual(data["budgets"][0]["avg"], 5500)
@@ -879,14 +878,13 @@ class RemainingUsageTests(unittest.TestCase):
                                               time.localtime(reset)))
         write_log([
             usage_row(reset - 2 * HOUR, "acct-A", 900),
-            # The 429 row the log keeps for this same cap (the last account of
-            # the retry batch keeps its attribution).
+            # 日志为同一撞线保留的 429 行（重试批次的最后一个账号保留归属）。
             cap_row(reset - HOUR, "acct-A", detail),
         ])
-        P.note_limit_event(account("acct-A"), MODEL, reset)
+        U.note_limit_event(account("acct-A"), MODEL, reset)
         data = payload([account("acct-A")], now=reset - 10 * 60)
-        # One cap, one sample - the live event and the log row are the same
-        # (account, model, reset) and must not double-count.
+        # 一次撞线一个样本：实时事件与日志行的（账号、模型、重置时刻）相同，
+        # 不得重复计数。
         self.assertEqual(len(data["budgets"]), 1)
         self.assertEqual(data["budgets"][0]["n"], 1)
 
@@ -905,7 +903,7 @@ class RemainingUsageTests(unittest.TestCase):
                P.ESTIMATE_DAILY_FILE, P.RECENT_INDEX_FILE)
         old_activity = wb_activity.data_dir()
         try:
-            P._apply_cli_overrides(types.SimpleNamespace(
+            B._apply_cli_overrides(P, types.SimpleNamespace(
                 lan=False, host="127.0.0.1", user_agent=None, usage_dir=directory))
             self.assertEqual(P.USAGE_LOG, os.path.join(directory, "usage.jsonl"))
             self.assertEqual(P.LIMIT_EVENTS_FILE,
@@ -915,7 +913,7 @@ class RemainingUsageTests(unittest.TestCase):
             self.assertEqual(P.RECENT_INDEX_FILE,
                              os.path.join(directory, "usage-recent-index.json"))
             # 归档也真的写进新目录（而不是旧目录 / ENOENT）。
-            P._estimate_daily_sync(
+            U._estimate_daily_sync(
                 {"2026-10-14": {"budgets": {}, "segments": {}}},
                 local_epoch(2026, 10, 15, 12, 0, 0))
             self.assertTrue(os.path.exists(
@@ -925,13 +923,13 @@ class RemainingUsageTests(unittest.TestCase):
                 P.ESTIMATE_DAILY_FILE, P.RECENT_INDEX_FILE = old
             wb_activity.set_data_dir(old_activity)
             # 缓存里还留着临时目录的戳，还原后立刻失效掉。
-            P._estimate_daily_cache["entry"] = (
+            U._estimate_daily_cache["entry"] = (
                 (P.ESTIMATE_DAILY_FILE, None, None), {})
 
     def test_live_event_for_a_different_reset_is_a_second_sample(self):
-        # Two caps on the same pair a day apart (the 24h window in between),
-        # with the clock frozen so each hook call sees the usage of its own
-        # window only. 时间锚在本地日上：跨天分桶看的是撞线当天的本地日期。
+        # 同一组合相隔一天两次撞线（中间隔 24 小时窗口），时钟冻结，让每次
+        # 钩子调用只看到自己窗口的用量。时间锚在本地日上：跨天分桶看的是
+        # 撞线当天的本地日期。
         real_time = time.time
         day1 = local_epoch(2026, 10, 10, 9, 0, 0)        # 昨天
         day2 = local_epoch(2026, 10, 11, 10, 0, 0)       # 今天
@@ -940,7 +938,7 @@ class RemainingUsageTests(unittest.TestCase):
         try:
             reset1 = day1 + 30 * 60
             write_log([usage_row(day1 - 2 * HOUR, "acct-A", 700)])
-            P.note_limit_event(account("acct-A"), MODEL, reset1)
+            U.note_limit_event(account("acct-A"), MODEL, reset1)
 
             clock["now"] = day2
             reset2 = day2 + 30 * 60
@@ -948,7 +946,7 @@ class RemainingUsageTests(unittest.TestCase):
                 usage_row(day1 - 2 * HOUR, "acct-A", 700),      # 窗口 1
                 usage_row(day2 - 6 * HOUR, "acct-A", 1300),     # 窗口 2
             ])
-            P.note_limit_event(account("acct-A"), MODEL, reset2)
+            U.note_limit_event(account("acct-A"), MODEL, reset2)
 
             data = payload([account("acct-A")], now=clock["now"])
         finally:
@@ -961,7 +959,7 @@ class RemainingUsageTests(unittest.TestCase):
         self.assertEqual(budget["n"], 2)                 # 各天账号数之和
         self.assertEqual([(d["day"], d["w"], d["avg"]) for d in budget["days"]],
                          [("2026-10-11", 6, 1300), ("2026-10-10", 3, 700)])
-        # The window in force is the later reset's, and it is still cooling.
+        # 生效窗口是后一次撞线的，仍在冷却中。
         row = find_row(data, "acct-A")
         self.assertEqual(row["reset_at"], reset2)
         self.assertTrue(row["cooling"])
@@ -1159,7 +1157,7 @@ class RemainingUsageTests(unittest.TestCase):
             write_log([
                 usage_row(reset - 2 * HOUR, "acct-A", 900, model="glm-5.3"),
             ])
-            P.note_limit_event(account("acct-A"), "glm-5.3", reset)
+            U.note_limit_event(account("acct-A"), "glm-5.3", reset)
         finally:
             time.time = real_time
         # 前天结束时归档一次（进程在昨天构建过），今天再从归档里读。
@@ -1237,7 +1235,7 @@ class RemainingUsageTests(unittest.TestCase):
                 usage_row(reset - 3 * HOUR, "acct-A", 1200),
                 usage_row(reset - 2 * HOUR, "acct-B", 800),
             ])
-            P.note_limit_event(account("acct-A"), MODEL, reset)
+            U.note_limit_event(account("acct-A"), MODEL, reset)
         finally:
             time.time = real_time
         # 进程重启：内存折叠清空、checkpoint 缓存重读；第一次构建才发现跨天。
@@ -1263,7 +1261,7 @@ class RemainingPriorityTests(unittest.TestCase):
 
     权重表由 wb_proxy 从剩余估算载荷算出（_remaining_schedule_weight /
     remaining_schedule_weights），池只消费（apply_remaining_weights 推表、
-    _pick_scored 把权重折进评分）。这里钉住：分档边界、无预算样本 / 剩余为 0
+    _pick_scored 把权重折进评分）。这里断言：分档边界、无预算样本 / 剩余为 0
     不加权、只在智能分配且同一模型内生效、没有组合独占流量、临期积分层仍优先。
     """
 
@@ -1281,7 +1279,7 @@ class RemainingPriorityTests(unittest.TestCase):
         return pool
 
     def test_weight_bands_and_boundaries(self):
-        weight = P._remaining_schedule_weight
+        weight = U._remaining_schedule_weight
         # 剩不到 30% 开始加权，5% 以内最重：边界落在分档内的一侧。
         self.assertEqual(weight(50, 1000), 4)
         self.assertEqual(weight(51, 1000), 3)
@@ -1292,7 +1290,7 @@ class RemainingPriorityTests(unittest.TestCase):
         self.assertEqual(weight(1000, 1000), 1)
 
     def test_unknown_or_empty_estimates_are_not_weighted(self):
-        weight = P._remaining_schedule_weight
+        weight = U._remaining_schedule_weight
         # 没有预算样本：没有可比较的尺度，不猜。
         self.assertEqual(weight(None, 1000), 1)
         self.assertEqual(weight(100, None), 1)
@@ -1325,7 +1323,7 @@ class RemainingPriorityTests(unittest.TestCase):
             old_pool = P.POOL
             P.POOL = _Pool()
             try:
-                weights = P.remaining_schedule_weights()
+                weights = U.remaining_schedule_weights()
             finally:
                 P.POOL = old_pool
         finally:
@@ -1336,7 +1334,7 @@ class RemainingPriorityTests(unittest.TestCase):
         old_pool = P.POOL
         P.POOL = None
         try:
-            self.assertEqual(P.remaining_schedule_weights(), {})
+            self.assertEqual(U.remaining_schedule_weights(), {})
         finally:
             P.POOL = old_pool
 

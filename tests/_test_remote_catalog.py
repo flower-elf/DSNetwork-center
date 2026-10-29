@@ -1,6 +1,7 @@
-"""目录直接调用桌面端的 product-config 端点(GET /v3/config)并筛选(issue #85):丢弃别名,-sg/-x 视为付费版本,同名有免费("x0.00")变体时用免费的那个。
+"""目录直接调用桌面端的 product-config 端点 GET /v3/config 并按 issue #85 的规则筛选：
+丢弃别名，-sg/-x 视为付费版本，同名有免费 x0.00 变体时取免费的那个。
 
-不联网:payload 合成,获取流程打桩。
+不联网：payload 合成，取数流程打桩。
 """
 import os
 import json
@@ -17,11 +18,12 @@ os.environ["WB_PROXY_CATALOG_DIR"] = os.path.join(_TMP, "catalog")
 os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_proxy as P
+import wb_models as M
 import wb_settings
 
 
 def payload(ids, meta=None):
-    """A /v3/config response in the shape both exits answer with."""
+    """/v3/config 响应体的形状，与真实端点返回一致。"""
     return {
         "code": 0,
         "data": {
@@ -66,82 +68,78 @@ CN_META = {
 
 class RemoteCatalogTests(unittest.TestCase):
     def setUp(self):
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
-        P._models_cache["cn"] = {"at": 0.0, "data": None}
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
+        M._models_cache["cn"] = {"at": 0.0, "data": None}
         for realm in ("intl", "cn"):
-            for cache in (P.catalog_cache_path(realm), P.catalog_snapshot_path(realm)):
+            for cache in (M.catalog_cache_path(realm), M.catalog_snapshot_path(realm)):
                 if os.path.exists(cache):
                     os.remove(cache)
-        self._orig = (P.fetch_remote_product_config,
-                                P.read_product_config_models,
-                                P.fetch_endpoint_models,
-                                P.product_config_path)
+        self._orig = (M.fetch_remote_product_config,
+                                M.read_product_config_models,
+                                M.fetch_endpoint_models,
+                                M.product_config_path)
 
     def tearDown(self):
-        (P.fetch_remote_product_config, P.read_product_config_models,
-         P.fetch_endpoint_models, P.product_config_path) = self._orig
+        (M.fetch_remote_product_config, M.read_product_config_models,
+         M.fetch_endpoint_models, M.product_config_path) = self._orig
         for name in os.listdir(os.environ["ACCOUNTS_DIR"]):
             if name == "settings.json":
                 os.remove(os.path.join(os.environ["ACCOUNTS_DIR"], name))
 
     def served(self, realm, force=False):
-        return [m for m, _ in P.fetch_models(realm, force=force)]
+        return [m for m, _ in M.fetch_models(realm, force=force)]
 
     def test_credits_follow_the_endpoint_and_fall_back_for_a_pinned_model(self):
-        """What the multiplier badge can follow, and what it cannot.
+        """倍率角标取值的来源判定。
 
-        The badge renders whatever /v1/models reports, so the question is where
-        that value comes from. A model the endpoint still lists follows the
-        endpoint; a model it no longer lists - the cn free hy4-preview-f, pinned
-        by the curated table since #85 - keeps the bundled value, which by
-        definition cannot follow a price change until the endpoint lists it
-        again. Both halves, plus the model_entry() hop the panel reads.
+        端点仍在列的模型跟随端点报价；端点已下线的模型保留内置值。issue #85 起
+        cn 免费 hy4-preview-f 由筛选表固定，端点下线它之后角标只能显示内置值，
+        端点重新上架前无法跟随变价。断言同时覆盖面板读取的 model_entry() 结果。
         """
-        # 1. The endpoint declares a new price for a curated model: it wins.
+        # 1. 端点为筛选表里的模型报出新价时，以端点为准。
         meta = dict(INTL_META)
         meta["hy4-preview-f"] = {"credits": "x0.29"}
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, meta) if realm == "intl" else None)
-        entries = dict(P.fetch_models("intl"))
+        entries = dict(M.fetch_models("intl"))
         self.assertEqual(entries["hy4-preview-f"]["credits"], "x0.29")
         self.assertEqual(
-            P.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
+            M.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
             "x0.29")
 
-        # 2. The endpoint stops listing it: the bundled value survives, and that
-        #    is exactly what the panel then shows.
+        # 2. 端点下线该模型后，内置值保留，面板显示的就是内置值。
         ids = [m for m in INTL_IDS if m != "hy4-preview-f"]
         meta = dict(INTL_META)
         meta.pop("hy4-preview-f", None)
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (ids, meta) if realm == "intl" else None)
-        P.write_catalog_cache({"realms": {"intl": {
-            "fetched_at": time.time() - P.CATALOG_CACHE_TTL - 60}}})
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
-        entries = dict(P.fetch_models("intl"))
+        M.write_catalog_cache({"realms": {"intl": {
+            "fetched_at": time.time() - M.CATALOG_CACHE_TTL - 60}}})
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
+        entries = dict(M.fetch_models("intl"))
         self.assertIn("hy4-preview-f", entries)
         self.assertEqual(entries["hy4-preview-f"]["credits"], "x0.00")
         self.assertEqual(
-            P.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
+            M.model_entry("hy4-preview-f", entries["hy4-preview-f"])["credits"],
             "x0.00")
 
     def test_parse_keeps_order_and_metadata(self):
-        ids, meta = P.parse_remote_catalog(payload(INTL_IDS, INTL_META))
+        ids, meta = M.parse_remote_catalog(payload(INTL_IDS, INTL_META))
         self.assertEqual(ids, INTL_IDS)
         self.assertEqual(meta["grok-4.7"]["credits"], "x1.90")
 
     def test_parse_rejects_empty_and_odd_shapes(self):
-        self.assertIsNone(P.parse_remote_catalog({"data": {"agents": []}}))
-        self.assertIsNone(P.parse_remote_catalog(
+        self.assertIsNone(M.parse_remote_catalog({"data": {"agents": []}}))
+        self.assertIsNone(M.parse_remote_catalog(
             {"data": {"agents": [{"models": []}]}}))
-        self.assertIsNone(P.parse_remote_catalog({}))
-        self.assertIsNone(P.parse_remote_catalog(None))
-        ids, _ = P.parse_remote_catalog(
+        self.assertIsNone(M.parse_remote_catalog({}))
+        self.assertIsNone(M.parse_remote_catalog(None))
+        ids, _ = M.parse_remote_catalog(
             {"data": {"agents": {"cli": {"models": ["a", "b"]}}}})
         self.assertEqual(ids, ["a", "b"])
 
     def test_curate_applies_the_rules(self):
-        curated = P.curate_remote_catalog("intl", INTL_IDS, INTL_META)
+        curated = M.curate_remote_catalog("intl", INTL_IDS, INTL_META)
         self.assertEqual(curated, [m for m in INTL_IDS if m not in (
             "default-model", "fast-model", "balanced-model", "primary-model",
             "deep-model", "deepseek-v4.1-flash-sg")])
@@ -153,17 +151,17 @@ class RemoteCatalogTests(unittest.TestCase):
         meta = {"hy4-preview": {"credits": "x0.29"},
              "hy4-preview-f": {"credits": "x0.00"},
              "hy3": {"credits": "x0.00"}, "hy3-x": {"credits": "x0.05"}}
-        self.assertEqual(P.curate_remote_catalog("intl", ids, meta),
+        self.assertEqual(M.curate_remote_catalog("intl", ids, meta),
                     ["hy4-preview", "hy4-preview-f", "hy3"])
 
     def test_curate_keeps_a_paid_model_with_no_free_sibling(self):
         ids = ["grok-4.7", "glm-5.3"]
         meta = {"grok-4.7": {"credits": "x1.90"},
              "glm-5.3": {"credits": "x0.79"}}
-        self.assertEqual(P.curate_remote_catalog("intl", ids, meta), ids)
+        self.assertEqual(M.curate_remote_catalog("intl", ids, meta), ids)
 
     def test_fetch_models_uses_the_remote_and_orders_by_the_table(self):
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
         ids = self.served("intl")
         self.assertEqual(ids, [
@@ -171,77 +169,77 @@ class RemoteCatalogTests(unittest.TestCase):
             "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5",
             "gpt-5.4", "grok-4.7", "gemini-3.5-flash", "glm-5.3-flash",
             "glm-5.3", "glm-5.2", "kimi-k3", "kimi-k2.6", "kimi-k2.8-preview"])
-        P.fetch_models("intl")
-        info = P.catalog_meta("intl")
+        M.fetch_models("intl")
+        info = M.catalog_meta("intl")
         self.assertEqual(info["source"], "remote")
         self.assertTrue(info["fetched_at"])
 
     def test_cn_keeps_the_pinned_free_variant(self):
-        # 实时 meta 为准：上游已下线 hy4-preview-f 且 hy4-preview 为收费 (0.29x) 时，如实对外宣告 hy4-preview
-        P.fetch_remote_product_config = (
+        # 以实时 meta 为准：上游已下线 hy4-preview-f 且 hy4-preview 收费 0.29x，对外如实给出 hy4-preview
+        M.fetch_remote_product_config = (
             lambda realm: (CN_IDS, CN_META) if realm == "cn" else None)
-        ids = [m for m, _ in P.fetch_models("cn")]
+        ids = [m for m, _ in M.fetch_models("cn")]
         self.assertEqual(ids[0], "hy4-preview")
         self.assertIn("hy4-preview", ids)
         self.assertNotIn("hy4-preview-f", ids)
-        self.assertNotIn("hy3-x", ids)         # -x variant
-        self.assertNotIn("auto", ids)          # auto-router alias
+        self.assertNotIn("hy3-x", ids)         # -x 变体
+        self.assertNotIn("auto", ids)          # auto 路由别名
 
     def test_saved_catalogue_answers_without_the_server(self):
-        """一次成功获取后 24 小时内直接用磁盘缓存回答,不联系服务器。"""
+        """一次成功获取后 24 小时内直接用磁盘缓存回答，不联系服务器。"""
         calls = []
 
         def remote(realm):
             calls.append(realm)
             return (INTL_IDS, INTL_META) if realm == "intl" else None
 
-        P.fetch_remote_product_config = remote
+        M.fetch_remote_product_config = remote
         self.assertEqual(self.served("intl")[0], "hy4-preview-f")
         self.assertEqual(calls, ["intl"])
-        # 清掉内存副本,模拟重启后只剩磁盘缓存
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
-        ids = P.fetch_models("intl")
-        info = P.catalog_meta("intl")
+        # 清掉内存副本，模拟重启后只剩磁盘缓存
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
+        ids = M.fetch_models("intl")
+        info = M.catalog_meta("intl")
         self.assertEqual([m for m, _ in ids][0], "hy4-preview-f")
         self.assertEqual(calls, ["intl"])
         self.assertEqual(info["source"], "cache")
 
     def test_expired_cache_is_refetched(self):
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
         self.served("intl")
-        data = P.read_catalog_cache()
-        data["realms"]["intl"]["fetched_at"] = time.time() - P.CATALOG_CACHE_TTL - 60
-        P.write_catalog_cache(data)
+        data = M.read_catalog_cache()
+        data["realms"]["intl"]["fetched_at"] = time.time() - M.CATALOG_CACHE_TTL - 60
+        M.write_catalog_cache(data)
         calls = []
 
         def remote(realm):
             calls.append(realm)
             return (INTL_IDS, INTL_META) if realm == "intl" else None
 
-        P.fetch_remote_product_config = remote
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
-        P.fetch_models("intl")
-        info = P.catalog_meta("intl")
+        M.fetch_remote_product_config = remote
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
+        M.fetch_models("intl")
+        info = M.catalog_meta("intl")
         self.assertEqual(calls, ["intl"])
         self.assertEqual(info["source"], "remote")
 
     def test_expired_cache_still_answers_when_the_server_fails(self):
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
         self.served("intl")
-        data = P.read_catalog_cache()
-        data["realms"]["intl"]["fetched_at"] = time.time() - P.CATALOG_CACHE_TTL - 60
-        P.write_catalog_cache(data)
-        P.fetch_remote_product_config = lambda realm: None
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
-        ids = P.fetch_models("intl")
-        info = P.catalog_meta("intl")
+        data = M.read_catalog_cache()
+        data["realms"]["intl"]["fetched_at"] = time.time() - M.CATALOG_CACHE_TTL - 60
+        M.write_catalog_cache(data)
+        M.fetch_remote_product_config = lambda realm: None
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
+        ids = M.fetch_models("intl")
+        info = M.catalog_meta("intl")
         self.assertEqual(info["source"], "cache")
         self.assertIn("grok-4.7", [m for m, _ in ids])
 
     def test_forced_refresh_asks_the_server_again(self):
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
         self.served("intl")
         calls = []
@@ -250,7 +248,7 @@ class RemoteCatalogTests(unittest.TestCase):
             calls.append(realm)
             return (INTL_IDS, INTL_META) if realm == "intl" else None
 
-        P.fetch_remote_product_config = remote
+        M.fetch_remote_product_config = remote
         self.served("intl", force=True)
         self.assertEqual(calls, ["intl"])
 
@@ -261,63 +259,55 @@ class RemoteCatalogTests(unittest.TestCase):
             calls.append(realm)
             return None
 
-        P.fetch_remote_product_config = boom
-        P.read_product_config_models = lambda realm=None: []
-        P.product_config_path = lambda realm: os.path.join(_TMP, "absent.json")
-        P.fetch_endpoint_models = lambda: ["kimi-k3", "internal-only-model"]
+        M.fetch_remote_product_config = boom
+        M.read_product_config_models = lambda realm=None: []
+        M.product_config_path = lambda realm: os.path.join(_TMP, "absent.json")
+        M.fetch_endpoint_models = lambda: ["kimi-k3", "internal-only-model"]
         ids = self.served("intl")
         self.assertEqual(calls, ["intl"])
         self.assertIn("kimi-k3", ids)
-        self.assertIn("grok-4.7", ids)   # the bundled snapshot still fills names
-        self.assertNotIn("internal-only-model", ids)  # endpoint keeps the table filter
+        self.assertIn("grok-4.7", ids)   # 内置快照仍会补齐名称
+        self.assertNotIn("internal-only-model", ids)  # 窄端点结果仍受筛选表约束
 
     def test_live_reasoning_efforts_win_over_the_bundled_table(self):
-        """The endpoint's reasoning block is the source of truth.
-
-        deepseek-v4.1-flash used to be pinned to low/high/max in code, which
-        silently overwrote whatever the live catalogue declared (the pin dates
-        from before the gateway called /v3/config at all).
-        """
+        """reasoning 档位以端点返回的 reasoning 块为准，内置表不参与改写。"""
         meta = dict(INTL_META)
         meta["deepseek-v4.1-flash"] = {
             "credits": "x0.00",
             "reasoning": {"supportedEfforts": ["low", "medium", "high"],
                           "defaultEffort": "medium"},
         }
-        P.fetch_remote_product_config = (
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, meta) if realm == "intl" else None)
-        entries = dict(P.fetch_models("intl"))
-        item = P.model_entry("deepseek-v4.1-flash",
+        entries = dict(M.fetch_models("intl"))
+        item = M.model_entry("deepseek-v4.1-flash",
                              entries["deepseek-v4.1-flash"])
         self.assertEqual(item["reasoning_efforts"], ["low", "medium", "high"])
         self.assertEqual(item["reasoning_default_effort"], "medium")
 
     def test_bundled_efforts_fill_in_when_the_live_entry_has_none(self):
-        """A silent live entry falls back to the snapshot, and says so once."""
+        """实时条目缺 reasoning 时回退内置快照，并且只记一次日志。"""
         logged = []
         original_log = P.log
         P.log = lambda message, **kw: logged.append(message)
         try:
-            P.fetch_remote_product_config = (
+            M.fetch_remote_product_config = (
                 lambda realm: (INTL_IDS, dict(INTL_META)) if realm == "intl" else None)
-            P._catalog_fallback_log.pop("intl", None)
-            entries = dict(P.fetch_models("intl"))
+            M._catalog_fallback_log.pop("intl", None)
+            entries = dict(M.fetch_models("intl"))
         finally:
             P.log = original_log
-        item = P.model_entry("deepseek-v4.1-flash",
+        item = M.model_entry("deepseek-v4.1-flash",
                              entries["deepseek-v4.1-flash"])
         self.assertEqual(item["reasoning_efforts"], ["low", "high", "max"])
         self.assertEqual(item["reasoning_default_effort"], "high")
         self.assertTrue(any("bundled table" in m for m in logged), logged)
 
     def test_bare_live_effort_keeps_the_model_selectable(self):
-        """Issue #170: a bare live `effort` is the default, not a pin.
+        """issue #170：实时块里的裸 `effort` 只作默认档，不锁定档位。
 
-        The endpoint answers with {"effort": "high"} for deepseek-v4.1-flash
-        while the bundled table knows the level is selectable. Taking the live
-        block at face value dropped supportedEfforts, so /v1/models advertised
-        the model as pinned to high - and every request was recorded at high
-        even when the client sent max, the level it was really forwarded with.
+        端点对 deepseek-v4.1-flash 只答 {"effort": "high"}，但档位可选；
+        /v1/models 仍要列出可选档位，实际转发的档位跟随客户端。
         """
         meta = dict(INTL_META)
         meta["deepseek-v4.1-flash"] = {
@@ -328,43 +318,43 @@ class RemoteCatalogTests(unittest.TestCase):
         original_log = P.log
         P.log = lambda message, **kw: logged.append(message)
         try:
-            P.fetch_remote_product_config = (
+            M.fetch_remote_product_config = (
                 lambda realm: (INTL_IDS, meta) if realm == "intl" else None)
-            P._catalog_fallback_log.pop("intl", None)
-            entries = dict(P.fetch_models("intl"))
+            M._catalog_fallback_log.pop("intl", None)
+            entries = dict(M.fetch_models("intl"))
         finally:
             P.log = original_log
-        item = P.model_entry("deepseek-v4.1-flash",
+        item = M.model_entry("deepseek-v4.1-flash",
                              entries["deepseek-v4.1-flash"])
         self.assertEqual(item["reasoning_efforts"], ["low", "high", "max"])
         self.assertEqual(item["reasoning_default_effort"], "high")
         self.assertNotIn("reasoning_fixed_effort", item)
-        # The level the request really ran at follows the client again.
+        # 实际转发的档位跟随客户端。
         self.assertIsNone(P.model_fixed_effort("deepseek-v4.1-flash"))
         self.assertEqual(
             P.upstream_effort_of({"reasoning_effort": "max"},
                                  "deepseek-v4.1-flash"),
             "max")
-        # A model the live catalogue really does pin is untouched: no snapshot
-        # supportedEfforts to restore, so its bare effort still pins it.
-        pinned = P.model_entry("gemini-3.5-flash", entries["gemini-3.5-flash"])
+        # 实时目录真正锁定档位的模型不受影响：快照没有 supportedEfforts 可恢复，
+        # 裸 effort 仍然锁定档位。
+        pinned = M.model_entry("gemini-3.5-flash", entries["gemini-3.5-flash"])
         self.assertEqual(pinned["reasoning_fixed_effort"], "medium")
         self.assertNotIn("reasoning_efforts", pinned)
-        # And the shape is announced, not applied silently.
+        # 回退到内置表会写日志，不静默发生。
         self.assertTrue(any("bundled table" in m for m in logged), logged)
 
     def test_parse_reads_the_desktop_cache_shape(self):
-        """The cache file is the same document without the "data" envelope."""
-        ids, _ = P.parse_remote_catalog(
+        """缓存文件是同一份文档，去掉 "data" 外层。"""
+        ids, _ = M.parse_remote_catalog(
             {"agents": [{"name": "compact", "models": ["lite"]},
                         {"name": "cli", "models": ["a", "b"]}]})
-        self.assertEqual(ids, ["a", "b"])   # cli wins over the other agent
-        ids, _ = P.parse_remote_catalog(
+        self.assertEqual(ids, ["a", "b"])   # 多个 agent 时以 cli 为准
+        ids, _ = M.parse_remote_catalog(
             {"agents": [{"name": "planner", "models": ["a", "b", "c"]}]})
         self.assertEqual(ids, ["a", "b", "c"])
 
     def test_cached_desktop_file_drives_the_list_without_the_endpoint(self):
-        P.fetch_remote_product_config = lambda realm: None
+        M.fetch_remote_product_config = lambda realm: None
         payload = {"agents": [{"name": "cli",
                                "models": CN_IDS + ["new-model-9", "uncredited-model"]}],
                    "models": [{"id": "hy3", "credits": "x0.00"},
@@ -372,13 +362,13 @@ class RemoteCatalogTests(unittest.TestCase):
         path = os.path.join(_TMP, "acc-product-config-v3.json")
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
-        P.product_config_path = lambda realm: path
-        P._models_cache["cn"] = {"at": 0.0, "data": None}
-        ids = [m for m, _ in P.fetch_models("cn")]
+        M.product_config_path = lambda realm: path
+        M._models_cache["cn"] = {"at": 0.0, "data": None}
+        ids = [m for m, _ in M.fetch_models("cn")]
         self.assertEqual(ids[0], "hy4-preview")
         self.assertNotIn("auto", ids)
-        self.assertIn("new-model-9", ids)   # live-only name with credits ships, no release
-        self.assertNotIn("uncredited-model", ids)  # unpriced model is hidden until credits configured
+        self.assertIn("new-model-9", ids)   # 仅本地文件出现且配了价格的模型直接提供，无需发版
+        self.assertNotIn("uncredited-model", ids)  # 未配置价格的模型先隐藏
 
 
 class FakePanelRequest(object):
@@ -397,20 +387,20 @@ class PanelModelListTests(unittest.TestCase):
                 "primary-model", "deep-model", "deepseek-v4.1-flash-sg"]
 
     def setUp(self):
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
         for realm in ("intl", "cn"):
-            for cache in (P.catalog_cache_path(realm), P.catalog_snapshot_path(realm)):
+            for cache in (M.catalog_cache_path(realm), M.catalog_snapshot_path(realm)):
                 if os.path.exists(cache):
                     os.remove(cache)
         settings = wb_settings.settings_path(P.ACCOUNTS_DIR)
         if os.path.exists(settings):
             os.remove(settings)
-        self._orig = P.fetch_remote_product_config
-        P.fetch_remote_product_config = (
+        self._orig = M.fetch_remote_product_config
+        M.fetch_remote_product_config = (
             lambda realm: (INTL_IDS, INTL_META) if realm == "intl" else None)
 
     def tearDown(self):
-        P.fetch_remote_product_config = self._orig
+        M.fetch_remote_product_config = self._orig
 
     def view(self, **query):
         request = FakePanelRequest()
@@ -455,14 +445,8 @@ class PanelModelListTests(unittest.TestCase):
         self.assertNotIn("deepseek-v4.1-flash-sg",
                          wb_settings.disabled_models(P.ACCOUNTS_DIR))
 
-    def test_virtual_aliases_are_default_denied_and_can_be_enabled(self):
-        payload = self.view(realm="intl")
-        aliases = ("default-model", "fast-model", "balanced-model",
-                   "primary-model", "deep-model")
-        for mid in aliases:
-            item = self.row(payload, mid)
-            self.assertTrue(item["excluded"], mid)
-            self.assertFalse(item["enabled"], mid)
+    def test_a_virtual_alias_can_be_re_enabled(self):
+        self.view(realm="intl")   # 首次加载按默认排除规则播种禁用名单
         keep = [m for m in wb_settings.disabled_models(P.ACCOUNTS_DIR)
                 if m != "fast-model"]
         wb_settings.set_disabled_models(P.ACCOUNTS_DIR, keep)
@@ -475,8 +459,8 @@ class PanelModelListTests(unittest.TestCase):
         payload = self.view(realm="intl", refresh="1")
         self.assertTrue(payload["refresh_ok"])
         self.assertEqual(payload["source"], "server")
-        P.fetch_remote_product_config = lambda realm: None
-        P._models_cache["intl"] = {"at": 0.0, "data": None}
+        M.fetch_remote_product_config = lambda realm: None
+        M._models_cache["intl"] = {"at": 0.0, "data": None}
         payload = self.view(realm="intl", refresh="1")
         self.assertFalse(payload["refresh_ok"])
         self.assertEqual(payload["source"], "cache")

@@ -2,15 +2,15 @@
 
 recent_usage 的每一页都要从日志尾部往回数到第 N×limit 条记录才定位得到：
 第 1 页至少读回一个 256KB 块，realm 过滤命中率低时要读回整个文件，页深越大
-代价越大。这一套钉住新加的「行偏移索引」——每 64KB 记一条「行边界 + 累计
+代价越大。这一套断言新加的「行偏移索引」——每 64KB 记一条「行边界 + 累计
 记录数」，页直接从索引定位：
 
   * 页内容：索引可用时与老实现逐字节一致。对拍口径就是同一个进程里把索引
     关掉（WB_RECENT_INDEX=0 走 _recent_backward_page，老实现原样搬过去的
     那条路），多页号、realm 过滤、夹页、空页、坏行/空行/老行全部覆盖；
-  * 读取量：页的读取是「一段（64KB）+ 页本身」的量级，不再按页深读回整份
-    日志（计数桩：包装模块里的 open 数读了多少字节；老路的 256KB 底价也
-    一并量出来，证明桩是活的）；
+  * 读取量：页的读取是「一段（64KB）+ 页本身」的量级，与页深无关（计数
+    桩：包装模块里的 open 数读了多少字节；老路的 256KB 底价也一并量出来，
+    证明桩是活的）；
   * 落盘：往返（重启后采纳）逐字节一致、追加后只折增量、索引文件 <10KB
     （4 万行日志）；
   * 降级：坏 JSON / schema 不符 / 段宽不符 / key-tail 不符 / 日志被截断、被
@@ -22,8 +22,7 @@ recent_usage 的每一页都要从日志尾部往回数到第 N×limit 条记录
     归属不一致就不许用索引的 realm 数字（老路永远用活池，永远是当前该有的
     数字）。
 
-No network: the usage log, the pricing snapshot and the settings file are
-synthesised in a temp directory.
+不联网：usage 日志、计价快照与 settings 文件在临时目录里现造。
 """
 import io
 import json
@@ -48,6 +47,8 @@ os.environ["WB_USAGE_CACHE"] = "0"          # checkpoint 与本套件无关
 os.environ["WB_COUNT_TTL"] = "0"            # 老路的页数标签每次现算
 
 import wb_proxy as P          # noqa: E402
+import wb_usage as U
+import wb_usage_recent as R
 import wb_pricing             # noqa: E402
 
 P.ACCOUNTS_DIR = ACCOUNTS_DIR
@@ -106,7 +107,7 @@ def _counting_open(*a, **kw):
     return _CountingFile(_REAL_OPEN(*a, **kw))
 
 
-P.open = _counting_open
+U.open = _counting_open
 
 
 def read_bytes(fn):
@@ -120,8 +121,8 @@ def read_bytes(fn):
 # 哪条路在跑：两个入口都包一层计数，断言「这次走的是索引 / 老路」
 # --------------------------------------------------------------------------
 CALLS = {"index": 0, "backward": 0}
-_real_index_page = P._recent_index_page
-_real_backward_page = P._recent_backward_page
+_real_index_page = R._recent_index_page
+_real_backward_page = R._recent_backward_page
 
 
 def _spy_index_page(snap, realm, page, limit):
@@ -134,13 +135,13 @@ def _spy_backward_page(realm, page, limit):
     return _real_backward_page(realm, page, limit)
 
 
-P._recent_index_page = _spy_index_page
-P._recent_backward_page = _spy_backward_page
+R._recent_index_page = _spy_index_page
+R._recent_backward_page = _spy_backward_page
 
 
 def reset_index():
     """清掉索引状态（等价于一次进程重启，只是磁盘上那份还在）。"""
-    P._recent_index_state.update({
+    R._recent_index_state.update({
         "stamp": None, "usable": False, "giveup": False, "giveup_key": None,
         "key": None, "size": 0, "tail": b"", "realm_map": None,
         "legacy": False, "realms": [], "counts": {}, "row_counts": {},
@@ -148,8 +149,8 @@ def reset_index():
 
 
 def reset_count():
-    P._count_cache.clear()
-    P._count_state.update({"offset": 0, "key": None, "tail": b"", "n": 0,
+    U._count_cache.clear()
+    U._count_state.update({"offset": 0, "key": None, "tail": b"", "n": 0,
                            "n_realm": {}})
 
 
@@ -161,7 +162,7 @@ def call_page(realm=None, limit=100, page_no=1, use_index=True, fresh=False):
     reset_count()
     CALLS["index"] = 0
     CALLS["backward"] = 0
-    text = json.dumps(P.recent_usage(limit=limit, realm=realm, page=page_no),
+    text = json.dumps(R.recent_usage(limit=limit, realm=realm, page=page_no),
                       ensure_ascii=False)
     return text, dict(CALLS)
 
@@ -340,9 +341,11 @@ RUNNER = r'''
 import json, os, sys
 sys.path.insert(0, __ROOT__)
 import wb_proxy as P
+import wb_usage as U
+import wb_usage_recent as R
 out = {}
 for key, kw in __CASES__:
-    out[key] = json.dumps(P.recent_usage(**kw), ensure_ascii=False)
+    out[key] = json.dumps(R.recent_usage(**kw), ensure_ascii=False)
 with open(os.environ["WB_CHILD_OUT"], "w", encoding="utf-8") as fh:
     json.dump(out, fh, ensure_ascii=False)
 print("child ok")

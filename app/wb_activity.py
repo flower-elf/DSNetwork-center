@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 
+import wb_host
+
 HISTORY_NAME = "activity_history.jsonl"
 
 TASK_CHECKIN = "checkin"
@@ -21,11 +23,6 @@ RESULT_ALIASES = {"ok": "ok", "success": "ok", "succeeded": "ok",
                   "failed": "failed", "fail": "failed", "failure": "failed"}
 
 REALMS = ("cn", "intl")
-
-# API 响应字段白名单。JSONL 可能混入其他写入方、手工补行或凭证字段，
-# 读取侧统一按此投影。
-ALLOWED_FIELDS = ("ts", "uid", "nickname", "realm", "task", "trigger", "ok",
-                  "message")
 
 DEFAULT_RANGE = "7d"
 RANGES = ("today", "1d", "7d", "30d", "90d", "all")
@@ -75,10 +72,7 @@ def history_path():
 
 def _gateway():
     """返回正在运行的网关模块。容器入口是 __main__。"""
-    main = sys.modules.get("__main__")
-    if main is not None and hasattr(main, "log"):
-        return main
-    return sys.modules.get("wb_proxy")
+    return wb_host.loaded_gateway("log") or sys.modules.get("wb_proxy")
 
 
 def _log(message):
@@ -127,7 +121,7 @@ def _as_bool(value):
 
 
 def project(row):
-    """把一行投影到 ALLOWED_FIELDS。
+    """把一行投影到固定字段。
 
     文件可能被其他写入方、手工编辑或夹带凭证的旧行改动过，直接返回解析字典会
     泄露多余键。这里同时归一字段类型与长度，message 再脱敏一次。
@@ -263,7 +257,7 @@ def query(range_key=None, uid=None, task=None, result=None, limit=None,
           usage_dir=None):
     """读取历史，最新在前；筛选在服务端完成，limit 有默认值与上限。
 
-    每行先投影到 ALLOWED_FIELDS 再筛选与返回，多余键与凭证字段不会从 API 漏出。
+    每行先投影到固定字段再筛选与返回，多余键与凭证字段不会从 API 漏出。
 
     认不出来的筛选值抛出 ValueError，由路由转换成 400。静默忽略写错的筛选条件
     会让调用方误以为这几天没有失败，实际却拿到了全部结果。

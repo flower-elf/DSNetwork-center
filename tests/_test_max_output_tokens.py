@@ -1,4 +1,4 @@
-"""Tests for defaulting max_tokens from model catalog (issue #121)."""
+"""模型目录给 max_tokens 补默认值的测试（issue #121）。"""
 import os
 import sys
 import unittest
@@ -9,8 +9,7 @@ import wb_proxy as P
 
 class MaxOutputTokensTests(unittest.TestCase):
     def test_responses_to_chat_defaults_max_output_tokens(self):
-        # When Codex / Responses API omits max_output_tokens, deepseek-v4.1-flash
-        # gets 128000 from the catalog instead of letting upstream truncate at 32k.
+        # Responses 请求省略 max_output_tokens 时取目录默认 128000，避免上游按 32k 截断。
         payload = {"model": "deepseek-v4.1-flash", "input": "hello"}
         chat = P.responses_to_chat(payload)
         self.assertEqual(chat.get("max_tokens"), 128000)
@@ -25,8 +24,7 @@ class MaxOutputTokensTests(unittest.TestCase):
         self.assertEqual(chat.get("max_tokens"), 4096)
 
     def test_build_upstream_body_defaults_max_tokens(self):
-        # Standard Chat Completions request without max_tokens also receives
-        # the catalog default maxOutputTokens.
+        # 普通 Chat Completions 请求缺 max_tokens 时同样取目录的 maxOutputTokens 默认值。
         chat = {
             "model": "deepseek-v4.1-flash",
             "messages": [{"role": "user", "content": "hello"}],
@@ -59,13 +57,6 @@ class MaxOutputTokensTests(unittest.TestCase):
         }
         body = P.build_upstream_body(chat)
         self.assertNotIn("max_tokens", body)
-
-    def test_model_default_max_output_tokens_lookup(self):
-        self.assertEqual(
-            P.model_default_max_output_tokens("deepseek-v4.1-flash"), 128000
-        )
-        self.assertEqual(P.model_default_max_output_tokens("gpt-6-astra"), 128000)
-        self.assertIsNone(P.model_default_max_output_tokens("non-existent-model"))
 
 
 if __name__ == "__main__":

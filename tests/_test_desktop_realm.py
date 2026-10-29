@@ -61,10 +61,6 @@ class RealmEvidenceTests(unittest.TestCase):
         self.assertEqual(A.detect_realm_from_token(OPAQUE_TOKEN), "intl")
         self.assertEqual(A.detect_realm_from_token(CN_TOKEN), "cn")
 
-    def test_workbuddy_cn_is_not_confused_with_intl(self):
-        self.assertEqual(A.realm_evidence(OPAQUE_TOKEN, "www.workbuddy.cn"), "cn")
-        self.assertEqual(A.realm_evidence(OPAQUE_TOKEN, "www.workbuddy.ai"), "intl")
-
 
 class DesktopRealmTests(unittest.TestCase):
     """桌面凭据：token 说了算，文件名只兜底。"""
@@ -90,9 +86,12 @@ class ImportRowRealmTests(unittest.TestCase):
         row.update(extra)
         return A.normalise_import_row(row)
 
-    def test_cn_account_with_workbuddy_cn_domain(self):
+    def test_workbuddy_cn_domain_is_not_confused_with_intl(self):
         """报的那个 bug：域名是 workbuddy.cn 的国内账号不能再被判成国际版。"""
+        self.assertEqual(A.realm_evidence(OPAQUE_TOKEN, "www.workbuddy.cn"), "cn")
         self.assertEqual(self.row(OPAQUE_TOKEN, domain="www.workbuddy.cn")["realm"], "cn")
+        # 对照组：国际版域名照旧判成国际版。
+        self.assertEqual(A.realm_evidence(OPAQUE_TOKEN, "www.workbuddy.ai"), "intl")
 
     def test_stale_realm_field_does_not_win(self):
         """行里带着过期的 realm（当初就存错了）时，按 token 纠正回来。"""

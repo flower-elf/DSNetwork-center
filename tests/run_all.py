@@ -189,15 +189,12 @@ def main(argv):
     args = parse_args(argv)
     pattern = args.pattern
     env = dict(os.environ)
+    # 套件输出含中文标签，Windows CI 默认 cp1252 会让套件抛 UnicodeEncodeError
+    # 而中断：套件以 utf-8 运行、日志按 utf-8 读回，本脚本自身的标准输出由
+    # _force_utf8_output 在 import 时固定为 UTF-8。
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONPATH"] = os.pathsep.join(
         [APP, ROOT] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
-    # 套件可能打印非 ASCII 文本，中文标签很常见。子进程直接写入 utf-8 日志文件，
-    # 自身标准输出也必须是 utf-8：Windows CI 的区域设置是 cp1252，中文标签会让
-    # 套件抛 UnicodeEncodeError 而中断。
-    env["PYTHONIOENCODING"] = "utf-8"
-    # 本脚本在自身标准输出回显各套件末行与失败时的完整尾部，
-    # import 时已由 _force_utf8_output 固定为 UTF-8。
     have_node = shutil.which("node") is not None
 
     selected = suites(pattern)

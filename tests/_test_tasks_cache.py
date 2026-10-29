@@ -15,10 +15,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits. This suite used to share
-# tests/_acc_test and tests/_use_test with _test_daily_chat.py and
-# _test_sanitize_fingerprint.py, which made them unsafe to run at the same time
-# and left directories in the repo after a run.
+# 套件自用的目录，进程退出时随临时根一起删除，不在检出里留文件。
 _TMP = isolated_data_dirs("wb-tasks-cache-")
 
 import wb_proxy as P        # noqa: E402
@@ -45,7 +42,7 @@ class StubAccount(object):
 
 
 class FakePool(object):
-    """Only the surface the account routes actually touch."""
+    """只做账号路由真正会碰到的那部分接口。"""
 
     def __init__(self, accounts):
         self.accounts = list(accounts)
@@ -62,13 +59,12 @@ class FakePool(object):
 
 
 class FakeUpstream(object):
-    """Growth tasks, summary, task run and travel - with no network at all.
+    """成长任务、汇总、执行与旅行，全程不联网。
 
-    `reads` counts only the two snapshot fetches, `actions` records the
-    state-changing calls, so "did it refetch" and "did the action run" stay
-    separate questions. Every read carries an `epoch` the test controls: bump it
-    before the action and "still showing the previous generation" becomes
-    directly decidable instead of a guess about the cache's internal state.
+    reads 只统计两次快照获取，actions 记录改状态的调用，所以“有没有重新
+    获取”和“动作有没有跑”是两个独立的问题。每次读都带一个测试控制的
+    epoch：动作之前加一，“还显示上一代”就变成可以直接判定的事情，不用去
+    猜缓存的内部状态。
     """
 
     def __init__(self):
@@ -97,7 +93,7 @@ class FakeUpstream(object):
 
 
 def capturing_handler():
-    """The lightweight Handler double the other route suites already use."""
+    """其它路由套件在用的轻量 Handler 替身。"""
 
     class Handler(P.Handler):
         def __init__(self):
@@ -116,7 +112,7 @@ class TasksCacheTests(unittest.TestCase):
     def setUp(self):
         self.calls = []
         self._orig = (T.fetch_growth_tasks, T.fetch_growth_summary)
-        self._ttl = P.TASKS_CACHE_TTL
+        self._ttl = T.TASKS_CACHE_TTL
 
         def tasks(acc):
             self.calls.append(("tasks", acc.uid))
@@ -129,58 +125,58 @@ class TasksCacheTests(unittest.TestCase):
         self._stub = tasks
         T.fetch_growth_tasks = tasks
         T.fetch_growth_summary = summary
-        P.invalidate_tasks_cache()
+        T.invalidate_tasks_cache()
 
     def tearDown(self):
         T.fetch_growth_tasks, T.fetch_growth_summary = self._orig
-        P.TASKS_CACHE_TTL = self._ttl
-        P.invalidate_tasks_cache()
+        T.TASKS_CACHE_TTL = self._ttl
+        T.invalidate_tasks_cache()
 
     def test_repeat_read_is_served_from_snapshot(self):
         acc = StubAccount("uid-a")
-        first = P.growth_snapshot(acc)
-        second = P.growth_snapshot(acc)
+        first = T.growth_snapshot(acc)
+        second = T.growth_snapshot(acc)
         self.assertEqual(len(self.calls), 2, "第二次读不该再打上游")
         self.assertEqual(first, second)
         self.assertIs(first[0], second[0], "应复用同一份对象")
 
     def test_invalidate_forces_a_refetch(self):
         acc = StubAccount("uid-a")
-        P.growth_snapshot(acc)
-        P.invalidate_tasks_cache()
-        P.growth_snapshot(acc)
+        T.growth_snapshot(acc)
+        T.invalidate_tasks_cache()
+        T.growth_snapshot(acc)
         self.assertEqual(len(self.calls), 4, "失效后必须重新取一次")
 
     def test_snapshot_is_per_account(self):
         a, b = StubAccount("uid-a"), StubAccount("uid-b")
-        P.growth_snapshot(a)
-        P.growth_snapshot(b)
-        P.growth_snapshot(a)          # 命中 a 的快照
+        T.growth_snapshot(a)
+        T.growth_snapshot(b)
+        T.growth_snapshot(a)          # 命中 a 的快照
         self.assertEqual(self.calls, [("tasks", "uid-a"), ("summary", "uid-a"),
                                       ("tasks", "uid-b"), ("summary", "uid-b")])
 
     def test_ttl_expiry(self):
         acc = StubAccount("uid-a")
-        P.TASKS_CACHE_TTL = 0.05
-        P.growth_snapshot(acc)
+        T.TASKS_CACHE_TTL = 0.05
+        T.growth_snapshot(acc)
         time.sleep(0.12)
-        P.growth_snapshot(acc)
+        T.growth_snapshot(acc)
         self.assertEqual(len(self.calls), 4, "过期后应重新取")
 
     def test_ttl_zero_disables_cache(self):
         acc = StubAccount("uid-a")
-        P.TASKS_CACHE_TTL = 0
-        P.growth_snapshot(acc)
-        P.growth_snapshot(acc)
+        T.TASKS_CACHE_TTL = 0
+        T.growth_snapshot(acc)
+        T.growth_snapshot(acc)
         self.assertEqual(len(self.calls), 4)
 
     def test_failure_is_not_cached(self):
         acc = StubAccount("uid-a")
         T.fetch_growth_tasks = lambda a: (_ for _ in ()).throw(RuntimeError("upstream down"))
         with self.assertRaises(RuntimeError):
-            P.growth_snapshot(acc)
+            T.growth_snapshot(acc)
         T.fetch_growth_tasks = self._stub
-        P.growth_snapshot(acc)
+        T.growth_snapshot(acc)
         self.assertTrue(self.calls, "失败不该被缓存成快照")
 
 class ActionInvalidationTests(unittest.TestCase):
@@ -196,7 +192,7 @@ class ActionInvalidationTests(unittest.TestCase):
         self.upstream = FakeUpstream()
         self._orig = (T.fetch_growth_tasks, T.fetch_growth_summary,
                       T.run_growth_tasks, T.do_cat_travel)
-        self._ttl = P.TASKS_CACHE_TTL
+        self._ttl = T.TASKS_CACHE_TTL
         T.fetch_growth_tasks = self.upstream.tasks
         T.fetch_growth_summary = self.upstream.summary
         T.run_growth_tasks = self.upstream.run_tasks
@@ -204,31 +200,30 @@ class ActionInvalidationTests(unittest.TestCase):
         self.account = StubAccount("uid-a")
         self._pool = P.POOL
         P.POOL = FakePool([self.account])
-        P.invalidate_tasks_cache()
+        T.invalidate_tasks_cache()
 
     def tearDown(self):
         (T.fetch_growth_tasks, T.fetch_growth_summary,
          T.run_growth_tasks, T.do_cat_travel) = self._orig
-        P.TASKS_CACHE_TTL = self._ttl
+        T.TASKS_CACHE_TTL = self._ttl
         P.POOL = self._pool
-        P.invalidate_tasks_cache()
+        T.invalidate_tasks_cache()
 
     def warm(self):
-        """Read the snapshot warm; the second read has to hit the cache.
+        """先把快照读热；第二次读必须命中缓存。
 
-        Without this control the invalidation assertions below would also pass
-        on a cache that never worked in the first place.
+        没有这道对照，下面的失效断言在一个从来没生效过的缓存上也会通过。
         """
-        first = P.growth_snapshot(self.account)
+        first = T.growth_snapshot(self.account)
         self.reads_after_warm = len(self.upstream.reads)
-        self.assertIs(P.growth_snapshot(self.account), first,
+        self.assertIs(T.growth_snapshot(self.account), first,
                       "快照没读热：缓存本身就没生效，失效断言无从谈起")
         self.assertEqual(len(self.upstream.reads), self.reads_after_warm,
                          "命中快照时不该再打上游")
         return first
 
     def drive(self, path, payload):
-        """Go through the real POST dispatch for the account routes."""
+        """走真实的 POST 分发来驱动账号路由。"""
         handler = capturing_handler()
         handler._handle_accounts(path, payload)
         self.assertIsNotNone(handler.captured, "%s 没有产生响应" % path)
@@ -237,36 +232,32 @@ class ActionInvalidationTests(unittest.TestCase):
         return obj
 
     def assert_refetched(self, warm, path):
-        fresh = P.growth_snapshot(self.account)
+        fresh = T.growth_snapshot(self.account)
         self.assertEqual(len(self.upstream.reads), self.reads_after_warm + 2,
                          "%s 之后仍然端出旧快照：失效没走到这条路径上" % path)
         self.assertEqual(fresh[0]["epoch"], warm[0]["epoch"] + 1,
                          "%s 之后拿到的不是新值" % path)
 
-    def test_task_run_invalidates_the_snapshot(self):
-        warm = self.warm()
-        self.upstream.bump()
-        response = self.drive("/tasks/run", {"uid": "uid-a"})
-        self.assertTrue(response.get("ok"), "执行动作没有真的跑起来: %r" % response)
-        self.assertIn(("run", "uid-a"), self.upstream.actions)
-        self.assert_refetched(warm, "/tasks/run")
-
-    def test_task_travel_invalidates_the_snapshot(self):
-        warm = self.warm()
-        self.upstream.bump()
-        response = self.drive("/tasks/travel", {"uid": "uid-a"})
-        self.assertTrue(response.get("ok"), "旅行动作没有真的跑起来: %r" % response)
-        self.assertIn(("travel", "uid-a"), self.upstream.actions)
-        self.assert_refetched(warm, "/tasks/travel")
-
-    def test_account_checkin_invalidates_the_snapshot(self):
-        warm = self.warm()
-        self.upstream.bump()
-        response = self.drive("/accounts/checkin", {"uid": "uid-a"})
-        self.assertEqual(len(response.get("results") or []), 1,
-                         "签到动作没有真的跑起来: %r" % response)
-        self.assertEqual(self.account.checkins, 1, "签到没有被调用")
-        self.assert_refetched(warm, "/accounts/checkin")
+    def test_every_action_invalidates_the_snapshot(self):
+        """三个动作路由各触发一次：动作真实执行，快照失效后重取新一代。"""
+        for path in ("/tasks/run", "/tasks/travel", "/accounts/checkin"):
+            with self.subTest(path=path):
+                warm = self.warm()
+                self.upstream.bump()
+                response = self.drive(path, {"uid": "uid-a"})
+                if path == "/tasks/run":
+                    self.assertTrue(response.get("ok"),
+                                    "执行动作没有真的跑起来: %r" % response)
+                    self.assertIn(("run", "uid-a"), self.upstream.actions)
+                elif path == "/tasks/travel":
+                    self.assertTrue(response.get("ok"),
+                                    "旅行动作没有真的跑起来: %r" % response)
+                    self.assertIn(("travel", "uid-a"), self.upstream.actions)
+                else:
+                    self.assertEqual(len(response.get("results") or []), 1,
+                                     "签到动作没有真的跑起来: %r" % response)
+                    self.assertEqual(self.account.checkins, 1, "签到没有被调用")
+                self.assert_refetched(warm, path)
 
 
 if __name__ == "__main__":

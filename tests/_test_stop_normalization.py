@@ -2,7 +2,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
+from _isolated_dirs import isolated_data_dirs  # noqa: E402
 # 独立目录，进程退出时删除。
 _TMP = isolated_data_dirs("wb-stop-normalization-")
 

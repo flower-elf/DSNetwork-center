@@ -1,5 +1,5 @@
-"""The account-row test button runs wb_settings.test_model(); an explicit payload `model` wins.
-/settings/save validates the id because it travels to the account's upstream verbatim.
+"""账号行的测试按钮调用 wb_settings.test_model()，请求体里显式给出的 model 优先生效。
+/settings/save 会校验 id，因为 id 会原样发给该账号的上游。
 """
 import json
 import os
@@ -28,7 +28,7 @@ def sse_body(model):
 
 
 class FakeResponse(object):
-    """Just enough of an HTTP response for aggregate_stream()."""
+    """aggregate_stream() 需要的最小 HTTP 响应。"""
 
     def __init__(self, lines):
         self._lines = lines
@@ -68,30 +68,22 @@ class TestModelSettingTests(unittest.TestCase):
             self.assertEqual(wb_settings.set_test_model(directory, " glm-5.3 "), "glm-5.3")
             self.assertEqual(wb_settings.test_model(directory), "glm-5.3")
 
-    def test_empty_value_restores_the_default(self):
-        with tempfile.TemporaryDirectory(prefix="test-model-") as directory:
-            wb_settings.set_test_model(directory, "kimi-k3")
-            self.assertEqual(wb_settings.set_test_model(directory, ""),
-                             wb_settings.DEFAULT_TEST_MODEL)
-            self.assertEqual(wb_settings.test_model(directory),
-                             wb_settings.DEFAULT_TEST_MODEL)
-
 
 class ParseTestModelTests(unittest.TestCase):
     def test_upstream_style_ids_pass(self):
         for value in ("deepseek-v4.1-flash", "gpt-6-astra", "kimi_k2.8-preview", " hy3 "):
             with self.subTest(value=value):
-                model, problem = proxy.parse_test_model(value)
+                model, problem = wb_settings.parse_test_model(value)
                 self.assertEqual(problem, "")
                 self.assertEqual(model, value.strip())
 
     def test_an_empty_string_clears_the_setting(self):
-        self.assertEqual(proxy.parse_test_model(""), ("", ""))
+        self.assertEqual(wb_settings.parse_test_model(""), ("", ""))
 
     def test_everything_else_is_rejected_with_the_same_message(self):
         for value in ("glm 5.3", "intl/glm-5.3", "-lead", "a" * 65, "glm\t5.3", "…"):
             with self.subTest(value=value):
-                model, problem = proxy.parse_test_model(value)
+                model, problem = wb_settings.parse_test_model(value)
                 self.assertIsNone(model)
                 self.assertEqual(
                     problem,
@@ -100,7 +92,7 @@ class ParseTestModelTests(unittest.TestCase):
     def test_non_strings_are_rejected(self):
         for value in (None, True, 5, ["glm-5.3"], {"model": "glm-5.3"}):
             with self.subTest(value=value):
-                model, problem = proxy.parse_test_model(value)
+                model, problem = wb_settings.parse_test_model(value)
                 self.assertIsNone(model)
                 self.assertEqual(problem, "test_model must be a model id string")
 
@@ -168,7 +160,7 @@ class AccountTestRouteTests(unittest.TestCase):
 
 
 class SettingsSaveTests(unittest.TestCase):
-    """/settings/save stores the id per exit and reports the effective model."""
+    """/settings/save 按出口分别保存 id，并在响应里给出生效的 model。"""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(prefix="test-model-save-")
@@ -195,12 +187,21 @@ class SettingsSaveTests(unittest.TestCase):
         self.assertEqual(wb_settings.test_model(self.directory, "cn"), "glm-5.3")
 
     def test_an_empty_value_restores_the_default(self):
-        self.save({"test_model_intl": "glm-5.3"})
-        status, body = self.save({"test_model_intl": ""})
-        self.assertEqual(status, 200)
-        self.assertEqual(body["test_model_intl"], wb_settings.DEFAULT_TEST_MODEL)
-        self.assertEqual(wb_settings.test_model(self.directory, "intl"),
-                         wb_settings.DEFAULT_TEST_MODEL)
+        """写入空值就恢复默认模型：setter 层与路由层各验一次。"""
+        with self.subTest(layer="setter"):
+            with tempfile.TemporaryDirectory(prefix="test-model-") as directory:
+                wb_settings.set_test_model(directory, "kimi-k3")
+                self.assertEqual(wb_settings.set_test_model(directory, ""),
+                                 wb_settings.DEFAULT_TEST_MODEL)
+                self.assertEqual(wb_settings.test_model(directory),
+                                 wb_settings.DEFAULT_TEST_MODEL)
+        with self.subTest(layer="route"):
+            self.save({"test_model_intl": "glm-5.3"})
+            status, body = self.save({"test_model_intl": ""})
+            self.assertEqual(status, 200)
+            self.assertEqual(body["test_model_intl"], wb_settings.DEFAULT_TEST_MODEL)
+            self.assertEqual(wb_settings.test_model(self.directory, "intl"),
+                             wb_settings.DEFAULT_TEST_MODEL)
 
     def test_a_bad_value_is_refused_and_nothing_is_written(self):
         self.save({"test_model_intl": "glm-5.3"})
@@ -211,7 +212,7 @@ class SettingsSaveTests(unittest.TestCase):
                 self.assertEqual(wb_settings.test_model(self.directory, "intl"), "glm-5.3")
 
     def test_a_shared_legacy_value_moves_to_both_exits(self):
-        """旧文件只有一个共用值时，改一个出口会先把取值平到两个出口。"""
+        """旧文件只有一个共用值时，改任一出口会先把共用值复制到两个出口。"""
         with open(wb_settings.settings_path(self.directory), "w", encoding="utf-8") as fh:
             json.dump({"test_model": "gpt-6-astra"}, fh)
         self.save({"test_model_intl": "glm-5.3"})

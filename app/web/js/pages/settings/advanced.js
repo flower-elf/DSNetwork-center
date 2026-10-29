@@ -1,7 +1,7 @@
 // 设置 → 高级：功能开关保存在设置里，修改后立即生效。
-import { html, nothing } from '../../core/dom.js';
-import { icon } from '../../core/icons.js';
+import { html } from '../../core/dom.js';
 import { toast, toastError } from '../../ui/toast.js';
+import { settingCard, switchRow } from './rows.js';
 
 export function createAdvancedTab(page) {
   const form = {
@@ -107,105 +107,86 @@ export function createAdvancedTab(page) {
     }
   }
 
-  function switchRow({ name, desc, field }) {
-    const env = envOverrides[ENV_KEYS[field] || field];
-    return html`
-      <div class="setting">
-        <div class="setting-main">
-          <div class="setting-name">${name}</div>
-          <div class="setting-desc">${desc}</div>
-          ${env ? html`<div class="field-hint tone-warning">环境变量 ${env.name} = ${env.value}，优先于面板设置</div>` : nothing}
-        </div>
-        <div class="setting-control">
-          <label class="switch">
-            <input type="checkbox" .checked=${form[field]} ?disabled=${saving} aria-label=${name}
-                   @change=${(e) => { form[field] = e.target.checked; markDirty(); }}>
-            <span></span>
-          </label>
-        </div>
-      </div>`;
-  }
+  // 字段行共用的表单状态：没有错误清单，环境变量按接口字段名查找。
+  const ctl = {
+    form,
+    get saving() { return saving; },
+    env: (field) => envOverrides[ENV_KEYS[field] || field] || null,
+    change: (field, value) => {
+      form[field] = value;
+      markDirty();
+    },
+  };
 
   return {
     seed,
     render() {
-      const dirty = isDirty();
-      return html`
-        <div class="card">
-          <div class="card-head">
-            <div>
-              <h2 class="card-title">${icon('Wrench')}高级</h2>
-              <div class="card-sub">
-                这些开关保存在设置里，修改后立即生效。存在同名环境变量时以环境变量为准。
-                <span class="text-2xs ${dirty ? 'tone-warning' : 'muted'}">${dirty ? '(有未保存的改动)' : ''}</span>
-              </div>
-            </div>
-            <div class="row-wrap">
-              <button class="btn btn-outline btn-sm" ?disabled=${saving || !dirty} @click=${revert}>
-                ${icon('Undo2')}撤销
-              </button>
-              <button class="btn btn-primary btn-sm" ?disabled=${saving || !dirty} @click=${saveAll}>
-                ${saving ? icon('LoaderCircle', 'spin') : icon('Save')}保存
-              </button>
-            </div>
-          </div>
+      return settingCard({
+        iconName: 'Wrench',
+        title: '高级',
+        desc: '这些开关保存在设置里，修改后立即生效。存在同名环境变量时以环境变量为准。',
+        dirty: isDirty(),
+        saving,
+        onRevert: revert,
+        onSave: saveAll,
+        body: html`
           <div class="setting-list">
             <div class="section-label">接口与身份</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: 'Anthropic Messages 入口',
               field: 'anthropicMessages',
               desc: '打开 /v1/messages 入口。网关会把 Anthropic 请求翻译成 Chat 或 Responses 请求，cache_control 会被忽略，长会话可能明显增加积分消耗。默认关闭。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '对 DSH 工具调用进行处理',
               field: 'dshToolNeutralization',
               desc: '把 DSH 工具调用的名称替换为通用名称，避免被上游识别。默认关闭。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '亲和调试日志',
               field: 'affinityDebug',
               desc: '派生会话标识时把消息条数与页内轮转写入运行日志。默认关闭，仅用于排查。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: 'prompt_cache_key',
               field: 'promptCacheKey',
               desc: '向上游附带 prompt_cache_key。实测该上游会自行缓存前缀，这个字段没有改变命中率或积分消耗，仅保留作实验开关。默认关闭。',
             })}
             <div class="section-label">免费额度</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '免费模型积分回退',
               field: 'freeFallback',
               desc: '免费模型额度耗尽时回退到同系列的付费模型，会消耗积分。默认关闭。',
             })}
             <div class="section-label">调度与失败处理</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '出口级瞬时失败退避',
               field: 'egressBackoff',
               desc: '传输类失败与 502/503/504 记在出口上并做秒级退避，不再计入账号级熔断。默认关闭。',
             })}
             <div class="section-label">性能与缓存</div>
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '上游连接复用',
               field: 'upstreamKeepalive',
               desc: '复用上游 TCP/TLS 连接，省掉每轮请求的握手。默认开启；关闭后回退到每次新建连接，行为保持兼容。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '用量聚合缓存',
               field: 'usageCache',
               desc: '把用量聚合状态写入磁盘，重启后只读新增日志。默认开启；关闭后每次重启都重新扫描日志。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '日与小时分桶',
               field: 'usageDayBuckets',
               desc: '窗口统计使用按日/小时分桶的增量结果。默认开启；关闭后回退到逐行扫描，结果相同但更慢。',
             })}
-            ${switchRow({
+            ${switchRow(ctl, {
               name: '最近请求索引',
               field: 'recentIndex',
               desc: '为请求日志建立深分页索引，减少大偏移翻页的读取量。默认关闭；打开后会占用少量磁盘。',
             })}
-          </div>
-        </div>`;
+          </div>`,
+      });
     },
     async canLeave() {
       if (!isDirty()) return true;

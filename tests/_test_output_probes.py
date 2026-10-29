@@ -1,7 +1,7 @@
-"""Real output-limit probes (M5 E2).
+"""输出上限探针的行为测试（M5 E2）。
 
 Run with: python _test_output_probes.py
-No upstream credentials or outbound network are used (the probe is stubbed).
+探针请求被替身接管，不需要上游凭据，也不发出站网络请求。
 """
 import contextlib
 import importlib.util
@@ -93,17 +93,15 @@ class ProbeRunTests(unittest.TestCase):
 
     def test_model_entry_annotates_the_probe(self):
         with tempfile.TemporaryDirectory() as directory:
-            wb_probes.save_probe(directory, "glm-5.2", {"clamped": 32000})
             with mock.patch.object(wb_proxy, "ACCOUNTS_DIR", directory):
+                plain = wb_proxy.model_entry("glm-5.2", {})
+                wb_probes.save_probe(directory, "glm-5.2", {"clamped": 32000})
                 entry = wb_proxy.model_entry("glm-5.2", {})
         self.assertEqual(entry["output_clamp"], 32000)
         self.assertEqual(entry["max_output_tokens_clamped"], 32000)
-        # The spec value from the knowledge table is untouched.
-        # The probe only annotates: without an upstream-claimed value the
-        # spec field stays absent (the knowledge-table fallback ships
-        # separately), and the clamp rides in its own fields.
-        # PR #165 added knowledge table fallback for glm-5.2
-        self.assertEqual(entry["max_output_tokens"], 131072)
+        # 探针只写入 clamp 字段，不改写知识表给出的 max_output_tokens。
+        self.assertEqual(entry.get("max_output_tokens"),
+                         plain.get("max_output_tokens"))
 
 
 class ProbeScriptTests(unittest.TestCase):

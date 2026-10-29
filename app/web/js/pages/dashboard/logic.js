@@ -209,7 +209,6 @@ export function trendSummary(buckets) {
   return { requests: sum('requests'), failures: sum('errors'), tokens: sum('total_tokens') };
 }
 
-/** 今日用量卡片的提示。 */
 export function usageHints(usage) {
   const errors = Number(usage && usage.errors) || 0;
   const credit = Number(usage && usage.credit) || 0;

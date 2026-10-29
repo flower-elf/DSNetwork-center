@@ -1,4 +1,4 @@
-"""HTTP 服务层的两个「一行修」+ 一个内存护栏，钉住路由器上实测过的三个数字。
+"""HTTP 服务层的两个「一行修」+ 一个内存护栏，固定路由器上实测的三个数字。
 
 三处改动都来自 OpenWrt 路由器（2 核 Celeron N2840 / 2GB，前面挂 nginx）上的实测：
 
@@ -11,15 +11,15 @@
     卡 >=1s；backlog=128 后 0/64）。
   - MAX_PAYLOAD_BYTES 默认 50MB -> 16MB：读 body 发生在 chat 信号量 acquire
     之前、线程数又无上限，50MB body 单请求峰值 ~160MB，而路由器可用内存只有
-    ~480MB。
+    ~480 MB。
 
 断言分两层：类属性是「声明」，行为断言（真实 socket 上读 TCP_NODELAY、实例化
 时监听套接字 listen() 的实参）才是「声明真的生效」。最后一组用桩证明超限 body
 在 Content-Length 检查处就被拒、一个字节都不读，413 与断开（close）两条路径都
 一并走到——这正是 50MB 默认值时 OOM 的那条路。
 
-Run with: python tests/_test_http_limits.py
-No network, no credentials: only loopback sockets on ephemeral ports.
+不需要网络与凭据，只用临时端口上的回环 socket。用 python tests/_test_http_limits.py
+运行。
 """
 import os
 import shutil
@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import types
 import unittest
 import unittest.mock as mock
 from http.server import ThreadingHTTPServer
@@ -43,7 +44,9 @@ os.environ.setdefault("WB_PROXY_USAGE_DIR", os.path.join(_WORK, "usage"))
 os.environ.setdefault("HOME", _WORK)
 os.environ.setdefault("USERPROFILE", _WORK)
 
-import wb_proxy as P  # noqa: E402  (needs sys.path/env set above)
+
+import wb_startup as B
+import wb_proxy as P  # noqa: E402  上面已设置 sys.path 与环境
 
 
 class CountingReader(object):
@@ -126,7 +129,7 @@ class NagleFlagTests(unittest.TestCase):
                 # 不跑请求循环：本用例只关心连接建立时的套接字选项。
                 pass
 
-        server = P.GatewayServer(("127.0.0.1", 0), Probe)
+        server = B.GatewayServer(("127.0.0.1", 0), Probe)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -148,8 +151,8 @@ class BacklogTests(unittest.TestCase):
     """并发突发的 1 秒停顿：backlog 必须远高于 stdlib 默认的 5。"""
 
     def test_the_service_class_raises_the_backlog(self):
-        self.assertEqual(P.GatewayServer.request_queue_size, 128)
-        self.assertTrue(issubclass(P.GatewayServer, ThreadingHTTPServer))
+        self.assertEqual(B.GatewayServer.request_queue_size, 128)
+        self.assertTrue(issubclass(B.GatewayServer, ThreadingHTTPServer))
 
     def test_the_listening_socket_is_listened_with_the_new_backlog(self):
         """行为级：listen() 是构造时调的，这里拦住它读实参。
@@ -165,31 +168,38 @@ class BacklogTests(unittest.TestCase):
             return real_listen(self, backlog)
 
         with mock.patch.object(socket.socket, "listen", spy):
-            server = P.GatewayServer(("127.0.0.1", 0), P.Handler)
+            server = B.GatewayServer(("127.0.0.1", 0), P.Handler)
         try:
-            self.assertEqual(seen, [P.GatewayServer.request_queue_size],
+            self.assertEqual(seen, [B.GatewayServer.request_queue_size],
                              "listen() did not use request_queue_size=%d"
-                             % P.GatewayServer.request_queue_size)
+                             % B.GatewayServer.request_queue_size)
             self.assertLess(ThreadingHTTPServer.request_queue_size,
-                            P.GatewayServer.request_queue_size,
+                            B.GatewayServer.request_queue_size,
                             "the stdlib default is no longer the small value "
                             "this subclass exists to replace")
         finally:
             server.server_close()
 
     def test_the_service_starts_that_class(self):
-        """钉住接线：_serve_forever 必须实例化 GatewayServer。
+        """执行接线：_serve_forever 必须用 GatewayServer 建服务。
 
         没有这条，上面两条可以全绿而线上仍然跑着默认 backlog 的
-        ThreadingHTTPServer。源码文本断言与 _test_release_engineering.py 的
-        做法一致（那类接线没有便宜的运行期入口）。
+        ThreadingHTTPServer。
         """
-        with open(os.path.join(ROOT, "app", "wb_proxy.py"), encoding="utf-8") as fh:
-            src = fh.read()
-        self.assertIn("server = GatewayServer((args.host, args.port), Handler)",
-                      src,
-                      "_serve_forever no longer starts GatewayServer, so the "
-                      "backlog fix is not on the serving path")
+        seen = {}
+
+        class Recorder(object):
+            def __init__(self, address, handler):
+                seen["address"] = address
+                seen["handler"] = handler
+                raise RuntimeError("stop after construction")
+
+        args = types.SimpleNamespace(host="127.0.0.1", port=8000)
+        with mock.patch.object(B, "GatewayServer", Recorder):
+            with self.assertRaises(RuntimeError):
+                B._serve_forever(P, args)
+        self.assertIs(seen["handler"], P.Handler)
+        self.assertEqual(seen["address"], ("127.0.0.1", 8000))
 
 
 class PayloadCapTests(unittest.TestCase):
@@ -219,7 +229,7 @@ class PayloadCapTests(unittest.TestCase):
                 self.assertEqual(reader.bytes_read, 0)
 
     def test_the_413_reply_path_still_answers(self):
-        """超限 -> _payload_or_error 走 413（而不是抛穿线程）。"""
+        """超限 -> _payload_or_error 走 413，不把异常抛穿线程。"""
         calls = []
         handler = make_handler({"Content-Length": str(50 * 1024 * 1024)})
         handler._error = lambda code, message, err_type="server_error": \
@@ -235,8 +245,8 @@ class PayloadCapTests(unittest.TestCase):
     def test_an_over_limit_body_closes_instead_of_draining(self):
         """断开路径：_error 的 drain 对超限 body 只置 close_connection。
 
-        读它要等到客户端把 50MB 发完，而回包早已发出——旧行为会一直阻塞在
-        drain 上；这里证明超限时走的是断开而不是读。
+        读它要等到客户端把 50MB 发完，而回包早已发出，阻塞一直出在 drain 上；
+        这里证明超限时走断开，不读 body。
         """
         reader = CountingReader()
         handler = make_handler({"Content-Length": str(50 * 1024 * 1024)},

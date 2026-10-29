@@ -205,6 +205,11 @@ print("[7] chat headers drop the feedback-only ids and keep the fingerprint shap
 conv_acc = A.Account(credential("workbuddy"))
 chat = conv_acc.headers(purpose="chat")
 check("no X-Machine-ID on the chat request", "X-Machine-ID" not in chat)
+# 官方 CLI 与插件都发 X-Model-ID：有模型才带，没有就不带。
+check("no X-Model-ID without a model", "X-Model-ID" not in chat)
+check("the chat request names the model it asks for",
+      conv_acc.headers(purpose="chat", model="glm-5.2").get("X-Model-ID")
+      == "glm-5.2")
 check("no X-Session-ID on the chat request", "X-Session-ID" not in chat)
 check("the billing headers carry no conversation family",
       "X-Conversation-ID" not in conv_acc.headers(purpose="billing"))
@@ -233,9 +238,18 @@ check("the billing session id is per account",
       sess_acc_a.headers(purpose="billing").get("X-Session-ID")
       != sess_acc_b.headers(purpose="billing").get("X-Session-ID"),
       sess_acc_a.headers(purpose="billing").get("X-Session-ID"))
-check("the billing session id is stable for one account",
-      sess_acc_a.headers(purpose="billing").get("X-Session-ID")
-      == sess_acc_a.headers(purpose="billing").get("X-Session-ID"))
+# 头名写法照官方客户端：安全头常量是小写 x-codebuddy-request，XHR 配置是
+# 首字母大写的 X-Requested-With（官方 2.165.0 CLI 与 5.9.3 桌面端）。
+billing = sess_acc_a.headers(purpose="billing")
+# 官方 5.9.3 桌面端与 2.165.0 CLI 都不发 X-Machine-ID，计费请求也不发。
+check("the billing headers carry no X-Machine-ID",
+      "X-Machine-ID" not in billing)
+check("the security header keeps the lowercase spelling",
+      billing.get("x-codebuddy-request") == "1"
+      and "X-CodeBuddy-Request" not in billing)
+check("the XHR header keeps the Title-Case spelling",
+      billing.get("X-Requested-With") == "XMLHttpRequest"
+      and "x-requested-with" not in billing)
 
 print()
 print("[8] every desktop UA / version comes from wb_identity (single source)")

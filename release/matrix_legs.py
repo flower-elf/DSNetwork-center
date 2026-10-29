@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The test-matrix legs a release has to wait for (issue #28).
+"""发布门禁要等待的测试矩阵腿，每行打印一个任务名（issue #28）。
 
-A release may only be written when the *whole* existing matrix passed on the
-target commit - Ubuntu 3.9, Ubuntu 3.12 and Windows 3.12 today. Trusting the
-tests workflow's overall conclusion is not enough: it stays green if a leg is
-dropped from the matrix, and that would quietly weaken the release gate.
-
-So the legs are read from `.github/workflows/tests.yml` itself and printed one
-job name per line, in the form the Actions API reports them
-(`<os> / python <version>`). Adding a leg there widens the gate automatically.
+发布要求目标提交上整个矩阵全部通过。tests 工作流的总结论不够用：一条腿从
+矩阵里删掉时它照样是绿的，门禁会被悄悄削弱。所以腿直接解析自
+`.github/workflows/tests.yml`，输出形状与 Actions API 上报的任务名一致，
+即 `<os> / python <version>`。在那里加一条腿，门禁自动跟进。当前矩阵是
+Ubuntu 3.9、Ubuntu 3.12、Windows 3.12 三条腿，以 tests.yml 为准。
 
     python release/matrix_legs.py
 
-Exit status: 0 with at least one leg printed, 1 when the file cannot be parsed
-(a gate that cannot name the legs must not pass).
+退出码：至少打印一条腿为 0，解析不出腿为 1。门禁点不出腿的名字就必须拒绝。
 """
 from __future__ import annotations
 
@@ -26,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 TESTS_YML = os.path.join(ROOT, ".github", "workflows", "tests.yml")
 
-# tests.yml names each job `${{ matrix.os }} / python ${{ matrix.python }}`.
+# tests.yml 里每个任务名是 `${{ matrix.os }} / python ${{ matrix.python }}`。
 JOB_NAME = "%s / python %s"
 
 
@@ -38,7 +34,7 @@ def _unquote(value):
 
 
 def parse_include(text):
-    """[(key, value), ...] entries of the first `matrix.include` list."""
+    """第一个 `matrix.include` 列表的 [(key, value), ...] 条目。"""
     lines = text.splitlines()
     start = None
     for i, line in enumerate(lines):
@@ -58,10 +54,10 @@ def parse_include(text):
         indent = len(line) - len(line.lstrip())
         if block_indent is None:
             if not stripped.startswith("-"):
-                return []          # `include:` is not a list after all
+                return []          # include: 后面不是列表
             block_indent = indent
         elif indent < block_indent:
-            break                  # the list ended
+            break                  # 列表结束
         if stripped.startswith("-"):
             current = {}
             entries.append(current)
@@ -76,7 +72,7 @@ def parse_include(text):
 
 
 def legs(text=None):
-    """Job names of every matrix leg, in file order."""
+    """每条矩阵腿的任务名，按文件顺序。"""
     if text is None:
         with open(TESTS_YML, encoding="utf-8") as fh:
             text = fh.read()

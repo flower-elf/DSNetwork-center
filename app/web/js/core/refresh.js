@@ -1,7 +1,7 @@
 // 自动刷新间隔：保存在 localStorage，单位秒，默认 60，0 表示不自动刷新；页面导出 autoRefresh 时按它刷新。
 import { readStore, writeStore } from './storage.js';
 
-export const DEFAULT_REFRESH_SECONDS = 60;
+const DEFAULT_REFRESH_SECONDS = 60;
 const KEY = 'wb-refresh-interval';
 const MAX_SECONDS = 3600;
 

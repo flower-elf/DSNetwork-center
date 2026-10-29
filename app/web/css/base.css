@@ -87,8 +87,6 @@ svg.lucide { flex-shrink: 0; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .col { display: flex; flex-direction: column; gap: 8px; }
 .grow { flex: 1; min-width: 0; }
-.hidden { display: none !important; }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .grid-stats { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 @media (min-width: 768px) { .grid-stats { gap: 16px; } }

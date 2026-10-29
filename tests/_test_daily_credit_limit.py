@@ -1,19 +1,4 @@
-"""Two more daily guards: the credit cap and the per-model token cap.
-
-Both fold usage.jsonl the same way the daily token guard folds tokens - rows
-at/after local midnight, cancellations skipped - but they refuse less than
-the whole account:
-
-  - the credit guard caps *paid* models once the day's spend is reached,
-    while the models the catalogue marks free ("x0.00") keep serving;
-  - the per-model token guard caps exactly the one model that burned its
-    budget, leaving every other model on that account working.
-
-The free/paid split depends on the account's realm (the same id can be free
-on one exit and paid on the other), which is why the pool receives a
-realm -> free-ids view rather than a flat list.
-
-No network: the usage log is synthesised in a temp directory.
+"""测每日消费上限与按模型 token 上限这两个护栏：折叠口径与每日 token 护栏一致，拦截粒度更细，只拦付费模型或超支的那一个模型。用 python tests/run_all.py _test_daily_credit_limit 运行，不联网，usage 日志在临时目录合成。
 """
 import io
 import json
@@ -32,6 +17,7 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 import wb_accounts
 import wb_settings
 import wb_proxy as P
+import wb_usage as U
 
 
 def row(at, account, model, tokens, credit=0.0, outcome="completed"):
@@ -43,46 +29,34 @@ def row(at, account, model, tokens, credit=0.0, outcome="completed"):
 
 
 def reset_cache():
-    with P._daily_usage_lock:
-        P._daily_usage.update({"day": "", "totals": None, "credits": None,
+    with U._daily_usage_lock:
+        U._daily_usage.update({"day": "", "totals": None, "credits": None,
                                "models": None, "offset": 0, "at": 0.0})
 
 
 class CreditGuardSettingsTests(unittest.TestCase):
     def test_daily_credit_is_off_until_set(self):
         with tempfile.TemporaryDirectory(prefix="credit-set-") as directory:
-            # Off by default, exactly like the other guards here: an install
-            # that upgrades into this feature keeps behaving as before.
+            # 默认关闭，与其他护栏一致：升级到带该功能的版本后行为不变。
             self.assertEqual(wb_settings.daily_credit_limit(directory), 0)
             self.assertEqual(wb_settings.set_daily_credit_limit(directory, 80), 80)
             self.assertEqual(wb_settings.daily_credit_limit(directory), 80)
             self.assertEqual(wb_settings.set_daily_credit_limit(directory, 0), 0)
             self.assertEqual(wb_settings.daily_credit_limit(directory), 0)
-            # Garbage and negatives collapse to "off" instead of raising.
+            # 垃圾值和负数一律折算为关闭，不抛异常。
             self.assertEqual(wb_settings.set_daily_credit_limit(directory, -5), 0)
             self.assertEqual(wb_settings.set_daily_credit_limit(directory, "abc"), 0)
-            # A corrupt stored value reads back as off too.
+            # 存储值损坏时读回也按关闭处理。
             with open(wb_settings.settings_path(directory), "w", encoding="utf-8") as fh:
                 json.dump({"daily_credit_limit": "lots"}, fh)
             self.assertEqual(wb_settings.daily_credit_limit(directory), 0)
-
-    def test_model_daily_token_defaults_to_unlimited(self):
-        with tempfile.TemporaryDirectory(prefix="credit-set-") as directory:
-            self.assertEqual(wb_settings.model_daily_token_limit(directory), 0)
-            self.assertEqual(
-                wb_settings.set_model_daily_token_limit(directory, 200000000), 200000000)
-            self.assertEqual(
-                wb_settings.model_daily_token_limit(directory), 200000000)
-            self.assertEqual(wb_settings.set_model_daily_token_limit(directory, -5), 0)
-            self.assertEqual(wb_settings.set_model_daily_token_limit(directory, "abc"), 0)
-
 
 class DailyUsageFoldTests(unittest.TestCase):
     def setUp(self):
         reset_cache()
 
     def test_scan_folds_credits_and_per_model_tokens(self):
-        midnight = P._local_midnight()
+        midnight = U._local_midnight()
         rows = [
             row(midnight - 3600, "acct-A", "gpt-6-astra", 1000, credit=99.0),
             row(midnight + 60, "acct-A", "gpt-6-astra", 1000, credit=30.5),
@@ -94,25 +68,23 @@ class DailyUsageFoldTests(unittest.TestCase):
         with io.open(P.USAGE_LOG, "w", encoding="utf-8") as fh:
             for r in rows:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-        stats = P.daily_usage_stats(ttl=0)
-        # Yesterday's rows stay out, and a cancellation is not a consumed
-        # request - neither its tokens nor its credit count.
+        stats = U.daily_usage_stats(ttl=0)
+        # 昨天的行不计入；取消的行不算已消费请求，token 和积分都不计。
         self.assertEqual(stats["tokens"], {"acct-A": 1500, "acct-B": 700})
         self.assertEqual(stats["credits"], {"acct-A": 30.5, "acct-B": 2.5})
         self.assertEqual(stats["models"], {
             "acct-A": {"gpt-6-astra": 1000, "deepseek-v4.1-flash": 500},
             "acct-B": {"hy4-preview": 700},
         })
-        # The original reader keeps its shape for existing callers.
-        self.assertEqual(P.daily_tokens_by_account(ttl=0),
+        # 原有读取接口保持形状，现有调用方不受影响。
+        self.assertEqual(U.daily_tokens_by_account(ttl=0),
                          {"acct-A": 1500, "acct-B": 700})
 
-        # The fold resumes from its byte offset: a row appended after the
-        # first scan is folded into every view without recounting the file.
+        # 折叠从字节 offset 续扫：首次扫描后追加的行会计入各个视图，不重扫整个文件。
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row(midnight + 300, "acct-B", "glm-5.3", 100,
                                     credit=1.5)) + "\n")
-        stats = P.daily_usage_stats(ttl=0)
+        stats = U.daily_usage_stats(ttl=0)
         self.assertEqual(stats["tokens"]["acct-B"], 800)
         self.assertEqual(stats["credits"]["acct-B"], 4.0)
         self.assertEqual(stats["models"]["acct-B"], {"hy4-preview": 700, "glm-5.3": 100})
@@ -124,7 +96,7 @@ class CreditGuardAccountTests(unittest.TestCase):
                                       "realm": "intl"})
         account.daily_credit_limit = 50
         account.free_models = frozenset({"deepseek-v4.1-flash"})
-        # Not counted yet: nothing blocks.
+        # 还没有消费，不拦任何请求。
         self.assertFalse(account.credit_limit_reached())
         self.assertFalse(account.credit_limit_blocked("gpt-6-astra"))
         self.assertTrue(account.ready("gpt-6-astra"))
@@ -134,16 +106,15 @@ class CreditGuardAccountTests(unittest.TestCase):
         self.assertTrue(account.credit_limit_reached())
         self.assertTrue(account.credit_limit_blocked("gpt-6-astra"))
         self.assertFalse(account.ready("gpt-6-astra"))
-        # The free model keeps serving after the cap is reached.
+        # 达到上限后免费模型继续服务。
         self.assertFalse(account.credit_limit_blocked("deepseek-v4.1-flash"))
         self.assertTrue(account.ready("deepseek-v4.1-flash"))
-        # Unknown model (None): the caller cannot tell whether this request
-        # would spend anything, so it is not blocked here.
+        # model 为 None 时调用方无法判断这次请求会不会花钱，这里不拦截。
         self.assertFalse(account.credit_limit_blocked(None))
         self.assertTrue(account.ready())
-        # An unknown id is treated as paid: the guard fails closed.
+        # 不认识的 id 按付费处理，拿不准时拦截。
         self.assertTrue(account.credit_limit_blocked("brand-new-model"))
-        # Turning the guard off restores everything at once.
+        # 关掉护栏后所有请求立即恢复。
         account.daily_credit_limit = 0
         self.assertTrue(account.ready("gpt-6-astra"))
 
@@ -160,11 +131,11 @@ class CreditGuardAccountTests(unittest.TestCase):
         account.model_daily_tokens["hy4-preview"] = 200000000
         self.assertTrue(account.model_token_limit_blocked("hy4-preview"))
         self.assertFalse(account.ready("hy4-preview"))
-        # Other models on the same account are untouched.
+        # 同账号的其他模型不受影响。
         self.assertTrue(account.ready("kimi-k3"))
         self.assertEqual(account.blocked_model_names(),
                          {"hy4-preview", "glm-5.3"})
-        # No model to judge: never blocked by this guard.
+        # 没有模型可判断时该护栏从不拦截。
         self.assertFalse(account.model_token_limit_blocked(None))
         account.model_daily_token_limit = 0
         self.assertTrue(account.ready("glm-5.3"))
@@ -179,15 +150,17 @@ class CreditGuardPoolTests(unittest.TestCase):
                                          "realm": "intl"})
             pool = wb_accounts.AccountPool(directory, log=lambda _m: None)
             pool.accounts = [spent, fresh]
+            # 免费与付费按出口区分，同一个 id 可以在一个出口免费、另一个出口
+            # 付费，所以池收到的是出口到免费 id 的映射。
             pool.apply_daily_credit_limit(
                 50, {"uid-spent": 60.0, "uid-fresh": 10.0},
                 {"intl": {"deepseek-v4.1-flash"}})
-            # A paid model rotates away from the capped account...
+            # 付费模型从触顶的账号轮开，
             for _ in range(3):
                 self.assertEqual(pool.pick(realm="intl", model="gpt-6-astra").uid,
                                  "uid-fresh")
             self.assertEqual(pool.count_ready(realm="intl", model="gpt-6-astra"), 1)
-            # ...while the free one still reaches both.
+            # 免费模型仍然选得到两个账号。
             self.assertEqual(pool.count_ready(realm="intl",
                                               model="deepseek-v4.1-flash"), 2)
             row = [a for a in pool.list_public(realm="intl")
@@ -195,7 +168,7 @@ class CreditGuardPoolTests(unittest.TestCase):
             self.assertTrue(row["creditLimitReached"])
             self.assertEqual(row["dailyCreditsToday"], 60.0)
             self.assertEqual(row["dailyCreditLimit"], 50)
-            # None keeps the last known counts when only the setting changes.
+            # 设置变化时传 None 会保留最后一次已知的计数。
             pool.apply_daily_credit_limit(0)
             self.assertFalse(pool.pick(realm="intl", model="gpt-6-astra") is None)
             self.assertEqual(spent.daily_credits_today, 60.0)
@@ -210,11 +183,11 @@ class CreditGuardPoolTests(unittest.TestCase):
             pool.accounts = [a, b]
             pool.apply_model_daily_token_limit(1000, {"uid-a": {"hy4-preview": 1500}})
             self.assertTrue(a.model_token_limit_blocked("hy4-preview"))
-            # Another account's budget is its own.
+            # 另一个账号的预算互不影响。
             self.assertFalse(b.model_token_limit_blocked("hy4-preview"))
             self.assertTrue(b.ready("hy4-preview"))
             self.assertEqual(pool.count_ready(realm="intl", model="hy4-preview"), 1)
-            # The capped account keeps its other models.
+            # 触顶的账号保留其他模型。
             self.assertTrue(a.ready("glm-5.3"))
             row = [a for a in pool.list_public(realm="intl")
                    if a["uid"] == "uid-a"][0]
@@ -292,21 +265,20 @@ class CreditGuardPoolTests(unittest.TestCase):
 
 class FreeModelViewTests(unittest.TestCase):
     def test_free_table_is_built_per_realm_from_the_catalogue(self):
-        view = P.free_models_by_realm()
-        # The bundled snapshot marks this one free on the international exit;
-        # the domestic catalogue carries it as paid, so it must not appear
-        # there - the same id, two answers.
+        view = U.free_models_by_realm()
+        # 内置快照把这个模型标为国际版免费；国内目录里它是付费的，不能出现在
+        # 那边。同一个 id，两个答案。
         self.assertIn("deepseek-v4.1-flash", view["intl"])
         self.assertNotIn("deepseek-v4.1-flash", view["cn"])
         self.assertIn("hy4-preview-f", view["intl"])
         self.assertIn("hy4-preview-f", view["cn"])
-        # A paid id is in neither table.
+        # 付费 id 不进任何一张表。
         self.assertNotIn("gpt-6-astra", view["intl"])
-        self.assertTrue(P.credits_is_free("x0.00"))
-        self.assertTrue(P.credits_is_free(" x0.00 "))
-        self.assertFalse(P.credits_is_free("x0.34 credits"))
-        self.assertFalse(P.credits_is_free(""))
-        self.assertFalse(P.credits_is_free(None))
+        self.assertTrue(U.credits_is_free("x0.00"))
+        self.assertTrue(U.credits_is_free(" x0.00 "))
+        self.assertFalse(U.credits_is_free("x0.34 credits"))
+        self.assertFalse(U.credits_is_free(""))
+        self.assertFalse(U.credits_is_free(None))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Anthropic Messages API translation and streaming regression tests."""
+"""测 Anthropic Messages API 的翻译与流式回归契约。用 python tests/run_all.py _test_anthropic_messages 运行。"""
 import json
 import os
 import sys
@@ -10,6 +10,7 @@ os.environ["WB_PROXY_USAGE_DIR"] = _startup_dir.name
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_proxy as P
+import wb_translate as T
 
 PASS = FAIL = 0
 
@@ -107,7 +108,7 @@ check("tool_result maps to a tool message",
       and tool_msg.get("content") == "a.txt", tool_msg)
 
 # 工具结果里的图片必须保留结构化 image_url，不能压成 base64 文本按字符计费。
-_image_tool = P._anthropic_blocks_to_messages("user", [{
+_image_tool = T._anthropic_blocks_to_messages("user", [{
     "type": "tool_result", "tool_use_id": "toolu_img",
     "content": [
         {"type": "text", "text": "see"},
@@ -125,11 +126,11 @@ check("image tool_result keeps its text part",
 
 print()
 print("[2] budget thinking maps to effort")
-check("disabled -> none", P.anthropic_effort_from_messages({"thinking": {"type": "disabled"}}) == "none")
-check("enabled low", P.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 1000}}) == "low")
-check("enabled medium", P.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 9000}}) == "medium")
-check("enabled high", P.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 17000}}) == "high")
-check("enabled xhigh", P.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 40000}}) == "xhigh")
+check("disabled -> none", T.anthropic_effort_from_messages({"thinking": {"type": "disabled"}}) == "none")
+check("enabled low", T.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 1000}}) == "low")
+check("enabled medium", T.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 9000}}) == "medium")
+check("enabled high", T.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 17000}}) == "high")
+check("enabled xhigh", T.anthropic_effort_from_messages({"thinking": {"type": "enabled", "budget_tokens": 40000}}) == "xhigh")
 
 print()
 print("[3] chat response maps to an Anthropic message")

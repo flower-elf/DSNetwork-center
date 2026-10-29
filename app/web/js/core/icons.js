@@ -9,7 +9,7 @@ function attrText(attrs) {
   return Object.entries(attrs).map(([k, v]) => `${k}="${String(v).replace(/"/g, '&quot;')}"`).join(' ');
 }
 
-export function iconSvg(name, cls = '') {
+function iconSvg(name, cls = '') {
   const key = name + '|' + cls;
   const hit = cache.get(key);
   if (hit) return hit;

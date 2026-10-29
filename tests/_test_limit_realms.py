@@ -252,7 +252,7 @@ class SettingsSaveTests(unittest.TestCase):
             for payload in cases:
                 request = self._save(d, payload)
                 self.assertEqual(request.status, 400, payload)
-            # Nothing was written by the refused payloads.
+            # 被拒绝的载荷没有写入任何东西。
             self.assertEqual(wb_settings.reserve_credits(d), 0)
             self.assertEqual(wb_settings.daily_token_limit(d), 0)
 
@@ -270,7 +270,7 @@ class SettingsSaveTests(unittest.TestCase):
                 view = proxy.runtime_settings_view()
             self.assertEqual(view["limits"]["daily_token_limit"],
                              {"global": 7, "intl": 3, "cn": None})
-            # The flat keys stay for older panel builds; they read the global.
+            # 扁平键留给旧版面板读取，取的是全局值。
             self.assertEqual(view["daily_token_limit"], 7)
 
 

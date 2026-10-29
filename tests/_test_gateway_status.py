@@ -1,6 +1,6 @@
-"""/health 公开宣告存活与能否接单，接不了单时回 503 与原因，不暴露账号身份、调度或密钥状态。
+"""/health 公开声明存活与能否接单，接不了单时返回 503 与原因，不暴露账号身份、调度或密钥状态。
 
-/panel/status 只给面板会话：没有会话直接 401，报体只有错误本身。
+/panel/status 只给面板会话：没有会话直接 401，响应体只有错误本身。
 """
 import os
 import sys
@@ -14,6 +14,8 @@ _TMP = tempfile.mkdtemp(prefix="wb-status-")
 os.environ["ACCOUNTS_DIR"] = os.path.join(_TMP, "accounts")
 os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 
+
+import wb_startup as B
 import wb_proxy as proxy
 import wb_settings
 
@@ -119,20 +121,77 @@ class StartupUserAgentTests(unittest.TestCase):
             SimpleNamespace(realm="cn"),
             SimpleNamespace(realm="cn"),
         ]
-        self.assertEqual(proxy.startup_user_agents(accounts), [
+        self.assertEqual(B.startup_user_agents(accounts), [
             ("cn", proxy.wb_accounts.REALM_CONFIGS["cn"]["chat_ua"]),
             ("intl", proxy.wb_accounts.REALM_CONFIGS["intl"]["chat_ua"]),
         ])
 
     def test_a_realm_without_accounts_is_skipped(self):
-        self.assertEqual(proxy.startup_user_agents([SimpleNamespace(realm="cn")]), [
+        self.assertEqual(B.startup_user_agents([SimpleNamespace(realm="cn")]), [
             ("cn", proxy.wb_accounts.REALM_CONFIGS["cn"]["chat_ua"]),
         ])
 
     def test_no_accounts_or_unknown_realms_print_nothing(self):
-        self.assertEqual(proxy.startup_user_agents([]), [])
-        self.assertEqual(proxy.startup_user_agents(None), [])
-        self.assertEqual(proxy.startup_user_agents([SimpleNamespace(realm="other")]), [])
+        self.assertEqual(B.startup_user_agents([]), [])
+        self.assertEqual(B.startup_user_agents(None), [])
+        self.assertEqual(B.startup_user_agents([SimpleNamespace(realm="other")]), [])
+
+
+class StartupApiKeyTests(unittest.TestCase):
+    @staticmethod
+    def args(api_key=None, lan=False):
+        return SimpleNamespace(api_key=api_key, lan=lan)
+
+    def test_panel_key_list_ignores_startup_key(self):
+        with tempfile.TemporaryDirectory(prefix="wb-startup-key-") as directory:
+            wb_settings.set_api_keys(directory, [{"key": "panel-key"}])
+            panel = wb_settings.api_keys(directory)
+            key, generated, file_set = B._resolve_startup_api_key(
+                self.args("startup-key"), directory, panel)
+            self.assertEqual((key, generated, file_set), (None, False, False))
+            self.assertFalse(wb_settings.load(directory).get("launcher_key"))
+
+    def test_a_disabled_panel_key_still_wins(self):
+        with tempfile.TemporaryDirectory(prefix="wb-startup-key-") as directory:
+            wb_settings.set_api_keys(directory, [{"key": "panel-key", "enabled": False}])
+            panel = wb_settings.api_keys(directory)
+            key, generated, file_set = B._resolve_startup_api_key(
+                self.args("startup-key", lan=True), directory, panel)
+            self.assertEqual((key, generated, file_set), (None, False, False))
+            self.assertFalse(wb_settings.load(directory).get("launcher_key"))
+
+    def test_without_a_panel_list_the_startup_key_is_used(self):
+        with tempfile.TemporaryDirectory(prefix="wb-startup-key-") as directory:
+            key, generated, file_set = B._resolve_startup_api_key(
+                self.args("startup-key"), directory, [])
+            self.assertEqual((key, generated, file_set), ("startup-key", False, False))
+
+    def test_lan_mode_generates_once_then_reuses(self):
+        with tempfile.TemporaryDirectory(prefix="wb-startup-key-") as directory:
+            first, generated, _ = B._resolve_startup_api_key(
+                self.args(lan=True), directory, [])
+            second, generated_again, _ = B._resolve_startup_api_key(
+                self.args(lan=True), directory, [])
+            self.assertTrue(first.startswith("wb-"))
+            self.assertEqual(first, second)
+            self.assertTrue(generated)
+            self.assertFalse(generated_again)
+
+
+class ListenPortTests(unittest.TestCase):
+    def test_main_writes_the_port_onto_the_gateway_module(self):
+        """控制台查看器从网关模块读端口，启动时写的必须是同一个属性。"""
+        saved = proxy._LISTEN_PORT
+        args = SimpleNamespace(port=8806)
+        with mock.patch.multiple(B,
+                                 _parse_cli_args=lambda gateway: args,
+                                 _apply_cli_overrides=lambda gateway, a: None,
+                                 _probe_running_instance=lambda gateway, a: True):
+            try:
+                B.main(proxy)
+                self.assertEqual(proxy._LISTEN_PORT, 8806)
+            finally:
+                proxy._LISTEN_PORT = saved
 
 
 if __name__ == "__main__":

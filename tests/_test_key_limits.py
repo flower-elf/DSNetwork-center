@@ -17,6 +17,8 @@ os.environ["ACCOUNTS_DIR"] = os.path.join(_TMP, "accounts")
 os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
+
+import wb_usage as U
 import wb_proxy as proxy
 import wb_settings as S
 
@@ -236,30 +238,30 @@ with tempfile.TemporaryDirectory(prefix="wb-keylimits-") as directory:
                     usage_row("panel", 7, 0.01, at=now - 10),
                     {"at": now - 5, "model": "m", "total_tokens": 3, "credit": 0.02,
                      "realm": "intl"}])
-        stat = proxy.key_usage("k1")
+        stat = U.key_usage("k1")
         check("按 Key 归集请求数", stat["requests"] == 2, stat)
         check("按 Key 累加 token", stat["total_tokens"] == 150, stat)
         check("按 Key 累加积分", abs(stat["credit"] - 0.75) < 1e-9, stat)
         check("最后一次使用时间取最大", stat["last_used_at"] == now - 30, stat)
-        check("别的 Key 不混进来", proxy.key_usage("k2")["total_tokens"] == 999)
-        check("没有 key_id 的旧行不计入", proxy.key_usage("k1")["requests"] == 2)
-        check("没出现过的 Key 是 0", proxy.key_usage("k-none")["total_tokens"] == 0)
+        check("别的 Key 不混进来", U.key_usage("k2")["total_tokens"] == 999)
+        check("没有 key_id 的旧行不计入", U.key_usage("k1")["requests"] == 2)
+        check("没出现过的 Key 是 0", U.key_usage("k-none")["total_tokens"] == 0)
 
         # 新增的行按增量折叠进来
         write_rows([usage_row("k1", 25, 0.05, at=now - 1)])
-        stat = proxy.key_usage("k1")
+        stat = U.key_usage("k1")
         check("后写的行也累加进来", stat["requests"] == 3 and stat["total_tokens"] == 175, stat)
 
-        # 重置：把 usage_reset_at 推到当前时间，之前的行不再计入
+        # 重置：把 usage_reset_at 推到当前时间，之前的行不计入
         request = FakeRequest(payload={"reset_key_usage": "k1"})
         proxy.Handler._handle_settings_save(request)
         check("重置返回 200", request.status == 200, request.status)
         reset_at = S.api_keys(directory)[0]["usage_reset_at"]
         check("usage_reset_at 被写成当前时间", reset_at >= int(now), reset_at)
-        stat = proxy.key_usage("k1", reset_at)
+        stat = U.key_usage("k1", reset_at)
         check("重置后旧记录不再计入", stat["requests"] == 0 and stat["total_tokens"] == 0, stat)
         write_rows([usage_row("k1", 40, 0.2, at=reset_at + 5)])
-        stat = proxy.key_usage("k1", reset_at)
+        stat = U.key_usage("k1", reset_at)
         check("重置之后的行重新累计", stat["requests"] == 1 and stat["total_tokens"] == 40, stat)
         check("重置后 last_used_at 跟着更新", stat["last_used_at"] == reset_at + 5, stat)
 

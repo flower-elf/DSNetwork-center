@@ -15,7 +15,7 @@ const BASE = 40;
 const GROW = 30;
 const REACH = 150;
 
-export const DOCK_ACTIONS = [
+const DOCK_ACTIONS = [
   { id: 'add-account', title: '添加账号', icon: 'CirclePlus' },
   { id: 'panel', title: '面板选项', icon: 'SlidersHorizontal' },
 ];
@@ -146,7 +146,6 @@ function savedPosition() {
       || pos.vw <= 0 || pos.vh <= 0) {
     return null;
   }
-  // 视口尺寸变化后按比例换算，保持在原来的相对位置
   const x = pos.x * (window.innerWidth / pos.vw);
   const y = pos.y * (window.innerHeight / pos.vh);
   return clamp(x, y);

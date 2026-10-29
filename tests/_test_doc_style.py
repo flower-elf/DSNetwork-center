@@ -1,9 +1,6 @@
-"""文档与源码的中文写作规范检查，规则见 project-rule.md。
+"""检查文档与源码是否遵守 project-rule.md 的中文写作规范，违规时列出文件、行号与原文。
 
-同步上游时，上游的 README、规范文件与代码注释会带回不符合本仓库规范的写法。
-这里把能机械判定的规则逐条检查，违规时列出文件、行号与原文。
-
-Run with: python tests/_test_doc_style.py
+用 python tests/_test_doc_style.py 运行。同步上游后必须重跑：上游带回的写法会破坏这些规则。
 """
 import os
 import re
@@ -33,7 +30,7 @@ PROSE_RULES = (
     ("中文省略号应写作 ⋯⋯", re.compile(r"[%s]\.\.\.|\.\.\.[%s]|…" % (CJK, CJK))),
 )
 
-# 文档与源码共用的禁用词：(说明, 正则)。
+# 文档与源码共用的禁用词：（说明，正则）。
 WORD_RULES = (
     ("“不是⋯⋯而是”句式", re.compile(r"不是[^。\n]{0,40}而是")),
     ("写作“登录”", re.compile(r"登陆")),

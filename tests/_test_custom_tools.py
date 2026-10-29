@@ -1,17 +1,15 @@
-"""Deterministic protocol-conversion tests for the custom-tool port.
-
-No network: synthetic chat-completion chunks go through the translation functions.
+"""custom 工具移植的协议转换契约测试。不联网：合成的 chat completion 分片
+只经过翻译函数。用 python tests/run_all.py custom_tools 运行。
 """
 import json, os, sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
-# Its own directories, removed when this process exits. This suite used to share
-# tests/_acc and tests/_use with _test_tool_choice_none.py, which made the two
-# unsafe to run at the same time and left directories in the repo after a run.
+from _isolated_dirs import isolated_data_dirs  # noqa: E402  独立数据根目录
+# 每轮运行独立的数据目录，进程退出时自动删除，可与其他套件并行运行。
 _TMP = isolated_data_dirs("wb-custom-tools-")
 
 import wb_proxy as P
+import wb_translate as T
 
 PASS = FAIL = 0
 def check(label, cond, extra=""):
@@ -77,15 +75,18 @@ check("reasoning attached to assistant message", len(asst_r) == 1 and asst_r[0].
 check("assistant message content preserved", asst_r[0].get("content") == "4")
 
 print()
-print("[3] unknown input item types are logged, not silently dropped")
-import io, contextlib
-buf = io.StringIO()
-with contextlib.redirect_stdout(buf):
-    P.responses_to_chat({"model": "m", "input": [
+print("[3] unknown input item types are reported and dropped")
+import contextlib, io
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    conv = P.responses_to_chat({"model": "m", "input": [
         {"role": "user", "content": "x"},
         {"type": "local_shell_call", "call_id": "c9"},
     ]})
-check("no crash on unknown type", True)
+check("unknown item is dropped from messages",
+      [m.get("role") for m in conv["messages"]] == ["user"], conv)
+check("unknown item is reported on stderr", "local_shell_call" in err.getvalue(),
+      err.getvalue())
 
 print()
 print("[4] non-streaming response: custom tool call is re-inflated")
@@ -157,7 +158,7 @@ check("no custom events for a normal tool", "custom_tool_call_input" not in raw2
 
 print()
 print("[8] aggregate_stream: empty tool_call placeholder fallback (Issue #15)")
-# Case A: legacy function_call placeholder with finish_reason="tool_calls"
+# 情形 A：旧式 function_call 占位，finish_reason 为 "tool_calls"
 stream_placeholder = [
     chunk({"content": "Hello!"}),
     chunk({"function_call": {"name": "", "arguments": ""}}, "tool_calls"),
@@ -166,7 +167,7 @@ res_a = P.aggregate_stream(iter(stream_placeholder), "m", None)
 check("placeholder: finish_reason downgraded to stop", res_a["choices"][0]["finish_reason"] == "stop")
 check("placeholder: message has no tool_calls", "tool_calls" not in res_a["choices"][0]["message"])
 
-# Case B: name="" with non-empty arguments
+# 情形 B：name 为空串且 arguments 非空
 stream_nameless = [
     chunk({"content": "Thinking..."}),
     chunk({"tool_calls": [{"index": 0, "function": {"name": "", "arguments": '{"k":"v"}'}}]}, "tool_calls"),
@@ -175,7 +176,7 @@ res_b = P.aggregate_stream(iter(stream_nameless), "m", None)
 check("nameless tool: finish_reason downgraded to stop", res_b["choices"][0]["finish_reason"] == "stop")
 check("nameless tool: filtered out completely", "tool_calls" not in res_b["choices"][0]["message"])
 
-# Case C: valid tool call is preserved
+# 情形 C：有效的 tool call 原样保留
 stream_valid = [
     chunk({"tool_calls": [{"index": 0, "id": "call_ok", "function": {"name": "my_func", "arguments": '{"ok":true}'}}]}, "tool_calls"),
 ]
@@ -209,7 +210,7 @@ check("additional_tools not leaking into chat messages",
 
 print("[12] finish_reason empty string in stream chunk normalized to None")
 chunk_with_empty_finish = '{"choices":[{"delta":{"content":"chunk"},"finish_reason":""}]}'
-cleaned_chunk = json.loads(P.clean_chunk(chunk_with_empty_finish))
+cleaned_chunk = json.loads(T.clean_chunk(chunk_with_empty_finish))
 check("finish_reason normalized to None",
       cleaned_chunk["choices"][0]["finish_reason"] is None,
       cleaned_chunk["choices"][0])

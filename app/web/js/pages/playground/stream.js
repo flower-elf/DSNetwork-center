@@ -1,5 +1,5 @@
 import { createParser } from '../../../vendor/eventsource-parser-4.1.1/index.js';
-import { applyChunk, emptyAnswer, responseError } from './logic.js';
+import { applyChunk, emptyAnswer, parseJson, responseError } from './logic.js';
 
 // 流式对话的传输层：POST 请求体，用 eventsource-parser 解析响应体里的 SSE；请求头由调用方给出（面板会话令牌与 X-Realm），fetch 可替换以便在 Node 里测试。
 
@@ -8,14 +8,6 @@ export class StreamError extends Error {
     super(message);
     this.name = 'StreamError';
     this.status = status;
-  }
-}
-
-function parseJSON(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
   }
 }
 
@@ -41,7 +33,7 @@ export async function streamChat({ url, headers, body, signal, onUpdate, fetchIm
   }
   if (!response.ok) {
     const text = await response.text();
-    throw new StreamError(response.status, responseError(response.status, parseJSON(text)));
+    throw new StreamError(response.status, responseError(response.status, parseJson(text)));
   }
   if (!response.body) throw new StreamError(0, '浏览器没有把流式响应体交回来');
 

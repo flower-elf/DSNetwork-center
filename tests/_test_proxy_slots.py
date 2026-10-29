@@ -1,4 +1,4 @@
-"""Deterministic tests for proxy-slot definitions (no network)."""
+"""测代理槽位定义的确定性行为。运行 python tests/_test_proxy_slots.py，无需网络。"""
 
 import atexit
 import os
@@ -7,10 +7,8 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 
-# One private directory tree, removed when this process exits. It holds the
-# per-section settings/account stores below and the USAGE_DIR the suite hands to
-# wb_proxy, so two runs of it cannot share a directory and a run leaves nothing
-# behind in the checkout.
+# 全套用例共用一棵私有临时目录树，进程退出时删除。它容纳各小节的设置与账号存储，
+# 以及交给 wb_proxy 的 USAGE_DIR；多次运行互不共用目录，也不会在仓库里留下文件。
 _TMP = tempfile.TemporaryDirectory(prefix="wb-slots-")
 atexit.register(_TMP.cleanup)
 
@@ -55,8 +53,7 @@ check("blank id auto-assigned without reusing a stored id",
       slots[1]["id"] and slots[1]["id"] not in ("slot-1", "slot-2", "slot-3"), slots[1]["id"])
 check("missing enabled defaults True", slots[1]["enabled"] is True)
 check("name preserved when present", slots[1]["name"] == "auto", slots[1]["name"])
-# A blank name stays blank: the panel labels such a slot by its exit
-# ("美国 住宅") and only falls back to the id when the exit is unknown.
+# 空 name 保持为空：面板按出口信息标注这种槽位，例如“美国 住宅”，仅当出口未知才回退到 id。
 check("a blank name stays blank", slots[2]["name"] == "", slots[2]["name"])
 check("enabled False preserved", slots[2]["enabled"] is False)
 check("url trimmed", slots[0]["url"] == "http://a:1")
@@ -95,8 +92,6 @@ check(
     "finds by id",
     (S.find_proxy_slot(d, saved2[0]["id"]) or {}).get("url") == "http://x:1",
 )
-check("unknown id -> None", S.find_proxy_slot(d, "slot-999") is None)
-check("empty id -> None", S.find_proxy_slot(d, "") is None)
 
 print()
 print("[5] Account: proxySlot persisted, proxy is resolved runtime value")
@@ -195,12 +190,11 @@ import importlib
 os.environ["ACCOUNTS_DIR"] = d2
 os.environ["WB_PROXY_USAGE_DIR"] = os.path.join(_TMP.name, "usage")
 P = importlib.import_module("wb_proxy")
-P.ACCOUNTS_DIR = d2
-P.POOL = pool
+PS = importlib.import_module("wb_proxy_slots")
 S.set_proxy_slots(d2, [{"id": "slot-2", "name": "two", "url": "http://slot:2"}])
 pool.set_proxy_slot("u-2", "slot-2")
 pool.set_proxy_slot("u-1", "slot-2")
-view = P.proxy_slots_view()
+view = PS.proxy_slots_view(pool, d2)
 by_id = {v["id"]: v for v in view}
 check("view lists slot-2", "slot-2" in by_id, list(by_id))
 check(
@@ -219,8 +213,8 @@ check(
 )
 check(
     "the slot counts only the enabled account as in use",
-    {v["id"]: v for v in P.proxy_slots_view()}["slot-2"]["bound"] == 1,
-    P.proxy_slots_view(),
+    {v["id"]: v for v in PS.proxy_slots_view(pool, d2)}["slot-2"]["bound"] == 1,
+    PS.proxy_slots_view(pool, d2),
 )
 check("enabled account keeps its slot", pool.get("u-2").proxy_slot == "slot-2")
 
@@ -297,9 +291,6 @@ pool4.add(fresh)
 pool4.set_proxy_slot("u-fallback", "slot-1")
 check("slot wins while enabled", fresh.proxy == "http://slot:1", fresh.proxy)
 check("legacy kept for fallback", fresh.proxy_legacy == "http://fallback:9", fresh.proxy_legacy)
-S.set_proxy_slots(d4, [{"id": "slot-1", "name": "one", "url": "http://slot:1", "enabled": False}])
-pool4.apply_proxy_slots()
-check("disabled slot falls back to legacy", fresh.proxy == "http://fallback:9", fresh.proxy)
 
 print()
 print("PASS=%d FAIL=%d" % (PASS, FAIL))

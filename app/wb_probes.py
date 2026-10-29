@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""wb_probes.py — 真实输出上限探测结果（panel scripts/probe_max_tokens.py 的 hub 化）。
+"""真实输出上限探测结果，探测逻辑源自 panel 的 scripts/probe_max_tokens.py。
 
 网关送 max_tokens=1,000,000 时上游会静默钳制到模型真实上限；探测脚本送一次
 「要求超长输出」的请求，若 finish_reason == "length" 则本次 completion_tokens
 就是上游的钳制值。结果写 accounts/output_probes.json，/v1/models 对应模型标注
-output_clamp / max_output_tokens_clamped（仅标注，不覆盖模型规格值）。
+output_clamp / max_output_tokens_clamped，仅标注、不覆盖模型规格值。
 
 纯标准库，Python 3.9 兼容。
 """
@@ -30,7 +30,7 @@ def probe_path(directory):
 
 
 def load_probes(directory, force=False):
-    """Cached read of the probe file (missing/corrupt -> empty dict)."""
+    """读取探测文件，带缓存；文件缺失或损坏时返回空字典。"""
     now = time.time()
     with _lock:
         if (not force and _cache["dir"] == directory
@@ -73,7 +73,7 @@ def save_probe(directory, model, result):
 
 
 def clamp_for(directory, model):
-    """The probed clamp for a model, or None when unknown."""
+    """返回模型探测到的钳制值，未知时为 None。"""
     entry = load_probes(directory).get(str(model))
     if isinstance(entry, dict):
         value = entry.get("clamped")
@@ -86,7 +86,7 @@ def clamp_for(directory, model):
 
 def probe_model(base_url, api_key, model, max_tokens=1000000,
                 prompt=None, timeout=900, dry_run=False, urlopen=None):
-    """Send one long-output request and infer the upstream's real clamp."""
+    """发送一次超长输出请求，推断上游真实的钳制值。"""
     url = str(base_url).rstrip("/") + "/v1/chat/completions"
     body = {
         "model": model,

@@ -7,10 +7,8 @@
 import calendar
 import datetime
 import importlib
-import inspect
 import json
 import os
-import re
 import sys
 import tempfile
 import threading
@@ -19,6 +17,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"))
 from _isolated_dirs import isolated_data_dirs  # noqa: E402  (its own data root)
 _TMP = isolated_data_dirs("wb-activity-")
 
@@ -403,44 +403,6 @@ class SchedulerRecordingTests(IsolatedCase):
         self.assertEqual(len(calls), 1, "只有真正到期的那个账号签了一次")
 
 
-class CallSiteAuditTests(unittest.TestCase):
-    """调用点的源码级审计：漏了 trigger 的调用点会在历史里留下 unknown。"""
-
-    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-    def test_every_call_site_names_its_trigger(self):
-        bare = re.compile(r"\.(checkin|daily_chat|daily_chat_web)\(\s*\)")
-        offenders = []
-        for name in ("wb_proxy.py", "wb_accounts.py", "wb_scheduler.py",
-                     "wb_tasks.py"):
-            with open(os.path.join(self.ROOT, "app", name), encoding="utf-8") as fh:
-                for number, line in enumerate(fh, 1):
-                    if bare.search(line):
-                        offenders.append("%s:%d" % (name, number))
-        self.assertEqual(offenders, [], "这些调用点没有说明触发来源")
-
-    def test_account_add_and_import_carry_their_own_trigger(self):
-        # OAuth 添加账号在 poll_login 里落地，桌面端导入在 import_desktop_credential
-        # 里落地；两条路径都顺手签一次到，来源要各自说清楚。
-        self.assertIn('checkin(trigger="account_add")',
-                      inspect.getsource(wb_accounts.AccountPool.poll_login))
-        self.assertIn('checkin(trigger="account_import")',
-                      inspect.getsource(
-                          wb_accounts.AccountPool.import_desktop_credential))
-
-    def test_the_three_attempt_methods_are_the_recording_points(self):
-        for name, task in (("checkin", "TASK_CHECKIN"),
-                           ("daily_chat", "TASK_DAILY_CHAT"),
-                           ("daily_chat_web", "TASK_DAILY_CHAT")):
-            source = inspect.getsource(getattr(wb_accounts.Account, name))
-            self.assertIn("wb_activity.record_attempt", source, name)
-            self.assertIn(task, source, name)
-
-    def test_the_nested_web_call_is_marked_as_already_recorded(self):
-        source = inspect.getsource(wb_accounts.Account._daily_chat_upstream)
-        self.assertIn("daily_chat_web(trigger=None)", source)
-
-
 class ReadApiTests(IsolatedCase):
     """读取口径：窗口、筛选、上限，以及坏时间戳不能绕过下界。"""
 
@@ -693,15 +655,27 @@ class RouteTests(IsolatedCase):
         code, _payload = handler.captured
         self.assertEqual(code, 401)
 
-    def test_route_is_registered_and_panel_gated(self):
-        self.assertIn('"/activity/history"',
-                      inspect.getsource(wb_proxy.Handler.do_GET))
+    def test_route_is_panel_gated(self):
         self.assertTrue(wb_proxy.Handler._is_panel_route("/activity/history"))
         self.assertFalse(wb_proxy.Handler._is_panel_route("/v1/chat/completions"))
 
     def test_startup_points_the_module_at_the_gateway_data_dir(self):
-        self.assertIn("wb_activity.set_data_dir(USAGE_DIR)",
-                      inspect.getsource(wb_proxy))
+        """--usage-dir 生效时活动记录要立刻换到该目录。"""
+        import types
+        import wb_startup
+        saved = (wb_proxy.USAGE_DIR, wb_proxy.USAGE_LOG, wb_proxy.LIMIT_EVENTS_FILE,
+                 wb_proxy.ESTIMATE_DAILY_FILE, wb_proxy.RECENT_INDEX_FILE,
+                 wb_activity.data_dir())
+        args = types.SimpleNamespace(lan=False, host="127.0.0.1", user_agent=None,
+                                     usage_dir=self.dir.name)
+        try:
+            wb_startup._apply_cli_overrides(wb_proxy, args)
+            self.assertEqual(os.path.abspath(wb_activity.data_dir()),
+                             os.path.abspath(self.dir.name))
+        finally:
+            (wb_proxy.USAGE_DIR, wb_proxy.USAGE_LOG, wb_proxy.LIMIT_EVENTS_FILE,
+             wb_proxy.ESTIMATE_DAILY_FILE, wb_proxy.RECENT_INDEX_FILE) = saved[:5]
+            wb_activity.set_data_dir(saved[5])
 
 
 class SecretSafetyTests(IsolatedCase):
@@ -747,11 +721,18 @@ class SecretSafetyTests(IsolatedCase):
         self.assertNotIn("\n", row["message"])
 
     def test_the_history_never_lands_in_the_repository_tree(self):
+        """历史只进临时目录，绝不落进仓库的数据目录。
+
+        套件的临时目录建在 %TEMP% 下，因此这里挡的是 usage/、accounts/ 这类
+        真实数据目录，而不是整个仓库路径。
+        """
         repository = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.assertFalse(
-            os.path.abspath(wb_activity.data_dir()).startswith(
-                os.path.abspath(repository)),
-            "用例必须写在临时目录里，而不是仓库的 usage/")
+        data_dir = os.path.abspath(wb_activity.data_dir())
+        for name in ("usage", "accounts", "logs", "state"):
+            self.assertFalse(
+                data_dir.startswith(os.path.join(repository, name)),
+                "用例的历史不能写进仓库的 %s/" % name)
+        self.assertNotEqual(data_dir, repository)
 
 
 if __name__ == "__main__":

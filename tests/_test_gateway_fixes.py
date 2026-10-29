@@ -26,8 +26,11 @@ class GatewayFixesTest(unittest.TestCase):
 
 class LogWriteTests(unittest.TestCase):
     def test_a_dead_stderr_does_not_raise(self):
+        calls = []
+
         class Dead(object):
             def write(self, *args):
+                calls.append(args)
                 raise OSError("stderr is gone")
 
             def flush(self):
@@ -35,6 +38,7 @@ class LogWriteTests(unittest.TestCase):
 
         with mock.patch.object(wb_proxy.sys, "stderr", Dead()):
             wb_proxy.log("probe")  # 抛异常就会让这次请求空连接关闭
+        self.assertEqual(len(calls), 1, calls)
 
     def test_an_entry_still_reaches_the_buffer(self):
         before = len(wb_proxy.LOG_BUFFER)

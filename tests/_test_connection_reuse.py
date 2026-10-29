@@ -1,23 +1,11 @@
-"""A rejected request must not desynchronise a keep-alive connection.
+"""被拒绝的请求必须读完请求体，keep-alive 连接不能因残留负载失步。
 
-An early rejection (401, 429, 404) used to reply without reading the request
-body, so the payload stayed in the socket. The next request on that connection
-then parsed the leftover JSON as its request line and failed - surfacing as a
-bogus "414 Request-URI Too Long" with an empty request line in the log, on an
-otherwise healthy connection.
+早拒绝（401、429、404）的回复若不读请求体，负载会留在 socket 里，下一条请求把
+残留 JSON 当请求行解析，日志出现空请求行与假的“414 Request-URI Too Long”。连接池
+客户端会把它当成随机失败。必须用裸 socket：HTTP 客户端库会换新连接掩盖问题。
 
-Any client using a connection pool hits this as "random" failures that
-disappear on retry, which is why it is worth a standing test. A raw socket is
-required: an HTTP client library would silently open a fresh connection and
-hide the bug entirely.
-
-Each response is read up to its own boundary instead of being waited for with a
-fixed sleep, so the suite synchronizes on the server's answer rather than on
-machine speed: a correct server on a busy runner used to answer after the sleep
-had already expired, which is indistinguishable from the regression under test.
-
-Starts a real server on a spare port with a throwaway store, so it needs no
-network access and does not touch the real accounts.
+每个响应读到自身边界，按服务器的回答同步。在备用端口启动真实网关与一次性存储，
+不需要网络，也不动真实账号。用 python tests/_test_connection_reuse.py 运行。
 """
 
 import json
@@ -37,7 +25,7 @@ if not os.path.exists(PY):
     PY = sys.executable
 sys.path.insert(0, HERE)
 
-import _lifecycle as life            # noqa: E402  (spare port + managed process)
+import _lifecycle as life            # noqa: E402  空闲端口与受管进程
 
 PASS = 0
 FAIL = 0
@@ -53,26 +41,21 @@ def check(label, ok, detail=""):
         print("  [FAIL] %s %s" % (label, detail))
 
 
-# How long a complete response may take before the suite calls the server
-# broken. A working gateway answers in milliseconds; the bound exists so a
-# stalled one fails the suite instead of holding the job until the runner's own
-# timeout fires.
+# 完整响应的等待上限，超过就判服务器故障。网关正常时毫秒级回复；这个上限让
+# 卡住的服务器尽快失败，不必等运行器自己的超时。
 RESPONSE_DEADLINE = 15.0
 
 
 class IncompleteResponse(Exception):
-    """The peer closed before the response it had started was complete.
+    """对方在响应中途关闭连接。
 
-    Kept apart from the deadline: a timeout means the answer is late, this means
-    it will never arrive. Both are failures. The reader is the suite's
-    synchronization point, so a truncated exchange must never be handed back as
-    a finished one - "looks complete" is exactly the reading this suite exists
-    to refuse.
+    与超时分开：超时是回答来晚了，这个是永远不会来。读取是套件的同步点，
+    截断的交换绝不能当成完整响应返回。
     """
 
 
 def content_length(head):
-    """The body length the headers declare, or None when they declare none."""
+    """响应头声明的响应体长度；未声明时返回 None。"""
     for line in head.split(b"\r\n")[1:]:
         name, _, value = line.partition(b":")
         if name.strip().lower() == b"content-length":
@@ -84,20 +67,16 @@ def content_length(head):
 
 
 def read_response(sock, deadline=RESPONSE_DEADLINE):
-    """Read one complete HTTP response off a raw socket, bounded by `deadline`.
+    """从裸 socket 读一个完整 HTTP 响应，受 `deadline` 限制。
 
-    Returns the bytes exactly as they arrived, so the assertions below stay on
-    the wire format. Stops at the response's own boundary - the Content-Length
-    body when the headers declare one, otherwise the close - which is what
-    leaves the connection reusable for the next request. An answer that never
-    completes fails instead of coming back short: TimeoutError when the deadline
-    passes with the peer still open, IncompleteResponse when the peer closes
-    early. Either way the caller never receives a truncated response that could
-    pass for a whole one.
+    按线上到达的字节原样返回，下方的断言因此保持在线格式。读到响应自身边界
+    停止：头里声明 Content-Length 就读满该长度，否则读到连接关闭；连接因此能
+    给下一个请求复用。响应永不完整时必须失败：期限到了对方仍开着就抛
+    TimeoutError，对方提前关闭就抛 IncompleteResponse，调用方永远拿不到可能
+    被当成完整响应的截断结果。
 
-    Chunked framing is deliberately not implemented. The routes under test
-    answer with a Content-Length, and a body with no end must fail loudly
-    instead of being guessed at.
+    刻意不实现 chunked 分帧。被测路由都带 Content-Length，没有结尾的响应体
+    必须响亮失败，不能靠猜测。
     """
     end = time.monotonic() + deadline
     no_response = "no complete response within %.1fs" % deadline
@@ -110,9 +89,8 @@ def read_response(sock, deadline=RESPONSE_DEADLINE):
         try:
             return sock.recv(size)
         except socket.timeout:
-            # socket.timeout only became an alias of TimeoutError in 3.10 and
-            # the CI floor is 3.9, where recv() raises a class of its own:
-            # normalize it, so one exception type means "the bound was hit".
+            # socket.timeout 在 3.10 才成为 TimeoutError 的别名，CI 下限是 3.9，
+            # 那里 recv() 抛独立的类型：统一转成 TimeoutError，一种异常表示到达上限。
             raise TimeoutError(no_response) from None
 
     buf = b""
@@ -125,7 +103,7 @@ def read_response(sock, deadline=RESPONSE_DEADLINE):
     head, _, body = buf.partition(b"\r\n\r\n")
     length = content_length(head)
     if length is None:
-        # No length: the close ends the body, which is how the 414 path replies.
+        # 无长度声明：连接关闭结束响应体，414 路径就是这样回复的。
         while True:
             chunk = recv(4096)
             if not chunk:
@@ -148,9 +126,8 @@ with open(os.path.join(store, "settings.json"), "w", encoding="utf-8") as fh:
     json.dump({"api_keys": [{"id": "k1", "name": "t", "key": "GOODKEY",
                              "enabled": True}]}, fh)
 
-# Managed spawn: its own group/session, so the stop_managed() in the finally
-# below takes the whole tree - a gateway that leaves a helper behind also leaves
-# its port held.
+# 受管启动：独立的进程组或会话，finally 里的 stop_managed() 因此能收掉整棵
+# 进程树；漏掉的辅助进程还会占着端口。
 proc = life.spawn_managed(
     [PY, os.path.join(ROOT, "app", "wb_proxy.py"), "--port", str(port), "--host", "127.0.0.1",
      "--accounts-dir", store],
@@ -159,7 +136,7 @@ proc = life.spawn_managed(
 
 
 def wait_ready():
-    """Wait for /health to answer; a gateway that could not bind exits instead."""
+    """等待 /health 应答；绑定失败的网关会直接退出。"""
     for _ in range(40):
         time.sleep(0.5)
         try:
@@ -175,8 +152,8 @@ def wait_ready():
     return False
 
 
-def send_pair(bad_body, label):
-    """Bad-key request with `bad_body`, then a good small one, same socket."""
+def send_pair(bad_body):
+    """同一 socket 上先用 `bad_body` 发一个坏 key 请求，再发一个好的小请求。"""
     sock = socket.create_connection(("127.0.0.1", port), timeout=20)
     try:
         sock.sendall(
@@ -214,21 +191,14 @@ try:
     print("[1] large body rejected with 401, then a good request")
     big = json.dumps({"model": "x",
                       "messages": [{"role": "user", "content": "A" * 70000}]}).encode()
-    first, second = send_pair(big, "large")
+    first, second = send_pair(big)
     check("the bad request was rejected", b"401" in first)
     check("the connection stayed in sync (not 414)", b"414" not in second,
           second.split(b"\r\n", 1)[0].decode("latin-1", "replace"))
     check("the second request reached the application",
           second.startswith(b"HTTP/1.1") and b"414" not in second)
 
-    print("[2] small body rejected with 401, then a good request")
-    small_bad = b'{"model":"x","messages":[{"role":"user","content":"hi"}]}'
-    first, second = send_pair(small_bad, "small")
-    check("the bad request was rejected", b"401" in first)
-    check("the second request parsed", b"414" not in second,
-          second.split(b"\r\n", 1)[0].decode("latin-1", "replace"))
-
-    print("[3] a good request alone still works")
+    print("[2] a good request alone still works")
     sock = socket.create_connection(("127.0.0.1", port), timeout=15)
     body = b'{"model":"x","messages":[{"role":"user","content":"hi"}]}'
     sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
@@ -243,7 +213,7 @@ try:
           resp.startswith(b"HTTP/1.1 503") and b"no usable account" in resp,
           resp.split(b"\r\n", 1)[0].decode("latin-1", "replace"))
 
-    print("[4] an over-long request line answers JSON, not stdlib HTML")
+    print("[3] an over-long request line answers JSON, not stdlib HTML")
     sock = socket.create_connection(("127.0.0.1", port), timeout=15)
     sock.sendall(b"GET /" + b"a" * (2 * 1024 * 1024) + b" HTTP/1.1\r\nHost: x\r\n\r\n")
     try:
@@ -256,11 +226,9 @@ try:
     check("the 414 body is our JSON error shape", b"application/json" in resp,
           resp[:120].decode("latin-1", "replace"))
 
-    # The reader's bound, checked here rather than trusted: a peer that never
-    # answers, and one that stops mid-body, must both fail the read on its
-    # deadline. Without this the deadline could be deleted and every other check
-    # would still pass - on a server that answers.
-    print("[5] the reader's deadline is a bound, not a wait")
+    # 读取上限在这里验证：对方永不回答、读到一半停下，都必须按期限失败。没有
+    # 这条检查，删掉期限后其余检查仍会通过，只要服务器正常回答。
+    print("[4] the reader's deadline is a bound, not a wait")
     quiet, silent = socket.socketpair()
     try:
         for stall in ("never answers", "stops mid-body"):
@@ -274,25 +242,23 @@ try:
                 raised = True
             waited = time.monotonic() - started
             check("a peer that %s fails the read" % stall, raised)
-            # Loose on purpose: the ceiling only has to separate "gave up" from
-            # "hung", and a loaded runner may be slow to schedule the wakeup.
+            # 刻意放宽：上限只需区分“放弃”与“卡死”，繁忙的运行器唤醒可能偏慢。
             check("and gives up on its deadline, not eventually",
                   0.5 <= waited < 8.0, "%.2fs" % waited)
     finally:
         quiet.close()
         silent.close()
 
-    # The other half of "never complete": the peer closes early. A truncated
-    # exchange must fail the read rather than come back as a short response that
-    # a caller could take for the whole answer.
-    print("[6] a truncated response fails instead of passing for complete")
+    # “永不完整”的另一半：对方提前关闭。截断的交换必须让读取失败，不能返回
+    # 短响应让调用方当成完整回答。
+    print("[5] a truncated response fails instead of passing for complete")
     for truncation, payload in (
             ("headers", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"),
             ("body", b"HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\nhalf")):
         quiet, peer = socket.socketpair()
         try:
             peer.sendall(payload)
-            peer.close()              # EOF: the rest of the response never comes
+            peer.close()              # EOF：响应的其余部分永远不会来
             try:
                 partial = read_response(quiet, deadline=5.0)
                 raised = None

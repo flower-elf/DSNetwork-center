@@ -9,7 +9,7 @@ export function themeMode() {
   return saved === 'light' || saved === 'dark' ? saved : 'system';
 }
 
-export function isDark() {
+function isDark() {
   return document.documentElement.classList.contains('dark');
 }
 

@@ -19,12 +19,15 @@ class VSCodeIdentityTest(unittest.TestCase):
         self.assertEqual(headers["X-IDE-Version"], "1.143.1")
         self.assertEqual(headers["X-Product-Version"], "4.12.39997873")
         self.assertEqual(headers["X-Agent-Type"], "main")
-        self.assertEqual(headers["X-Agent-Purpose"], "conversation")
-        self.assertEqual(headers["X-Agent-Runtime"], "other")
+        self.assertEqual(headers["X-Agent-Intent"], "craft")
+        self.assertEqual(headers["X-Env-ID"], "production")
         self.assertEqual(
             headers["User-Agent"],
             "VSCode/%s CodeBuddy/%s" % (
                 headers["X-IDE-Version"], headers["X-Product-Version"]))
+        # 插件不定义 X-Agent-Purpose 与 X-Agent-Runtime：只在桌面 CLI 里出现。
+        self.assertNotIn("X-Agent-Purpose", headers)
+        self.assertNotIn("X-Agent-Runtime", headers)
 
 
 class CliIdentityTest(unittest.TestCase):

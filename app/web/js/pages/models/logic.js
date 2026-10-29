@@ -1,6 +1,6 @@
 // 模型页的纯逻辑：目录来源文案、能力判定、筛选排序、统计与勾选后的 disabled_models 计算；只依赖 core/format.js，可在 Node 里直接测试。
 
-export const SOURCE_LABELS = {
+const SOURCE_LABELS = {
   server: '本次从服务器获取',
   cache: '服务器上次返回并保存在本地',
   local: '桌面端本地目录文件',
@@ -26,7 +26,7 @@ export function hasVision(entry) {
     || (Array.isArray(entry.input_modalities) && entry.input_modalities.includes('image')));
 }
 
-export function hasTools(entry) {
+function hasTools(entry) {
   return !!(entry.supports_tool_calls
     || (entry.capabilities && entry.capabilities.tool_calls));
 }
@@ -43,12 +43,12 @@ function contextValues(entry) {
   return values.filter((v) => Number.isFinite(v) && v > 0);
 }
 
-export function maxContext(entry) {
+function maxContext(entry) {
   const values = contextValues(entry);
   return values.length ? Math.max(...values) : 0;
 }
 
-export function isLongContext(entry) {
+function isLongContext(entry) {
   return maxContext(entry) >= LONG_CONTEXT_TOKENS;
 }
 
@@ -207,12 +207,11 @@ export function realmAccounts(accounts, realm) {
 }
 
 /** 账号模型排除名单的小写集合。 */
-export function accountDeniedSet(account) {
+function accountDeniedSet(account) {
   return new Set(((account && account.disabledModels) || [])
     .map((id) => String(id).toLowerCase()));
 }
 
-/** 这个模型是否会派给该账号。 */
 export function accountCanUse(model, account) {
   const id = String((model && model.id) || '').toLowerCase();
   return !accountDeniedSet(account).has(id);

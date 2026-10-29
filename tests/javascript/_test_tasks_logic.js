@@ -86,6 +86,11 @@ assert.equal(options.options[1].label, '国内一号 abcdef');
 assert.deepEqual(logic.growthAccountOptions([], 'missing').selected, 'all');
 assert.deepEqual(logic.growthAccountOptions(null, '').options.length, 1);
 
+// 账号选择器：「全部国内账号」留空，选中单个账号时返回它的 uid
+assert.equal(logic.checkinSelection('all'), undefined);
+assert.equal(logic.checkinSelection(''), undefined);
+assert.equal(logic.checkinSelection('uid-1'), 'uid-1');
+
 // ---- 积分变动记录
 const rows = logic.creditEventRows([
   { at: 1770000000, uid: 'u1', nickname: '甲', realm: 'intl', before: 10.5, after: 50.25, delta: 39.75 },

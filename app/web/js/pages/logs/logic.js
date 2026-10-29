@@ -35,12 +35,12 @@ export function buildLogsQuery({ sinceId = 0, limit = LOG_POLL_LIMIT } = {}) {
   return '/logs?' + params.toString();
 }
 
-export function normalizeSearch(text) {
+function normalizeSearch(text) {
   return String(text === undefined || text === null ? '' : text).trim().toLowerCase();
 }
 
 /** 级别、模块与关键字三个条件同时满足才显示；关键字匹配内容、模块与时刻。 */
-export function matchesLogFilter(entry, filters) {
+function matchesLogFilter(entry, filters) {
   if (filters.level && entry.level !== filters.level) return false;
   if (filters.tag && entry.tag !== filters.tag) return false;
   const needle = normalizeSearch(filters.search);

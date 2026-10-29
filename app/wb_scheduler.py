@@ -7,10 +7,10 @@
 4. 猫猫旅行与日常结算 (Cat Travel & Welfare)：自动派出猫猫旅行或领取归来奖励。
 5. 状态持久化与看板展示：暴露状态、执行记录、支持手动立即触发与开关切换。
 """
-import sys
 import threading
 import time
 import random
+import wb_host
 import wb_settings
 import wb_tasks
 from wb_tasks import do_cat_travel
@@ -32,8 +32,8 @@ class Scheduler:
         self.next_run_time = None
         self.logs = []
         self.apply_schedule()
-        # Guards against overlapping runs: trigger_now() spawns a thread per
-        # click, and a manual trigger can also land on top of the hourly job.
+        # 防止巡检重叠：trigger_now() 每次点击都起一个线程，手动触发也可能
+        # 压在整点任务上。
         self._run_lock = threading.Lock()
 
     def apply_schedule(self, hours=None):
@@ -73,11 +73,7 @@ class Scheduler:
                     effective_tag = "tasks"
                 else:
                     effective_tag = "scheduler"
-            # python app/wb_proxy.py makes the gateway __main__; importing
-            # wb_proxy here would load a second copy with its own POOL.
-            proxy_module = sys.modules.get("__main__")
-            if proxy_module is None or not hasattr(proxy_module, "add_log_entry"):
-                proxy_module = sys.modules.get("wb_proxy")
+            proxy_module = wb_host.loaded_gateway("add_log_entry")
             if proxy_module is not None:
                 proxy_module.add_log_entry(f"[调度器] {msg}", tag=effective_tag)
         except Exception:
@@ -116,7 +112,6 @@ class Scheduler:
 
         while not stop_event.is_set():
             self._calc_next_fire()
-            # 每 30 秒检查一次当前整点
             now = wb_tasks.cst_now()
             cur_hour = now.tm_hour
             cur_min = now.tm_min
@@ -147,7 +142,6 @@ class Scheduler:
                 next_h = h
                 break
         if next_h is not None:
-            # 今天
             t_struct = time.struct_time((now.tm_year, now.tm_mon, now.tm_mday, next_h, 0, 0, 0, 0, -1))
         else:
             # 明天第一个小时（UTC+8 没有夏令时，epoch 直接加一天）
@@ -184,7 +178,7 @@ class Scheduler:
 
     def _run_cycle_inner(self, trigger_reason="周期巡检", force=False):
         self.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S", wb_tasks.cst_now())
-        proxy = sys.modules.get("wb_proxy") or sys.modules.get("__main__")
+        proxy = wb_host.loaded_gateway("stand_down_active")
         if getattr(proxy, "stand_down_active", lambda: False)():
             self.log("账号被上游限制，网关已停止：跳过本次巡检")
             return
@@ -245,7 +239,7 @@ class Scheduler:
 
                     if acc.can_report_activity():
                         self.log(f"检测到国内版账号 [{uid8}] 今日尚未活跃上报，执行对话活跃上报")
-                        res = acc.report_activity()
+                        res = wb_tasks.report_activity(acc)
                         if res.get("ok"):
                             report_count += 1
                             self.log(f"✓ 账号 [{uid8}] {res.get('msg')}")
@@ -254,7 +248,6 @@ class Scheduler:
                         time.sleep(1.0)
 
                 if run_travel:
-                    # 检查猫猫旅行
                     tr = do_cat_travel(acc)
                     if tr.get("busy"):
                         self.log(f"🐱 账号 [{uid8}] 猫猫日常跳过: {tr.get('msg')}")

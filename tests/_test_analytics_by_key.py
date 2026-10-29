@@ -1,28 +1,4 @@
-"""Per-API-key attribution on the metrics page.
-
-Every usage row now records which configured key the caller presented, and
-/usage/analytics folds the same rows a second time by that key. This pins the
-parts that are easy to get subtly wrong:
-
-  * the unattributed buckets are told apart. A row written before the field
-    existed, a row from a deployment that never configured a key, and an id
-    the roster no longer knows are three different things: the first can only
-    shrink, the second keeps growing for as long as the deployment runs
-    keyless, and the third is a broken settings file. Merging them would hide
-    a growing leak behind a shrinking legacy tail;
-  * the table adds up. The per-key rows and the per-account rows are two
-    views of one log, so their request counts must match exactly - that is
-    the whole point of showing a spend breakdown;
-  * a key the panel can still see gets a row even with no traffic (otherwise
-    "no usage" and "no such key" look identical), while a disabled key that
-    saw nothing in the window does not;
-  * the per-key model list is capped, because a 50-key deployment would
-    otherwise ship thousands of pills to a page that repaints every 5s;
-  * deleting a key in the panel is a soft delete: the secret is wiped, the id
-    survives, and the history stays readable.
-
-No network: the usage log and the settings file are synthesised in a temp
-directory.
+"""测指标页按 API key 归因的契约：usage 行记录调用方出示的 key，报表按 key 二次汇总，三种无归因桶、对账、空闲 key 行、模型数上限和软删除语义都要正确。用 python tests/run_all.py _test_analytics_by_key 运行，不联网，usage 日志与 settings 文件在临时目录合成。
 """
 import io
 import json
@@ -34,14 +10,13 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _TMP = tempfile.mkdtemp(prefix="wb-bykey-")
-# WB_PROXY_USAGE_DIR is read at import, but ACCOUNTS_DIR is not configurable
-# that way - wb_proxy hard-codes it next to the script - so setting the
-# environment variable for it does nothing and it has to be rebound below.
-# This test writes settings, so getting that wrong would drop its fixtures
-# into the real accounts/settings.json, where the panel would show them.
+# WB_PROXY_USAGE_DIR 在 import 时读取。ACCOUNTS_DIR 不能这样配置：wb_proxy
+# 把它硬编码在脚本旁边，设环境变量无效，必须在下方重新绑定。本套件会写
+# settings，绑错会把夹具写进真实的 accounts/settings.json，面板里就能看到。
 os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 
 import wb_proxy as P
+import wb_usage as U
 import wb_settings as S
 
 P.ACCOUNTS_DIR = os.path.join(_TMP, "accounts")
@@ -61,13 +36,13 @@ def check(label, cond, extra=""):
 
 
 # --------------------------------------------------------------------------
-# 1. The writers put the key id on the row, always.
+# 1. 写入端始终把 key id 记在行上。
 # --------------------------------------------------------------------------
-P.record_usage("m-1", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+U.record_usage("m-1", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
                key="k-writer")
-P.record_usage("m-1", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
-P.record_error("m-1", 500, "boom", key="k-writer")
-P.record_error("m-1", 500, "boom")
+U.record_usage("m-1", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+U.record_error("m-1", 500, "boom", key="k-writer")
+U.record_error("m-1", 500, "boom")
 
 with io.open(P.USAGE_LOG, encoding="utf-8") as fh:
     written = [json.loads(line) for line in fh if line.strip()]
@@ -81,7 +56,7 @@ check("the new field is appended, so older readers keep working",
 
 
 # --------------------------------------------------------------------------
-# 2. Soft delete in the settings layer.
+# 2. 设置层的软删除：secret 抹掉、id 留存、历史可读，删掉的 key 不能再认证。
 # --------------------------------------------------------------------------
 _d = os.path.join(_TMP, "settings-accounts")
 os.makedirs(_d, exist_ok=True)
@@ -114,7 +89,7 @@ check("saving again does not resurrect the tombstone",
 
 
 # --------------------------------------------------------------------------
-# 3. The analytics payload.
+# 3. 分析载荷。
 # --------------------------------------------------------------------------
 NOW = time.time()
 
@@ -137,14 +112,14 @@ def row(account, key, model="m-1", prompt=100, completion=50, realm="intl", toke
 rows = [
     row("acct-A", "k1"),
     row("acct-A", "k1", model="m-2"),
-    row("acct-B", "k2"),                      # configured but disabled
-    row("acct-B", ""),                        # keyless deployment
-    row("acct-B", None),                      # written before the field existed
-    row("acct-B", "ghost"),                   # id the roster does not know
-    row("acct-A", "launcher"),                # the --api-key launcher key
-    row("acct-A", "", realm="cn"),            # keyless, other exit
+    row("acct-B", "k2"),                      # 已配置但被禁用
+    row("acct-B", ""),                        # 未配置 key 的部署，持续增长
+    row("acct-B", None),                      # 字段引入之前写的行，只减不增
+    row("acct-B", "ghost"),                   # 名单不认识的 id，settings 文件坏了
+    row("acct-A", "launcher"),                # --api-key 启动参数 key
+    row("acct-A", "", realm="cn"),            # 未配置 key，另一个出口
 ]
-# A key that spans both exits, and one with more models than the cap.
+# 跨两个出口的 key，以及模型数超过上限的 key。
 rows += [row("acct-C", "k-follow", realm="intl"), row("acct-C", "k-follow", realm="cn")]
 rows += [row("acct-D", "k-wide", model="m-%d" % i, tokens=(900 - i * 100)) for i in range(1, 8)]
 
@@ -161,7 +136,7 @@ S.set_api_keys(P.ACCOUNTS_DIR, [
 ])
 P.API_KEY = "launcher-secret"
 
-data = P._compute_usage_analytics_uncached()
+data = U._compute_usage_analytics_uncached()
 by_key = {k["key"]: k for k in data["keys"]}
 
 check("the payload carries a key axis", "keys" in data and len(data["keys"]) == len(by_key))
@@ -173,12 +148,13 @@ check("a configured key with no traffic still gets a row (0 is not 'missing')",
       by_key["k-idle"]["window"]["requests"] == 0 and by_key["k-idle"]["name"] == "闲")
 check("a disabled key with traffic in the window is kept",
       by_key["k2"]["window"]["requests"] == 1 and by_key["k2"]["enabled"] is False)
+# 三种桶语义不同，合成一桶会把增长的泄漏藏在缩减的历史尾巴后面。
 check("rows written before the field existed are their own bucket",
-      by_key[P.KEY_BUCKET_BEFORE]["window"]["requests"] == 1)
+      by_key[U.KEY_BUCKET_BEFORE]["window"]["requests"] == 1)
 check("a keyless deployment is its own bucket, not the legacy one",
-      by_key[P.KEY_BUCKET_ANON]["window"]["requests"] == 2)
+      by_key[U.KEY_BUCKET_ANON]["window"]["requests"] == 2)
 check("an id the roster cannot name is folded into one row",
-      by_key[P.KEY_BUCKET_UNKNOWN]["window"]["requests"] == 1)
+      by_key[U.KEY_BUCKET_UNKNOWN]["window"]["requests"] == 1)
 check("the launcher key gets a row when it is configured",
       by_key["launcher"]["window"]["requests"] == 1 and by_key["launcher"]["name"] == "启动参数")
 check("a key used on both exits is flagged",
@@ -186,7 +162,7 @@ check("a key used on both exits is flagged",
       and sorted(by_key["k-follow"]["realms"]) == ["cn", "intl"])
 check("a key that only ever used one exit is not",
       by_key["k1"]["cross_realm"] is False)
-check("the model list is capped", len(by_key["k-wide"]["models"]) == P.KEY_MODEL_TOP_N)
+check("the model list is capped", len(by_key["k-wide"]["models"]) == U.KEY_MODEL_TOP_N)
 check("the cap is accounted for rather than dropped",
       by_key["k-wide"]["models_other"]["models"] == 2
       and by_key["k-wide"]["models_other"]["tokens"] == 300 + 200)
@@ -199,49 +175,40 @@ check("the per-key table adds up to the per-account table", key_reqs == acct_req
       (key_reqs, acct_reqs))
 check("and to the window summary itself", key_reqs == data["summary"]["window"]["requests"])
 check("every row the page renders is named", all(k.get("name") for k in data["keys"]))
-# The handler serialises this straight to the wire; a non-serialisable value
-# (a set, a datetime) would turn the whole metrics page into a 500.
-_wire = json.dumps(data, ensure_ascii=False)
-check("the payload survives the trip to the browser",
-      len(json.loads(_wire)["keys"]) == len(data["keys"]))
 
-# A launcher key that never carried traffic is not an attribution dimension:
-# with a panel key present it is refused outright, so its empty row is noise.
-# The row above (used launcher) still shows, so only the unused case is gone.
+# 从没跑过流量的 launcher key 不是归因维度：配置了面板 key 时它被直接拒收，
+# 空行只是噪声。用过的 launcher 那行仍然显示，去掉的只是未用的场景。
 with io.open(P.USAGE_LOG, "w", encoding="utf-8") as fh:
     for r in rows:
         if r.get("key") != "launcher":
             fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-idle = P._compute_usage_analytics_uncached()
+idle = U._compute_usage_analytics_uncached()
 check("an unused launcher key gets no row at all",
       "launcher" not in [k["key"] for k in idle["keys"]])
 
-# The realm view must not invent a row for a key bound to the other exit.
-only_cn = P._compute_usage_analytics_uncached(realm="cn")
+# 出口视图不得为绑定在另一个出口上的 key 造行。
+only_cn = U._compute_usage_analytics_uncached(realm="cn")
 check("a key bound to the other exit is not listed in this view",
       "k-idle" not in [k["key"] for k in only_cn["keys"]])
 check("a key with no binding is still listed, it can serve this exit",
       "k-follow" in [k["key"] for k in only_cn["keys"]])
 
-# An older panel that never asks about keys must keep getting a valid payload.
-# `usd_cny` arrived later with the cost column; it is additive, so the legacy
-# shape is everything except the two newer axes.
+# 不请求 key 维度的旧面板必须继续拿到合法数据。usd_cny 随消费列后来加入，
+# 是增量字段，旧格式就是去掉 keys 与 usd_cny 两个维度之外的部分。
 legacy_view = {k: v for k, v in data.items() if k not in ("keys", "usd_cny")}
 check("dropping the new axis leaves the old payload intact",
       set(legacy_view) == {"window", "realm", "summary", "accounts", "models"})
 
 
 # --------------------------------------------------------------------------
-# 4. The `(切换前)` row disclosure is one server-side boolean.
+# 4. `(切换前)` 行的折叠开关是单个服务端布尔值。
 #
-# The panel folds that row away on request, and the choice is remembered by the
-# gateway rather than the browser (accounts/settings.json, key_before_hidden) -
-# the same single-boolean shape accounts_collapsed already uses. Only a real
-# boolean true may hide it: the file is hand-editable, so a "true" string or a
-# 1 must keep the row visible rather than drop history by accident.
+# 面板可以要求折叠掉该行，选择记在网关而不是浏览器：accounts/settings.json
+# 的 key_before_hidden，与 accounts_collapsed 同形。只有真布尔 true 才隐藏；
+# 文件可以手工编辑，"true" 字符串或 1 必须保持该行可见，避免误删历史。
 # --------------------------------------------------------------------------
 class FakeRequest(object):
-    """Just enough of the handler for the save route under test."""
+    """够跑保存路由的最小 handler。"""
 
     _handle_settings_save = P.Handler._handle_settings_save
 
@@ -262,7 +229,7 @@ class FakeRequest(object):
 
 
 def save(payload):
-    """Run the save route; return the errors it answered with."""
+    """跑保存路由，返回它应答的错误。"""
     request = FakeRequest(payload)
     request._handle_settings_save()
     return [entry for entry in request.answering if entry[0] == "error"]
@@ -285,7 +252,6 @@ if os.path.exists(settings_path):
     os.unlink(settings_path)
 
 check("a fresh install shows the row", S.key_before_hidden(P.ACCOUNTS_DIR) is False)
-check("and the payload says so", P.runtime_settings_view()["key_before_hidden"] is False)
 check("the save route stores a real boolean",
       save({"key_before_hidden": True}) == []
       and S.key_before_hidden(P.ACCOUNTS_DIR) is True

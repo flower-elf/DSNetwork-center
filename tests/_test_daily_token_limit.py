@@ -15,6 +15,7 @@ os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 import wb_accounts
 import wb_settings
 import wb_proxy as P
+import wb_usage as U
 
 
 def row(at, account, total, outcome="completed"):
@@ -26,8 +27,8 @@ def row(at, account, total, outcome="completed"):
 
 
 def reset_cache():
-    with P._daily_usage_lock:
-        P._daily_usage.update({"day": "", "totals": None, "offset": 0, "at": 0.0})
+    with U._daily_usage_lock:
+        U._daily_usage.update({"day": "", "totals": None, "offset": 0, "at": 0.0})
 
 
 class DailyTokenLimitTests(unittest.TestCase):
@@ -45,7 +46,7 @@ class DailyTokenLimitTests(unittest.TestCase):
             self.assertEqual(wb_settings.set_daily_token_limit(directory, "abc"), 0)
 
     def test_scan_counts_today_only_and_resumes_incrementally(self):
-        midnight = P._local_midnight()
+        midnight = U._local_midnight()
         rows = [
             row(midnight - 3600, "acct-A", 999999),   # 昨天，忽略
             row(midnight + 60, "acct-A", 1200),
@@ -56,23 +57,23 @@ class DailyTokenLimitTests(unittest.TestCase):
         with io.open(P.USAGE_LOG, "w", encoding="utf-8") as fh:
             for r in rows:
                 fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-        self.assertEqual(P.daily_tokens_by_account(ttl=0),
+        self.assertEqual(U.daily_tokens_by_account(ttl=0),
                     {"acct-A": 2000, "acct-B": 300})
 
         # 按字节偏移续折：首次扫描后追加的行直接折入，不重数整个文件。
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row(midnight + 300, "acct-B", 100)) + "\n")
-        self.assertEqual(P.daily_tokens_by_account(ttl=0),
+        self.assertEqual(U.daily_tokens_by_account(ttl=0),
                     {"acct-A": 2000, "acct-B": 400})
 
         # 末尾没有换行的行留到下次扫描，避免只数一半。
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row(midnight + 400, "acct-A", 50)))
-        self.assertEqual(P.daily_tokens_by_account(ttl=0),
+        self.assertEqual(U.daily_tokens_by_account(ttl=0),
                     {"acct-A": 2000, "acct-B": 400})
         with io.open(P.USAGE_LOG, "a", encoding="utf-8") as fh:
             fh.write("\n")
-        self.assertEqual(P.daily_tokens_by_account(ttl=0),
+        self.assertEqual(U.daily_tokens_by_account(ttl=0),
                     {"acct-A": 2050, "acct-B": 400})
 
     def test_guard_blocks_at_threshold_and_needs_a_count(self):
@@ -182,8 +183,8 @@ class GuardClearTests(unittest.TestCase):
     """把日限额改回 0 必须传到池子，账号上的护栏字段只在内存里。
 
     账号对象的 daily_* 字段由 Account.__init__ 归零，save() 不落盘，清掉旧值
-    只能靠再推一次。设置保存路径（refresh=True）以前对全为 0 的护栏整段跳过，
-    于是「关掉限额」恰好成了唯一推不出去的那次编辑。
+    只能靠再推一次。所以设置保存路径（refresh=True）必须把全为 0 的护栏也
+    推给池子，「关掉限额」的编辑才能生效。
     """
 
     def _pool(self, directory):
@@ -197,20 +198,20 @@ class GuardClearTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="guard-clear-") as directory:
             pool, account = self._pool(directory)
             with io.open(P.USAGE_LOG, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps(row(P._local_midnight() + 60, "uid-one", 600))
+                fh.write(json.dumps(row(U._local_midnight() + 60, "uid-one", 600))
                          + "\n")
             reset_cache()
             old_pool, old_dir = P.POOL, P.ACCOUNTS_DIR
             P.POOL, P.ACCOUNTS_DIR = pool, directory
             try:
                 wb_settings.set_daily_token_limit(directory, 500)
-                P.apply_daily_guards(refresh=True)
+                U.apply_daily_guards(refresh=True)
                 self.assertEqual(account.daily_token_limit, 500)
                 self.assertTrue(account.daily_limit_blocked())
                 self.assertFalse(account.ready())
 
                 wb_settings.set_daily_token_limit(directory, 0)
-                P.apply_daily_guards(refresh=True)
+                U.apply_daily_guards(refresh=True)
                 self.assertEqual(account.daily_token_limit, 0)
                 self.assertFalse(account.daily_limit_blocked())
                 self.assertTrue(account.ready())

@@ -1,7 +1,6 @@
-"""Panel-parity upstream timeouts (B1) and the optional X-Device-Token (B4).
+"""与面板一致的上游超时（B1）与可选 X-Device-Token（B4）。
 
-Run with: python _test_upstream_timeouts.py
-No upstream credentials or outbound network are used.
+不使用上游凭据，也不发起外网请求。用 python _test_upstream_timeouts.py 运行。
 """
 import json
 import os

@@ -261,4 +261,14 @@ assert.equal(zeroRow.ok, true);
 assert.deepEqual(zeroRow.payload.cost_estimate.models, [],
   '价格全为 0 的模型行不参与估算，也不存储');
 
+// 更新状态行：版本、可用更新与上次检查结果的组合文案
+assert.deepEqual(logic.updateStatusHint(null), { text: '正在读取更新状态…', warn: false });
+assert.deepEqual(logic.updateStatusHint({ error: '离线' }), { text: '读取更新状态失败：离线', warn: true });
+assert.deepEqual(logic.updateStatusHint({ current_version: '0.5.0', latest_version: '0.6.0', update_available: true }),
+  { text: '当前 v0.5.0 · 最新 v0.6.0 · 有新版本', warn: true });
+assert.deepEqual(logic.updateStatusHint({ current_version: '0.5.0', latest_version: '0.5.0' }),
+  { text: '当前 v0.5.0 · 最新 v0.5.0 · 已是最新', warn: false });
+assert.deepEqual(logic.updateStatusHint({ enabled: true }), { text: '尚未检查', warn: false });
+assert.deepEqual(logic.updateStatusHint({ enabled: false }), { text: '自动检查已关闭', warn: false });
+
 console.log('settings logic assertions passed');

@@ -35,7 +35,7 @@ def make_account(uid, realm="cn", credits=None, **extra):
 
 
 def credits(days_left):
-    """A credits blob whose single package expires in the given days."""
+    """只有一个额度包、按给定天数到期的余额数据。"""
     remain = 100
     return {
         "remain": remain, "used": 0, "size": remain,
@@ -68,9 +68,12 @@ class AccountWeightFieldTests(unittest.TestCase):
         self.assertEqual(account.public()["weight"], 4)
         self.assertEqual(make_account("w-view2").public()["weight"], 1)
 
-    def test_weight_round_trips_through_the_credential_file(self):
+    def test_weight_reaches_the_disk_and_keeps_the_json_field(self):
+        """两条写路径落盘重载可见，原始 JSON 保留 weight 字段。"""
         with tempfile.TemporaryDirectory(prefix="weight-persist-") as directory:
-            make_account("w-disk", weight=3).save(directory)
+            path = make_account("w-disk", weight=3).save(directory)
+            with open(path, encoding="utf-8") as fh:
+                self.assertEqual(json.load(fh)["weight"], 3)
             pool = wb_accounts.AccountPool(directory, log=lambda _m: None)
             loaded = {a.uid: a for a in pool.load()}
             self.assertEqual(loaded["w-disk"].weight, 3)
@@ -78,12 +81,8 @@ class AccountWeightFieldTests(unittest.TestCase):
             self.assertEqual(pool.set_weight("w-disk", 7)["weight"], 7)
             pool2 = wb_accounts.AccountPool(directory, log=lambda _m: None)
             self.assertEqual({a.uid: a for a in pool2.load()}["w-disk"].weight, 7)
-
-    def test_saved_json_keeps_the_field(self):
-        with tempfile.TemporaryDirectory(prefix="weight-json-") as directory:
-            path = make_account("w-file", weight=6).save(directory)
             with open(path, encoding="utf-8") as fh:
-                self.assertEqual(json.load(fh)["weight"], 6)
+                self.assertEqual(json.load(fh)["weight"], 7)
 
 
 class SetWeightTests(unittest.TestCase):

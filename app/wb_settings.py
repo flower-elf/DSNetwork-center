@@ -184,20 +184,45 @@ def load(accounts_dir):
         return data
 
 
+_SAVED_DIRS = set()
+
+
+def _write_atomic(accounts_dir, path, tmp, data):
+    """写临时文件再 os.replace；失败时清掉临时文件并向上抛。"""
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+        _load_cache.pop(path, None)
+    except Exception:
+        # 任何失败都别留下临时文件；调用方在目录缺失时会重建后重试一次。
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save(accounts_dir, data):
     """原子写入，进程崩溃不会留下写了一半的设置文件。
 
-    临时文件名带上 pid 与线程 id，两个写方不会共用同一个临时文件。
+    临时文件名带上 pid 与线程 id，两个写方不会共用同一个临时文件。目录只建
+    一次：os.makedirs 每次都会 stat 整条路径，在慢盘上是明显的固定开销。
     """
     with _lock:
-        os.makedirs(accounts_dir, exist_ok=True)
+        if accounts_dir not in _SAVED_DIRS:
+            os.makedirs(accounts_dir, exist_ok=True)
+            _SAVED_DIRS.add(accounts_dir)
         path = settings_path(accounts_dir)
         tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
         try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(data, fh, ensure_ascii=False, indent=2)
-            os.replace(tmp, path)
-            _load_cache.pop(path, None)
+            _write_atomic(accounts_dir, path, tmp, data)
+        except FileNotFoundError:
+            # 目录被外部删掉：缓存里的「已建」不再成立，重建后重试一次。
+            _SAVED_DIRS.discard(accounts_dir)
+            os.makedirs(accounts_dir, exist_ok=True)
+            _SAVED_DIRS.add(accounts_dir)
+            _write_atomic(accounts_dir, path, tmp, data)
         except Exception:
             try:
                 os.unlink(tmp)
@@ -221,7 +246,7 @@ def _secure_equals(left, right):
 def _password_rounds(data, path):
     """派生摘要前校验存储的 PBKDF2 成本。
 
-    手改文件能写出的非法值都以文件路径报错，而不是报告密码错误。
+    手改文件写出的非法值都以文件路径报错，避免操作者误以为密码错误。
     """
     raw = data.get("panel_password_rounds")
     if raw is None:
@@ -251,6 +276,7 @@ def deep_merge(base, patch):
         else:
             out[key] = value
     return out
+
 
 def panel_password_is_default(accounts_dir):
     data = load(accounts_dir)
@@ -797,14 +823,11 @@ def match_api_key(accounts_dir, supplied, extra_keys=()):
 
 def auth_disabled(accounts_dir):
     """操作者完全关闭 API Key 校验时返回 True。"""
-    return load(accounts_dir).get("auth_disabled") is True
+    return _bool_setting(accounts_dir, "auth_disabled", False)
 
 
 def set_auth_disabled(accounts_dir, disabled):
-    with _lock:
-        data = load(accounts_dir)
-        data["auth_disabled"] = bool(disabled)
-        save(accounts_dir, data)
+    _store(accounts_dir, "auth_disabled", bool(disabled))
 
 
 # ------------------------------------------------------------------ limits
@@ -920,7 +943,6 @@ def limits_data(accounts_dir):
 
 
 def limits_snapshot(accounts_dir):
-    """面板可见的每个守卫取值，先按守卫再按作用域索引。"""
     return limits_data(accounts_dir)
 
 
@@ -1022,8 +1044,7 @@ def set_daily_token_limit(accounts_dir, value):
 
 def daily_credit_limit(accounts_dir, realm=None):
     """每日积分守卫：今天已花掉该数量积分的账号在本地零点前只服务免费
-    模型，因此会继续使用付费模型的客户端会轮换到其他账号，而不是耗尽整份
-    余额。
+    模型，因此会继续使用付费模型的客户端会轮换到其他账号，避免耗尽整份余额。
 
     0 关闭守卫，尚未设置该值的安装行为不变。
     """
@@ -1089,11 +1110,7 @@ def set_credits_refresh_hours(accounts_dir, value):
     except (TypeError, ValueError):
         hours = 0.0
     hours = max(0.0, min(MAX_CREDITS_REFRESH_HOURS, hours))
-    with _lock:
-        data = load(accounts_dir)
-        data[CREDITS_REFRESH_HOURS_KEY] = hours
-        save(accounts_dir, data)
-    return hours
+    return _store(accounts_dir, CREDITS_REFRESH_HOURS_KEY, hours)
 
 
 def section_max_height(accounts_dir):
@@ -1128,11 +1145,7 @@ def set_section_max_height(accounts_dir, value):
         except (TypeError, ValueError, OverflowError):
             number = DEFAULT_SECTION_MAX_HEIGHT
     number = max(0, min(MAX_SECTION_MAX_HEIGHT, number))
-    with _lock:
-        data = load(accounts_dir)
-        data[SECTION_MAX_HEIGHT_KEY] = number
-        save(accounts_dir, data)
-    return number
+    return _store(accounts_dir, SECTION_MAX_HEIGHT_KEY, number)
 
 
 def _clamp_refresh_minutes(value):
@@ -1216,18 +1229,12 @@ def pricing_variant_inherit(accounts_dir):
     最严格规则的安装可保留该行为。没有该键的 settings.json 读作开启，这也是
     默认值。
     """
-    value = load(accounts_dir).get(PRICING_VARIANT_INHERIT_KEY)
-    return True if value is None else value is True
+    return _bool_setting(accounts_dir, PRICING_VARIANT_INHERIT_KEY, True)
 
 
 def set_pricing_variant_inherit(accounts_dir, enabled):
     """保存变体继承开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[PRICING_VARIANT_INHERIT_KEY] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, PRICING_VARIANT_INHERIT_KEY, enabled)
 
 
 def pricing_enabled(accounts_dir):
@@ -1237,18 +1244,12 @@ def pricing_enabled(accounts_dir):
     显示成本列。没有该键的 settings.json 读作开启，这是所有安装的默认行为，
     开关只用于让操作者整体关闭该功能。
     """
-    value = load(accounts_dir).get(PRICING_ENABLED_KEY)
-    return True if value is None else value is True
+    return _bool_setting(accounts_dir, PRICING_ENABLED_KEY, True)
 
 
 def set_pricing_enabled(accounts_dir, enabled):
     """保存总开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[PRICING_ENABLED_KEY] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, PRICING_ENABLED_KEY, enabled)
 
 
 COST_ESTIMATE_KEY = "cost_estimate"
@@ -1267,12 +1268,7 @@ def cost_estimate(accounts_dir):
 
 def set_cost_estimate(accounts_dir, raw):
     """保存校验过的费用估算设置，返回存储的形状。"""
-    value = wb_cost.clean(raw)
-    with _lock:
-        data = load(accounts_dir)
-        data[COST_ESTIMATE_KEY] = value
-        save(accounts_dir, data)
-    return value
+    return _store(accounts_dir, COST_ESTIMATE_KEY, wb_cost.clean(raw))
 
 
 def ui_language(accounts_dir):
@@ -1287,11 +1283,7 @@ def set_ui_language(accounts_dir, value):
     """保存实例级默认界面语言。"""
     if not isinstance(value, str) or value not in UI_LANGUAGE_VALUES:
         raise ValueError("ui_language must be zh, zh-Hant or en")
-    with _lock:
-        data = load(accounts_dir)
-        data[UI_LANGUAGE_KEY] = value
-        save(accounts_dir, data)
-    return value
+    return _store(accounts_dir, UI_LANGUAGE_KEY, value)
 
 
 def smart_routing(accounts_dir):
@@ -1301,36 +1293,25 @@ def smart_routing(accounts_dir):
     的账号。只影响对话的第一次选择，已绑定的对话保持原账号，前缀缓存不受
     影响。该开关用于恢复纯轮询。
     """
-    value = load(accounts_dir).get("smart_routing")
-    return True if value is None else value is True
+    return _bool_setting(accounts_dir, "smart_routing", True)
 
 
 def set_smart_routing(accounts_dir, enabled):
     """保存放置开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["smart_routing"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "smart_routing", enabled)
+
 
 def session_affinity(accounts_dir):
     """同一段对话是否固定使用同一个账号，默认打开。
 
     上游的前缀缓存按账号保存，对话换了账号就要重新计算整段前缀。
     """
-    value = load(accounts_dir).get("session_affinity")
-    return True if value is None else value is True
+    return _bool_setting(accounts_dir, "session_affinity", True)
 
 
 def set_session_affinity(accounts_dir, enabled):
     """保存对话亲和开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["session_affinity"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "session_affinity", enabled)
 
 
 
@@ -1420,6 +1401,7 @@ def validate_usage_patch(raw):
             raise ValueError("%s cannot be more than %d" % (key, USAGE_LIMITS[key]))
         out[key] = value
     return out
+
 
 def usage_config(accounts_dir):
     """聚合保留窗口，分小时层与日桶；面板没设过时使用内置默认值。"""
@@ -1556,12 +1538,7 @@ def enable_anthropic_messages(accounts_dir):
 
 def set_enable_anthropic_messages(accounts_dir, enabled):
     """保存 Anthropic Messages 开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["enable_anthropic_messages"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "enable_anthropic_messages", enabled)
 
 
 def dsh_tool_neutralization(accounts_dir):
@@ -1572,12 +1549,7 @@ def dsh_tool_neutralization(accounts_dir):
 
 def set_dsh_tool_neutralization(accounts_dir, enabled):
     """保存 DSH 工具调用通用化开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["dsh_tool_neutralization"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "dsh_tool_neutralization", enabled)
 
 
 def _env_flag_value(name):
@@ -1597,12 +1569,6 @@ def _env_flag_value(name):
     return False, False
 
 
-def _env_flag(name, default):
-    """环境变量的布尔值；没有设置或值非法时回到默认。"""
-    present, value = _env_flag_value(name)
-    return value if present else default
-
-
 def _flag(accounts_dir, key, default=False, env=""):
     """读取一个布尔功能开关：环境变量优先于面板值，都没有时用默认值。
 
@@ -1612,19 +1578,38 @@ def _flag(accounts_dir, key, default=False, env=""):
         present, value = _env_flag_value(env)
         if present:
             return value
-    value = load(accounts_dir).get(key)
-    if isinstance(value, bool):
-        return value
-    return default
+    return panel_flag(accounts_dir, key, default)
+
+
+def _store(accounts_dir, key, value):
+    """把一个已校验的值写入设置文件并返回它。"""
+    with _lock:
+        data = load(accounts_dir)
+        data[key] = value
+        save(accounts_dir, data)
+    return value
 
 
 def _set_flag(accounts_dir, key, enabled):
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[key] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _store(accounts_dir, key, bool(enabled))
+
+
+def _bool_setting(accounts_dir, key, default):
+    """读取一个布尔设置：缺失键取默认值，其余只有 JSON 布尔 true 读作开启。
+
+    手改文件里的字符串、数字与对象一律读作关闭，它们不能被读成开启。
+    """
+    value = load(accounts_dir).get(key)
+    return default if value is None else value is True
+
+
+def _bounded_int(accounts_dir, key, fallback, hard_max):
+    """读取一个正整数设置：bool、非整数、越界都回落到 fallback。"""
+    value = load(accounts_dir).get(key)
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or value < 1 or value > hard_max):
+        return fallback
+    return value
 
 
 def prompt_cache_key(accounts_dir):
@@ -1694,11 +1679,7 @@ def trusted_proxies(accounts_dir):
 
 def set_trusted_proxies(accounts_dir, value):
     value = str(value or "").strip()
-    with _lock:
-        data = load(accounts_dir)
-        data["trusted_proxies"] = value
-        save(accounts_dir, data)
-    return value
+    return _store(accounts_dir, "trusted_proxies", value)
 
 
 #: 面板字段 -> 控制它的环境变量。存在时面板值不生效，面板显示黄色提示。
@@ -1776,12 +1757,8 @@ def free_model_credit_fallback(accounts_dir):
 
 def set_free_model_credit_fallback(accounts_dir, enabled):
     """保存免费模型付费回退开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["free_model_credit_fallback"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "free_model_credit_fallback", enabled)
+
 
 def auto_switch_product(accounts_dir):
     """上游返回 429 时是否轮换账号的出口身份。
@@ -1789,17 +1766,12 @@ def auto_switch_product(accounts_dir):
     默认关闭，除非操作者打开：轮换身份会消耗请求的重试预算，并把账号留在
     没人选择的通道上。
     """
-    return load(accounts_dir).get("auto_switch_product") is True
+    return _bool_setting(accounts_dir, "auto_switch_product", False)
 
 
 def set_auto_switch_product(accounts_dir, enabled):
     """保存自动切换开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["auto_switch_product"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "auto_switch_product", enabled)
 
 
 def egress_backoff_enabled(accounts_dir):
@@ -1809,17 +1781,12 @@ def egress_backoff_enabled(accounts_dir):
     熔断，改为在请求实际使用的出口上累积秒级退避，见 wb_egress。未设置该
     开关的安装保持原有归账方式。
     """
-    return load(accounts_dir).get(EGRESS_BACKOFF_ENABLED_KEY) is True
+    return _bool_setting(accounts_dir, EGRESS_BACKOFF_ENABLED_KEY, False)
 
 
 def set_egress_backoff_enabled(accounts_dir, enabled):
     """保存出口级退避开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[EGRESS_BACKOFF_ENABLED_KEY] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, EGRESS_BACKOFF_ENABLED_KEY, enabled)
 
 
 def log_db_enabled(accounts_dir):
@@ -1829,17 +1796,12 @@ def log_db_enabled(accounts_dir):
     不创建数据库文件。打开后开始持久副本，崩溃、重启或处理缓慢的故障事后
     仍可回看。
     """
-    return load(accounts_dir).get(LOG_DB_ENABLED_KEY) is True
+    return _bool_setting(accounts_dir, LOG_DB_ENABLED_KEY, False)
 
 
 def set_log_db_enabled(accounts_dir, enabled):
     """保存日志库开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[LOG_DB_ENABLED_KEY] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, LOG_DB_ENABLED_KEY, enabled)
 
 
 def _positive_cap(raw, fallback, hard_max):
@@ -1890,12 +1852,8 @@ def log_db_max_rows(accounts_dir):
 
 def set_log_db_max_rows(accounts_dir, value):
     """保存行数上限，留空即清除，返回存储的值。"""
-    stored = _clearable_cap(value, MAX_LOG_DB_MAX_ROWS)
-    with _lock:
-        data = load(accounts_dir)
-        data[LOG_DB_MAX_ROWS_KEY] = stored
-        save(accounts_dir, data)
-    return stored
+    return _store(accounts_dir, LOG_DB_MAX_ROWS_KEY,
+                  _clearable_cap(value, MAX_LOG_DB_MAX_ROWS))
 
 
 def log_db_max_days(accounts_dir):
@@ -1915,12 +1873,8 @@ def log_db_max_days(accounts_dir):
 
 def set_log_db_max_days(accounts_dir, value):
     """保存天数上限，留空即清除，返回存储的值。"""
-    stored = _clearable_cap(value, MAX_LOG_DB_MAX_DAYS)
-    with _lock:
-        data = load(accounts_dir)
-        data[LOG_DB_MAX_DAYS_KEY] = stored
-        save(accounts_dir, data)
-    return stored
+    return _store(accounts_dir, LOG_DB_MAX_DAYS_KEY,
+                  _clearable_cap(value, MAX_LOG_DB_MAX_DAYS))
 
 
 def log_db_max_bytes(accounts_dir):
@@ -1935,12 +1889,8 @@ def log_db_max_bytes(accounts_dir):
 
 def set_log_db_max_bytes(accounts_dir, value):
     """保存大小上限，留空即清除，返回存储的值。"""
-    stored = _clearable_cap(value, MAX_LOG_DB_MAX_BYTES)
-    with _lock:
-        data = load(accounts_dir)
-        data[LOG_DB_MAX_BYTES_KEY] = stored
-        save(accounts_dir, data)
-    return stored
+    return _store(accounts_dir, LOG_DB_MAX_BYTES_KEY,
+                  _clearable_cap(value, MAX_LOG_DB_MAX_BYTES))
 
 
 def daily_chat_web(accounts_dir):
@@ -1950,18 +1900,12 @@ def daily_chat_web(accounts_dir):
     活跃，网页对话才会，见 issue #75 与 #59。该开关用于让部署恢复为单请求
     签到。
     """
-    value = load(accounts_dir).get("daily_chat_web")
-    return True if value is None else value is True
+    return _bool_setting(accounts_dir, "daily_chat_web", True)
 
 
 def set_daily_chat_web(accounts_dir, enabled):
     """保存网页通道开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_chat_web"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "daily_chat_web", enabled)
 
 
 def daily_chat_model(accounts_dir):
@@ -1979,45 +1923,7 @@ def daily_chat_model(accounts_dir):
 def set_daily_chat_model(accounts_dir, model):
     """保存每日活跃模型 id，返回存储的字符串。"""
     model = str(model or "").strip()
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_chat_model"] = model
-        save(accounts_dir, data)
-    return model
-
-
-#: 定时任务在账号之间随机等待的上下限：下限固定 2 秒，上限可由面板调整。
-TASK_JITTER_MIN = 2
-TASK_JITTER_MAX = 600
-TASK_JITTER_DEFAULT = 5
-
-
-def task_jitter_max(accounts_dir):
-    """定时任务账号间隔的随机上限（秒）。
-
-    每个账号开始处理前等待 uniform(2, 上限) 秒，默认值与原先的 2～5 秒一致。
-    越界或非法值按默认值处理。
-    """
-    raw = load(accounts_dir).get("task_jitter_max")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return TASK_JITTER_DEFAULT
-    return max(TASK_JITTER_MIN, min(TASK_JITTER_MAX, value))
-
-
-def set_task_jitter_max(accounts_dir, value):
-    """保存随机间隔上限，返回合法化后的秒数。"""
-    try:
-        value = int(value)
-    except (TypeError, ValueError):
-        value = TASK_JITTER_DEFAULT
-    value = max(TASK_JITTER_MIN, min(TASK_JITTER_MAX, value))
-    with _lock:
-        data = load(accounts_dir)
-        data["task_jitter_max"] = value
-        save(accounts_dir, data)
-    return value
+    return _store(accounts_dir, "daily_chat_model", model)
 
 
 #: 网页通道单轮等待秒数的默认值，与 wb_accounts.WEB_TURN_TIMEOUT 同值：
@@ -2041,18 +1947,12 @@ def daily_chat_web_retry(accounts_dir):
     ``working``，属于慢而非坏，而每日活跃是唯一能拿到 30/50 积分的任务，
     首次超时就放弃会静默损失当天奖励。关闭后只尝试一次。
     """
-    value = load(accounts_dir).get("daily_chat_web_retry")
-    return True if value is None else value is True
+    return _bool_setting(accounts_dir, "daily_chat_web_retry", True)
 
 
 def set_daily_chat_web_retry(accounts_dir, enabled):
     """保存网页通道重试开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_chat_web_retry"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "daily_chat_web_retry", enabled)
 
 
 def daily_chat_web_attempts(accounts_dir, default=None):
@@ -2063,11 +1963,8 @@ def daily_chat_web_attempts(accounts_dir, default=None):
     """
     if default is None:
         default = DAILY_CHAT_WEB_ATTEMPTS_DEFAULT
-    value = load(accounts_dir).get("daily_chat_web_attempts")
-    if (isinstance(value, bool) or not isinstance(value, int)
-            or value < 1 or value > DAILY_CHAT_WEB_ATTEMPTS_MAX):
-        return default
-    return value
+    return _bounded_int(accounts_dir, "daily_chat_web_attempts", default,
+                        DAILY_CHAT_WEB_ATTEMPTS_MAX)
 
 
 def set_daily_chat_web_attempts(accounts_dir, attempts):
@@ -2079,11 +1976,7 @@ def set_daily_chat_web_attempts(accounts_dir, attempts):
     if attempts > DAILY_CHAT_WEB_ATTEMPTS_MAX:
         raise ValueError("daily_chat_web_attempts cannot be more than %d"
                          % DAILY_CHAT_WEB_ATTEMPTS_MAX)
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_chat_web_attempts"] = attempts
-        save(accounts_dir, data)
-    return attempts
+    return _store(accounts_dir, "daily_chat_web_attempts", attempts)
 
 
 def daily_chat_web_timeout(accounts_dir, default=None):
@@ -2096,11 +1989,8 @@ def daily_chat_web_timeout(accounts_dir, default=None):
     """
     if default is None:
         default = DAILY_CHAT_WEB_TIMEOUT_DEFAULT
-    value = load(accounts_dir).get("daily_chat_web_timeout")
-    if (isinstance(value, bool) or not isinstance(value, int)
-            or value < 1 or value > DAILY_CHAT_WEB_TIMEOUT_MAX):
-        return default
-    return value
+    return _bounded_int(accounts_dir, "daily_chat_web_timeout", default,
+                        DAILY_CHAT_WEB_TIMEOUT_MAX)
 
 
 def set_daily_chat_web_timeout(accounts_dir, seconds):
@@ -2112,11 +2002,7 @@ def set_daily_chat_web_timeout(accounts_dir, seconds):
     if seconds > DAILY_CHAT_WEB_TIMEOUT_MAX:
         raise ValueError("daily_chat_web_timeout cannot be more than %d"
                          % DAILY_CHAT_WEB_TIMEOUT_MAX)
-    with _lock:
-        data = load(accounts_dir)
-        data["daily_chat_web_timeout"] = seconds
-        save(accounts_dir, data)
-    return seconds
+    return _store(accounts_dir, "daily_chat_web_timeout", seconds)
 
 
 def local_web_tools(accounts_dir):
@@ -2126,19 +2012,15 @@ def local_web_tools(accounts_dir):
     里执行。打开后网关把自己的函数声明换给模型并在本地执行调用，见
     wb_webtools，网关会亲自抓取模型请求的 URL，因此只做显式开启。
     """
-    return load(accounts_dir).get("local_web_tools") is True
+    return _bool_setting(accounts_dir, "local_web_tools", False)
 
 
 def set_local_web_tools(accounts_dir, enabled):
     """保存本地 web 工具开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data["local_web_tools"] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, "local_web_tools", enabled)
 
 
+#: 「测试」默认用哪条模型：最便宜、任何区域都有的那条。
 DEFAULT_TEST_MODEL = "deepseek-v4.1-flash"
 TEST_MODEL_REALMS = ("intl", "cn")
 
@@ -2193,6 +2075,24 @@ def set_test_model(accounts_dir, value, realm=None):
     return value or test_model(accounts_dir, realm)
 
 
+TEST_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def parse_test_model(value):
+    """校验 /settings/save 的 test model；返回 (model, error)。
+
+    空串表示清除设置、恢复默认。id 会原样发到账号的上游，非上游风格模型名的值
+    在这里就拒绝，免得烧掉账号额度去换一个必然 400 的调用。
+    """
+    if isinstance(value, bool) or not isinstance(value, str):
+        return None, "test_model must be a model id string"
+    model = value.strip()
+    if model and not TEST_MODEL_RE.match(model):
+        return None, ("test_model may only contain letters, digits, dot, "
+                      "hyphen and underscore")
+    return model, ""
+
+
 def _clean_model_ids(raw):
     """从存储的列表值中得到去重并去除首尾空白的模型 id。"""
     if not isinstance(raw, list):
@@ -2214,12 +2114,7 @@ def disabled_models(accounts_dir):
 
 def set_disabled_models(accounts_dir, models):
     """保存已关闭的模型 id，保留每个 id 的首次拼写。"""
-    cleaned = _clean_model_ids(models)
-    with _lock:
-        data = load(accounts_dir)
-        data["disabled_models"] = cleaned
-        save(accounts_dir, data)
-    return cleaned
+    return _store(accounts_dir, "disabled_models", _clean_model_ids(models))
 
 
 def model_served(accounts_dir, model):
@@ -2271,11 +2166,7 @@ def set_messages_format(accounts_dir, value):
     value = str(value or "").strip()
     if value not in MESSAGES_FORMATS:
         value = DEFAULT_MESSAGES_FORMAT
-    with _lock:
-        data = load(accounts_dir)
-        data["messages_format"] = value
-        save(accounts_dir, data)
-    return value
+    return _store(accounts_dir, "messages_format", value)
 
 
 def accounts_collapsed(accounts_dir):
@@ -2285,17 +2176,12 @@ def accounts_collapsed(accounts_dir):
     "false"、1、对象或缺失键都读作展开，任何一个都不会意外隐藏账号区。面板
     只通过 set_accounts_collapsed 写入真正的布尔值。
     """
-    return load(accounts_dir).get(ACCOUNTS_COLLAPSED_KEY) is True
+    return _bool_setting(accounts_dir, ACCOUNTS_COLLAPSED_KEY, False)
 
 
 def set_accounts_collapsed(accounts_dir, collapsed):
     """保存账号区折叠状态，返回存储的布尔值。"""
-    collapsed = bool(collapsed)
-    with _lock:
-        data = load(accounts_dir)
-        data[ACCOUNTS_COLLAPSED_KEY] = collapsed
-        save(accounts_dir, data)
-    return collapsed
+    return _set_flag(accounts_dir, ACCOUNTS_COLLAPSED_KEY, collapsed)
 
 
 def key_before_hidden(accounts_dir):
@@ -2304,17 +2190,12 @@ def key_before_hidden(accounts_dir):
     只有存储值为布尔 true 时才隐藏，归一化与 accounts_collapsed 相同：该行
     是有价值的历史，手改的 "false"、1、对象或缺失键都必须让它保持可见。
     """
-    return load(accounts_dir).get(KEY_BEFORE_HIDDEN_KEY) is True
+    return _bool_setting(accounts_dir, KEY_BEFORE_HIDDEN_KEY, False)
 
 
 def set_key_before_hidden(accounts_dir, hidden):
     """保存 `(切换前)` 行折叠状态，返回存储的布尔值。"""
-    hidden = bool(hidden)
-    with _lock:
-        data = load(accounts_dir)
-        data[KEY_BEFORE_HIDDEN_KEY] = hidden
-        save(accounts_dir, data)
-    return hidden
+    return _set_flag(accounts_dir, KEY_BEFORE_HIDDEN_KEY, hidden)
 
 
 def _clean_page_keys(value):
@@ -2350,12 +2231,36 @@ def hidden_pages(accounts_dir):
 
 def set_hidden_pages(accounts_dir, pages):
     """保存隐藏页面列表，返回归一化后的存储列表。"""
-    cleaned = _clean_page_keys(pages)
-    with _lock:
-        data = load(accounts_dir)
-        data[HIDDEN_PAGES_KEY] = cleaned
-        save(accounts_dir, data)
-    return cleaned
+    return _store(accounts_dir, HIDDEN_PAGES_KEY, _clean_page_keys(pages))
+
+
+#: 定时任务在账号之间随机等待的上下限：下限固定 2 秒，上限可由面板调整。
+TASK_JITTER_MIN = 2
+TASK_JITTER_MAX = 600
+TASK_JITTER_DEFAULT = 5
+
+
+def task_jitter_max(accounts_dir):
+    """定时任务账号间隔的随机上限（秒）。
+
+    每个账号开始处理前等待 uniform(2, 上限) 秒。越界或非法值按默认值处理。
+    """
+    raw = load(accounts_dir).get("task_jitter_max")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return TASK_JITTER_DEFAULT
+    return max(TASK_JITTER_MIN, min(TASK_JITTER_MAX, value))
+
+
+def set_task_jitter_max(accounts_dir, value):
+    """保存随机间隔上限，返回合法化后的秒数。"""
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = TASK_JITTER_DEFAULT
+    value = max(TASK_JITTER_MIN, min(TASK_JITTER_MAX, value))
+    return _store(accounts_dir, "task_jitter_max", value)
 
 
 SCHEDULER_GROUPS = ("checkin", "travel", "keepalive", "cat")
@@ -2443,11 +2348,7 @@ def set_scheduler_hours(accounts_dir, hours):
     }
     if not any(cleaned.values()):
         raise ValueError("至少保留一个整点；要关闭调度器请使用调度器总开关")
-    with _lock:
-        data = load(accounts_dir)
-        data["scheduler_hours"] = cleaned
-        save(accounts_dir, data)
-    return cleaned
+    return _store(accounts_dir, "scheduler_hours", cleaned)
 
 
 def accounts_separate_tab(accounts_dir):
@@ -2457,17 +2358,12 @@ def accounts_separate_tab(accounts_dir):
     “网关与账号”标签是默认界面，手改的 "false"、1、对象或缺失键都必须保持
     它，不会意外拆分导航。
     """
-    return load(accounts_dir).get(ACCOUNTS_SEPARATE_TAB_KEY) is True
+    return _bool_setting(accounts_dir, ACCOUNTS_SEPARATE_TAB_KEY, False)
 
 
 def set_accounts_separate_tab(accounts_dir, separate):
     """保存账号标签页开关，返回存储的布尔值。"""
-    separate = bool(separate)
-    with _lock:
-        data = load(accounts_dir)
-        data[ACCOUNTS_SEPARATE_TAB_KEY] = separate
-        save(accounts_dir, data)
-    return separate
+    return _set_flag(accounts_dir, ACCOUNTS_SEPARATE_TAB_KEY, separate)
 
 
 def update_check_enabled(accounts_dir):
@@ -2480,17 +2376,12 @@ def update_check_enabled(accounts_dir):
     present, value = _env_flag_value("WB_UPDATE_CHECK_ENABLED")
     if present:
         return value
-    return load(accounts_dir).get(UPDATE_CHECK_ENABLED_KEY) is True
+    return _bool_setting(accounts_dir, UPDATE_CHECK_ENABLED_KEY, False)
 
 
 def set_update_check_enabled(accounts_dir, enabled):
     """保存自动检查开关，返回存储的布尔值。"""
-    enabled = bool(enabled)
-    with _lock:
-        data = load(accounts_dir)
-        data[UPDATE_CHECK_ENABLED_KEY] = enabled
-        save(accounts_dir, data)
-    return enabled
+    return _set_flag(accounts_dir, UPDATE_CHECK_ENABLED_KEY, enabled)
 
 
 def update_check_interval_hours(accounts_dir):
@@ -2523,23 +2414,25 @@ def set_update_check_interval_hours(accounts_dir, hours):
     if hours < 1 or hours > UPDATE_CHECK_INTERVAL_MAX:
         raise ValueError("interval must be between 1 and %d hours"
                          % UPDATE_CHECK_INTERVAL_MAX)
-    with _lock:
-        data = load(accounts_dir)
-        data[UPDATE_CHECK_INTERVAL_KEY] = hours
-        save(accounts_dir, data)
-    return hours
+    return _store(accounts_dir, UPDATE_CHECK_INTERVAL_KEY, hours)
 
 
 def update_check_state(accounts_dir):
-    """上次检查的记账数据：运行时间与看到的版本。
+    """上次检查的记账数据：来源仓库、运行时间、看到的版本与发布页链接。
 
-    固定三个字段。24 小时节奏需要 last_attempt 跨重启保留，latest_version
-    让面板能在检查后直接回答；检查的其他信息只存在内存里。HTTP 交换中的
-    URL、请求头与正文都不会存到这里。
+    24 小时节奏需要 last_attempt 跨重启保留，latest_version 让面板能在检查
+    后直接回答；repo 标明这些版本号来自哪个仓库——换了检查目标后，旧记录的
+    版本号不能继续当成新目标的结果。发布页链接与发布时间一起保留，重启后没
+    重新检查时弹窗仍然有可点的链接。这里只放发布页地址，HTTP 交换中的请求
+    地址、请求头与正文都不会存到这里。
     """
     stored = load(accounts_dir).get(UPDATE_CHECK_STATE_KEY)
     stored = stored if isinstance(stored, dict) else {}
-    out = {"last_attempt": 0.0, "last_success": 0.0, "latest_version": ""}
+    out = {"repo": "", "last_attempt": 0.0, "last_success": 0.0,
+           "latest_version": "", "latest_url": "", "published_at": ""}
+    repo = stored.get("repo")
+    if isinstance(repo, str):
+        out["repo"] = repo.strip()[:80]
     for key in ("last_attempt", "last_success"):
         value = stored.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
@@ -2547,10 +2440,17 @@ def update_check_state(accounts_dir):
     version = stored.get("latest_version")
     if isinstance(version, str):
         out["latest_version"] = version.strip()[:32]
+    url = stored.get("latest_url")
+    if isinstance(url, str) and url.strip().startswith("https://github.com/"):
+        out["latest_url"] = url.strip()[:300]
+    published = stored.get("published_at")
+    if isinstance(published, str):
+        out["published_at"] = published.strip()[:32]
     return out
 
 
-def record_update_check(accounts_dir, at=None, success=False, latest_version=""):
+def record_update_check(accounts_dir, at=None, success=False, latest_version="",
+                        latest_url="", published_at="", repo=""):
     """写入一次检查的结果，返回存储的状态。
 
     只有这一条窄写入路径：能写任意键的检查器会把 settings.json 变成更新
@@ -2561,12 +2461,29 @@ def record_update_check(accounts_dir, at=None, success=False, latest_version="")
         data = load(accounts_dir)
         state = data.get(UPDATE_CHECK_STATE_KEY)
         state = dict(state) if isinstance(state, dict) else {}
+        repo_name = str(repo or "").strip()[:80]
+        if repo_name and state.get("repo") != repo_name:
+            # 换了检查目标：旧目标的版本号、链接与成功时间立刻作废。失败的那次
+            # 也要写，否则旧记录会一直触发「来源不匹配 → 重启即查」，面板还会
+            # 把旧仓库的成功时间当成本仓库的。
+            state.pop("latest_version", None)
+            state.pop("latest_url", None)
+            state.pop("published_at", None)
+            state.pop("last_success", None)
+        if repo_name:
+            state["repo"] = repo_name
         state["last_attempt"] = stamp
         if success:
             state["last_success"] = stamp
         version = str(latest_version or "").strip()[:32]
         if version:
             state["latest_version"] = version
+        url = str(latest_url or "").strip()[:300]
+        if success and url.startswith("https://github.com/"):
+            state["latest_url"] = url
+        published = str(published_at or "").strip()[:32]
+        if success and published:
+            state["published_at"] = published
         data[UPDATE_CHECK_STATE_KEY] = state
         save(accounts_dir, data)
     return update_check_state(accounts_dir)

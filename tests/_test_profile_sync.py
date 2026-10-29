@@ -43,6 +43,7 @@ class FetchProfileTests(unittest.TestCase):
         def fake_urlopen(req, timeout=30, proxy=""):
             captured["url"] = req.full_url
             captured["headers"] = {k.lower(): v for k, v in req.headers.items()}
+            captured["wire"] = dict(getattr(req, "wire_names", {}))
             return FakeResponse({"uid": "uid-1", "nickname": "  New Nick  ",
                                  "phoneNumber": "+86-13800000000",
                                  "email": "secret@example.com"})
@@ -60,6 +61,9 @@ class FetchProfileTests(unittest.TestCase):
         self.assertEqual(captured["url"],
                          "https://www.workbuddy.cn/console/account")
         self.assertEqual(captured["headers"].get("x-client-platform"), "web")
+        # 头名照官方写法：桌面端只出现过 Title-Case 的 X-Client-Platform。
+        self.assertEqual(captured["wire"].get("X-client-platform"),
+                         "X-Client-Platform")
         self.assertEqual(captured["headers"].get("authorization"), "Bearer tok")
 
     def test_uid_mismatch_is_rejected(self):

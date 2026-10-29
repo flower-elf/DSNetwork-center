@@ -1,14 +1,11 @@
-"""Pin the 402 balance park: an out-of-credits account waits for 04:00.
+"""钉住 402 余额停泊：没积分的账号等到本地 04:00。
 
-A 402 (no credits) used to get the same short cooldown as any other error, so
-the pool handed the empty account out again minutes later and every request to
-it failed the same way - for the rest of the day on a single-account install.
-The park holds the account until the next local 04:00 (the wall the daily
-reset refills behind) and lifts early when a balance refresh shows credits
-again. Rate-limit and model cooldowns are untouched.
+402（没积分）如果和普通错误一样只给短冷却，池子几分钟后又会把这个空账号
+派出去，之后每个请求都同样失败，单账号安装会失败一整天。停泊把账号留到
+下一个本地 04:00（每日重置补充额度的那道墙），余额刷新看到积分后提前
+解除。限流与模型冷却不受影响。
 
-No network: accounts are built from dicts and written to a temp directory, and
-the credits refresh is stubbed.
+不访问网络：账号由字典构造并写入临时目录，余额刷新用替身。
 """
 import base64
 import json

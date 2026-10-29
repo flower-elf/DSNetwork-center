@@ -2,7 +2,7 @@ import { toast, toastError } from './toast.js';
 
 // navigator.clipboard 只在安全上下文可用，并且可能因权限或页面失焦被拒绝；
 // 这两种情况都回退到隐藏文本框 + execCommand。
-export async function copyText(text) {
+async function copyText(text) {
   if (navigator.clipboard && window.isSecureContext) {
     const written = await navigator.clipboard.writeText(text).then(() => true, () => false);
     if (written) return true;

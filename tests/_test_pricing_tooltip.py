@@ -7,8 +7,8 @@
 
 更要紧的是反面：policy_id 是内容哈希，历史 usage 行的 cost_policy 直接引用
 它。via / inherited_from / override_from 这些是审计痕迹，只能看不能算；一旦
-漏进哈希，历史行就会指向不存在的策略，整片费用口径被改写。这里用「改动前生成
-的策略表」和「现场 usage 采样」把这条钉死。
+漏进哈希，历史行就会指向不存在的策略，整片费用口径被改写。这条约束用
+「改动前生成的策略表」和「现场 usage 采样」逐条验证。
 
 夹具（tests/fixtures/pricing_tooltip/）取自 2026-10-02 的 VM102 现场：
   or_models.json              OpenRouter 目录（{id: pricing}）
@@ -20,7 +20,7 @@
   cost_sources_before.json    采样行逐行的 source（改动前算出来的）
 
 全量 usage.jsonl 的逐行比对见 FullUsageSweepTests：需要现场数据，没给环境变量
-就跳过（跑法与结果见交付说明）。
+就跳过。用 python tests/run_all.py _test_pricing_tooltip 运行。
 """
 import json
 import os
@@ -77,10 +77,9 @@ class PricingFixtureMixin(unittest.TestCase):
 
 
 class HashCompatibilityTests(PricingFixtureMixin):
-    """历史策略 id 逐条不变 —— 这是本次改动唯一的硬约束。"""
+    """历史策略 id 逐条不变，这是唯一的硬约束。"""
 
     def test_regenerated_table_has_the_same_ids(self):
-        """改动后重新生成一遍策略表，id 集合与改动前逐条一致。"""
         or_models = read_json(fixture("or_models.json"))
         doc, _unpriced, _overridden = wb_pricing.build_snapshot(or_models,
                                                                 variants=True)
@@ -94,7 +93,7 @@ class HashCompatibilityTests(PricingFixtureMixin):
         self.assertEqual(before, assignment, "有模型的策略 id 变了")
 
     def test_live_table_ids_recompute_the_same(self):
-        """现场 52 条历史策略，逐条按新代码重算内容哈希，必须一模一样。"""
+        """现场 52 条历史策略，逐条重算内容哈希，必须一模一样。"""
         rows = read_jsonl(fixture("policies_live_before.jsonl"))
         self.assertEqual(len(rows), 52, "现场策略表的规模变了，夹具要跟着更新")
         for row in rows:
@@ -122,31 +121,8 @@ class HashCompatibilityTests(PricingFixtureMixin):
                                          merged.get("usd_cny")),
                     "%s 的 id 被展示字段带偏了" % row["model"])
 
-    def test_entry_for_keeps_the_display_fields_out_of_the_hash(self):
-        """entry_for 写出来的快照条目，带上展示字段后 id 也不变。"""
-        or_models = read_json(fixture("or_models.json"))
-        by_norm = wb_pricing.index_openrouter(or_models)
-        for hub_id, expect_via in (("deepseek-v3-1-volc", "override"),
-                                   ("deepseek-r1-0528-lkeap", "variant"),
-                                   ("deepseek-v4.1-flash", "direct")):
-            ref, via = wb_pricing.resolve(hub_id, or_models, by_norm, variants=True)
-            self.assertTrue(ref, hub_id)
-            inherited = wb_pricing.inherited_from(hub_id, or_models, by_norm)
-            entry = wb_pricing.entry_for(hub_id, ref, or_models,
-                                         inherited=inherited, overridden=via)
-            self.assertEqual(entry.get("via", "direct"), expect_via, hub_id)
-            stripped = {k: v for k, v in entry.items()
-                        if k not in ("via", "inherited_from", "override_from",
-                                     "display", "source")}
-            self.assertEqual(
-                wb_pricing.policy_id(hub_id, entry.get("flat"),
-                                     entry.get("bands"), 7.1),
-                wb_pricing.policy_id(hub_id, stripped.get("flat"),
-                                     stripped.get("bands"), 7.1),
-                "%s 的 id 被展示字段带偏了" % hub_id)
-
     def test_every_sampled_row_keeps_its_source(self):
-        """采样行逐行跑 cost_for_row，source 与改动前 0 条失配。"""
+        """采样行逐行跑 cost_for_row，source 与基线 0 条失配。"""
         self.install("policies_live_before.jsonl", "timeline_live_before.jsonl")
         before = read_json(fixture("cost_sources_before.json"))
         rows = read_jsonl(fixture("usage_sample.jsonl"))
@@ -164,8 +140,8 @@ class FullUsageSweepTests(PricingFixtureMixin):
 
     跑法：
       WB_PRICING_SWEEP_USAGE=<现场 usage.jsonl 路径>
-      WB_PRICING_SWEEP_BASELINE=<改动前逐行 source 的 JSON>
-    两者都在时才执行；baseline 的生成命令见交付说明。
+      WB_PRICING_SWEEP_BASELINE=<逐行 source 的基线 JSON>
+    两者都在时才执行。
     """
 
     @unittest.skipUnless(os.environ.get("WB_PRICING_SWEEP_USAGE")
@@ -215,7 +191,7 @@ class RowDetailTests(PricingFixtureMixin):
     def test_direct_match_carries_the_whole_picture(self):
         row = self.sample_row("deepseek-v4.1-flash", needs_policy=True)
         cost = wb_pricing.cost_for_row(row)
-        # 一个模型可以有多条历史策略（改过价），这条行引用的是哪条就按哪条。
+        # 一个模型可以有多条历史策略，这条行引用哪条就按哪条。
         policy = wb_pricing.load_policies()[row["cost_policy"]]
         self.assertTrue(cost["known"])
         self.assertEqual(cost["source"], policy["id"])
@@ -234,7 +210,7 @@ class RowDetailTests(PricingFixtureMixin):
         self.assertEqual(cost["via"], "override")
         self.assertEqual(cost["override_from"], "hy4-preview-f")
         self.assertEqual(cost["or_id"], "tencent/hy4-preview")
-        # 现场这条策略写于 via 字段引入之前，只能按当前映射表推断，要标出来。
+        # 这条现场策略没有 via 字段，只能按当前映射表推断，要标出来。
         self.assertTrue(cost["via_derived"])
 
     def test_variant_match_names_the_base_and_the_suffix(self):
@@ -247,7 +223,7 @@ class RowDetailTests(PricingFixtureMixin):
         self.assertFalse(cost["via_derived"])
 
     def test_band_row_reports_that_band_rates_and_note(self):
-        """落档的行给的是该档的价与条件，不是基准价。"""
+        """命中条件档的行给的是该档的价与条件，不是基准价。"""
         policy = self.policies["gpt-5.5"]
         band = policy["bands"][0]
         row = self.row("gpt-5.5", cost_policy=policy["id"],

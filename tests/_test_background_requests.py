@@ -1,5 +1,5 @@
-"""The filter must not refuse the user's own compaction, told apart by thread_source=memory_consolidation;
-thread_source=user alone is not a user marker. No network access required.
+"""过滤器不能拒绝用户自己的压缩整理，靠 thread_source=memory_consolidation 区分；
+thread_source=user 本身不算用户标记。不需要网络。
 """
 
 import json
@@ -28,7 +28,7 @@ def check(label, cond, extra=""):
 
 
 def nested(meta):
-    """The shape Codex actually sends: a JSON string under its own key."""
+    """Codex 实际发送的形状：自己的键下放一个 JSON 字符串。"""
     return {"client_metadata": {"x-codex-turn-metadata": json.dumps(meta)}}
 
 

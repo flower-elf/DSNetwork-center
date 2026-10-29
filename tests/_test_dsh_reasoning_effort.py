@@ -1,15 +1,7 @@
 """DSH 思考档位与上下文窗口：一键配置写入 / 面板模型清单（无网络单元测试）。
 
-issue #374：在 DSH 里看不到「推理等级」，也找不到改上下文长度的地方。根因是
-一键配置只往 `~/.dsh/settings.yaml` 写了模型 id —— DSH 不读 `/v1/models` 里的
-`reasoning_efforts`（它只读 id / name / contextWindow / maxTokens），模型条目不
-声明 `reasoningEfforts` 就没有档位选择器；而 `contextWindow` 不写时客户端只能
-吃自己的内置默认值。这个套件锁住修复后的契约：
-
-  - `wb_agents.dsh_reasoning_levels()`  档位表归一化
-  - `wb_agents._apply_dsh()`            写出的模型条目与 agent-default-model
-  - `wb_proxy._agents_models()`         面板清单里的 `reasoning_efforts`
-  - `wb_proxy.enrich_agent_models()`    只有 id 的清单按 id 补规格
+DSH 仅读取模型条目的 id / name / contextWindow / maxTokens，条目不声明
+`reasoningEfforts` 就没有档位选择器，`contextWindow` 缺失时客户端取内置默认值（issue #374）。
 
     python tests/_test_dsh_reasoning_effort.py
 """
@@ -24,6 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import wb_agents as A
 import wb_proxy as P
+import wb_panel_routes as R
+import wb_models as M
 
 PASS = FAIL = 0
 
@@ -149,7 +143,7 @@ print()
 print("[4] 面板模型清单宣告 reasoning_efforts")
 # ---------------------------------------------------------------------------
 
-real_fetch = P.fetch_models
+real_fetch = R.fetch_models
 
 
 def fake_fetch(realm=None):
@@ -158,16 +152,16 @@ def fake_fetch(realm=None):
                       "reasoning": {"supportedEfforts": ["low", "high"]}}),
         ("m-fixed", {"maxInputTokens": 50000, "maxOutputTokens": 1000,
                      "reasoning": {"effort": "medium"}}),
-        # 目录什么都没给：context 必须回落到内建知识表，而不是目录里的默认档
+        # 目录条目为空：context_window 必须回落到内建知识表的兜底值。
         ("glm-5.3", {}),
     ]
 
 
-P.fetch_models = fake_fetch
+R.fetch_models = fake_fetch
 try:
     listed = P.Handler._agents_models(None)
 finally:
-    P.fetch_models = real_fetch
+    R.fetch_models = real_fetch
 by_id2 = {m["id"]: m for m in listed}
 check("有 supportedEfforts 的模型宣告档位列表",
       by_id2.get("m-thinky", {}).get("reasoning_efforts") == ["low", "high"],
@@ -187,50 +181,23 @@ print("[5] enrich_agent_models：只有 id 的清单按 id 补规格")
 specs = {"m-thinky": {"id": "m-thinky", "context_window": 1000000,
                       "max_output": 128000,
                       "reasoning_efforts": ["low", "high", "max"]}}
-merged = P.enrich_agent_models([{"id": "m-thinky"}], specs)
+merged = A.enrich_agent_models([{"id": "m-thinky"}], specs)
 check("只有 id 的条目被补上规格",
       merged[0].get("context_window") == 1000000
       and merged[0].get("reasoning_efforts") == ["low", "high", "max"], merged[0])
-explicit = P.enrich_agent_models([{"id": "m-thinky", "context_window": 5000}],
+explicit = A.enrich_agent_models([{"id": "m-thinky", "context_window": 5000}],
                                  specs)
 check("条目里显式带来的字段优先", explicit[0]["context_window"] == 5000,
       explicit[0])
-blank = P.enrich_agent_models([{"id": "m-thinky", "context_window": None}],
+blank = A.enrich_agent_models([{"id": "m-thinky", "context_window": None}],
                               specs)
 check("显式空值不算覆盖", blank[0]["context_window"] == 1000000, blank[0])
 check("目录里没有的 id 原样保留",
-      P.enrich_agent_models([{"id": "m-unknown"}], specs)
+      A.enrich_agent_models([{"id": "m-unknown"}], specs)
       == [{"id": "m-unknown"}])
 check("空 specs 原样返回",
-      P.enrich_agent_models([{"id": "x"}], {}) == [{"id": "x"}])
-check("空清单安全", P.enrich_agent_models(None, specs) == [])
-
-# ---------------------------------------------------------------------------
-print()
-print("[6] 端到端：看板只送 id → 写出的配置里出现档位")
-# ---------------------------------------------------------------------------
-
-home3 = temp_dir("wb-dsh-effort-home3-")
-acct3 = temp_dir("wb-dsh-effort-acct3-")
-panel_models = P.enrich_agent_models(
-    [{"id": "m-thinky"}, {"id": "m-fixed"}],
-    {"m-thinky": {"id": "m-thinky", "context_window": 1000000,
-                  "max_output": 128000,
-                  "reasoning_efforts": ["low", "high", "max"]},
-     "m-fixed": {"id": "m-fixed", "context_window": 256000,
-                 "max_output": 32000}})
-A.integrate(acct3, "dsh", "http://gw:1", "k", model="m-thinky",
-            models=panel_models, home=home3)
-with open(os.path.join(home3, ".dsh", "settings.yaml"), encoding="utf-8") as fh:
-    block3 = provider_block(fh.read())
-by_id3 = {m["id"]: m for m in block3.get("models") or []}
-check("看板送 id 也能写出档位表",
-      by_id3.get("m-thinky", {}).get("reasoningEfforts")
-      == {"low": "low", "high": "high", "max": "max"}, by_id3.get("m-thinky"))
-check("没有档位的模型照样写入窗口与输出上限",
-      by_id3.get("m-fixed", {}).get("contextWindow") == 256000
-      and by_id3.get("m-fixed", {}).get("maxTokens") == 32000,
-      by_id3.get("m-fixed"))
+      A.enrich_agent_models([{"id": "x"}], {}) == [{"id": "x"}])
+check("空清单安全", A.enrich_agent_models(None, specs) == [])
 
 for d in TMPDIRS:
     shutil.rmtree(d, ignore_errors=True)

@@ -16,6 +16,8 @@ os.environ["WB_PROXY_USAGE_DIR"] = _TMP
 os.makedirs(os.environ["ACCOUNTS_DIR"], exist_ok=True)
 
 import wb_proxy as proxy
+import wb_usage as U
+import wb_usage_recent as R
 
 PASS = FAIL = 0
 
@@ -67,7 +69,7 @@ check("面板会话的 key_id 是 panel", audit["key_id"] == "panel", audit)
 check("来源地址取自客户端", audit["ip"] == "10.1.2.3", audit)
 check("接口名被记下", audit["api"] == "chat", audit)
 check("状态码留到真正写出时再定", audit["status"] is None, audit)
-check("审计上下文同时绑定到当前线程", proxy.current_audit() is audit, proxy.current_audit())
+check("审计上下文同时绑定到当前线程", U.current_audit() is audit, U.current_audit())
 
 keyed = FakeHandler(key_entry={"id": "k-7", "name": "客户端 A"})
 check("普通 Key 请求记下 Key 的 id", keyed._begin_audit("messages")["key_id"] == "k-7")
@@ -85,14 +87,14 @@ for path, want in (("/v1/chat/completions", "chat"), ("/chat/completions", "chat
                    ("/v1/completions", "completions"), ("/completions", "completions"),
                    ("/v1/responses", "responses"), ("/responses", "responses"),
                    ("/v1/messages", "messages"), ("/messages", "messages")):
-    check("%s -> %s" % (path, want), proxy.chat_api_name(path) == want, proxy.chat_api_name(path))
-check("未知路径按 chat 处理", proxy.chat_api_name("/v1/chat/other") == "chat")
+    check("%s -> %s" % (path, want), U.chat_api_name(path) == want, U.chat_api_name(path))
+check("未知路径按 chat 处理", U.chat_api_name("/v1/chat/other") == "chat")
 
 print()
 print("[3] record_usage 写出新字段")
 
 reset_log()
-proxy.record_usage("m-1", {"total_tokens": 10}, stream=False, elapsed_ms=12,
+U.record_usage("m-1", {"total_tokens": 10}, stream=False, elapsed_ms=12,
                    audit={"key_id": "k-1", "ip": "1.2.3.4", "api": "chat", "status": None})
 row = rows()[-1]
 check("key_id 写入", row.get("key_id") == "k-1", row)
@@ -101,8 +103,8 @@ check("api 写入", row.get("api") == "chat", row)
 check("成功行状态码是 200", row.get("status") == 200, row)
 
 reset_log()
-proxy.bind_audit(None)          # 每个请求开始时由 handle_one_request 清空
-proxy.record_usage("m-2", {"total_tokens": 1})
+U.bind_audit(None)          # 每个请求开始时由 handle_one_request 清空
+U.record_usage("m-2", {"total_tokens": 1})
 row = rows()[-1]
 check("没有审计上下文时字段仍在", (row.get("key_id"), row.get("ip"), row.get("api")) == ("", "", ""), row)
 check("没有审计上下文时状态码仍是 200", row.get("status") == 200, row)
@@ -111,7 +113,7 @@ print()
 print("[4] record_error 写出新字段且保留自己的状态码")
 
 reset_log()
-proxy.record_error("m-3", 429, "rate limited", elapsed_ms=5,
+U.record_error("m-3", 429, "rate limited", elapsed_ms=5,
                    audit={"key_id": "panel", "ip": "127.0.0.1", "api": "messages"})
 row = rows()[-1]
 check("错误行的 key_id 写入", row.get("key_id") == "panel", row)
@@ -120,8 +122,8 @@ check("错误行的 api 写入", row.get("api") == "messages", row)
 check("错误行保留 HTTP 状态码", row.get("status") == 429, row)
 
 reset_log()
-proxy.bind_audit(None)
-proxy.record_error("m-4", 502, "boom")
+U.bind_audit(None)
+U.record_error("m-4", 502, "boom")
 row = rows()[-1]
 check("没有审计上下文时字段仍存在",
       (row.get("key_id"), row.get("ip"), row.get("api")) == ("", "", ""), row)
@@ -133,7 +135,7 @@ reset_log()
 late = FakeHandler(key_entry={"id": "k-late", "name": "迟到"})
 late._begin_audit("responses")
 # 模拟代跑的多轮请求：客户端早已收到响应，这里才写出记录。
-proxy.record_usage("m-5", {"total_tokens": 3}, stream=True,
+U.record_usage("m-5", {"total_tokens": 3}, stream=True,
                    elapsed_ms=900, account="acct-1")
 row = rows()[-1]
 check("迟到的记录带着原 Key", row.get("key_id") == "k-late", row)
@@ -142,8 +144,8 @@ check("迟到的记录带着原接口名", row.get("api") == "responses", row)
 
 reset_log()
 # 下一个请求开始：handle_one_request 清掉上一个请求的上下文
-proxy.bind_audit(None)
-proxy.record_usage("m-6", {"total_tokens": 3})
+U.bind_audit(None)
+U.record_usage("m-6", {"total_tokens": 3})
 row = rows()[-1]
 check("绑定被清掉之后不再沿用上一个请求",
       (row.get("key_id"), row.get("ip"), row.get("api")) == ("", "", ""), row)
@@ -156,7 +158,7 @@ old = {"at": time.time() - 10, "model": "m-old", "total_tokens": 5, "error": Tru
 reset_log()
 with open(proxy.USAGE_LOG, "w", encoding="utf-8") as fh:
     fh.write(json.dumps(old, ensure_ascii=False) + "\n")
-page = proxy.recent_usage(10)
+page = R.recent_usage(10)
 check("旧行照旧读得出来", page["rows"][0]["model"] == "m-old", page["rows"])
 check("旧行补上的 key_name 是空串", page["rows"][0].get("key_name") == "", page["rows"][0])
 
@@ -175,7 +177,7 @@ wb_settings.set_api_keys(os.environ["ACCOUNTS_DIR"], [
     {"id": "k1", "name": "主力 Key", "key": "key-alpha"},
     {"id": "k2", "name": "闲置 Key", "key": "key-beta"},
 ], delete_ids=["gone"])
-proxy.bind_audit(None)
+U.bind_audit(None)
 reset_log()
 stamp = time.time()
 with open(proxy.USAGE_LOG, "w", encoding="utf-8") as fh:
@@ -200,7 +202,7 @@ with open(proxy.USAGE_LOG, "w", encoding="utf-8") as fh:
     ):
         fh.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-analytics = proxy.compute_usage_analytics(ttl=0, realm="all")
+analytics = U.compute_usage_analytics(ttl=0, realm="all")
 check("analytics 带 keys 列表", isinstance(analytics.get("keys"), list), sorted(analytics))
 by_key = {k["key_id"]: k for k in analytics["keys"]}
 check("用过的 Key 在列", "k1" in by_key and "panel" in by_key, sorted(by_key))
@@ -209,8 +211,8 @@ check("闲置的 Key 也在列表里且为零", by_key.get("k2", {}).get("window
 check("配置后删除的 Key 标注为已删除",
       by_key["gone"]["key_name"] == "已删除的 Key", by_key["gone"]["key_name"])
 check("名单外无法命名的 Key 折进未知分组",
-      by_key[proxy.KEY_BUCKET_UNKNOWN]["key_name"] == "(未知 key)",
-      by_key[proxy.KEY_BUCKET_UNKNOWN])
+      by_key[U.KEY_BUCKET_UNKNOWN]["key_name"] == "(未知 key)",
+      by_key[U.KEY_BUCKET_UNKNOWN])
 check("面板测试台的名字", by_key["panel"]["key_name"] == "面板测试台", by_key["panel"])
 check("配置里的 Key 用它的名字", by_key["k1"]["key_name"] == "主力 Key", by_key["k1"])
 check("统计形状与 models 一致",
@@ -224,12 +226,12 @@ check("k1 的积分合计", abs(by_key["k1"]["all_time"]["credit"] - 0.6) < 1e-9
       by_key["k1"]["all_time"])
 check("没有 key_id 的旧行不计入任何 Key",
       sum(k["all_time"]["total_tokens"] for k in analytics["keys"]
-          if k["key_id"] != proxy.KEY_BUCKET_BEFORE) == 152
-      and any(k["key_id"] == proxy.KEY_BUCKET_BEFORE
+          if k["key_id"] != U.KEY_BUCKET_BEFORE) == 152
+      and any(k["key_id"] == U.KEY_BUCKET_BEFORE
               and k["all_time"]["total_tokens"] == 5 for k in analytics["keys"]),
       [(k["key_id"], k["all_time"]["total_tokens"]) for k in analytics["keys"]])
 check("窗口桶跟着请求的范围",
-      proxy.compute_usage_analytics(ttl=0, realm="all", range="all")["keys"][0]["window"]["total_tokens"]
+      U.compute_usage_analytics(ttl=0, realm="all", range="all")["keys"][0]["window"]["total_tokens"]
       == by_key["k1"]["window"]["total_tokens"], by_key["k1"]["window"])
 
 print()

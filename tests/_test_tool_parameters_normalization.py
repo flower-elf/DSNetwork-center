@@ -9,6 +9,7 @@ from _isolated_dirs import isolated_data_dirs  # noqa: E402
 _TMP = isolated_data_dirs("wb-tool-params-norm-")
 
 import wb_proxy as P
+import wb_sanitize as S
 
 PASS = FAIL = 0
 
@@ -25,27 +26,27 @@ def check(label, cond, extra=""):
 
 print("[1] 空参数补成对象 schema")
 fn = {"name": "get_time", "parameters": {}}
-P._normalize_tool_parameters(fn)
+S._normalize_tool_parameters(fn)
 check("type 为 object", fn["parameters"].get("type") == "object", fn["parameters"])
 check("properties 为字典", isinstance(fn["parameters"].get("properties"), dict), fn["parameters"])
 
 print("[2] 非字典参数重置")
 for value in (None, [], "str", True):
     fn = {"name": "t", "parameters": value}
-    P._normalize_tool_parameters(fn)
+    S._normalize_tool_parameters(fn)
     check("参数 %r 重置为对象" % (value,),
           fn["parameters"] == {"type": "object", "properties": {}}, fn["parameters"])
 
 print("[3] required 清理")
 fn = {"name": "t", "parameters": {"type": "object", "properties": {"a": {}}, "required": None}}
-P._normalize_tool_parameters(fn)
+S._normalize_tool_parameters(fn)
 check("required 为 None 时删除", "required" not in fn["parameters"], fn["parameters"])
 fn = {"name": "t", "parameters": {"type": "object", "properties": {"a": {}}, "required": "a"}}
-P._normalize_tool_parameters(fn)
+S._normalize_tool_parameters(fn)
 check("required 字符串包成列表", fn["parameters"].get("required") == ["a"], fn["parameters"])
 fn = {"name": "t", "parameters": {"type": "object", "properties": {"a": {}, "b": {}},
                                    "required": ["a", None, "b"]}}
-P._normalize_tool_parameters(fn)
+S._normalize_tool_parameters(fn)
 check("required 去掉 None", fn["parameters"].get("required") == ["a", "b"], fn["parameters"])
 
 print("[4] 深度类型别名与 null 元数据")
@@ -59,7 +60,7 @@ fn = {"name": "calc", "parameters": {
         "list": {"type": "list", "items": {"type": "str"}},
     },
 }}
-P._normalize_tool_parameters(fn)
+S._normalize_tool_parameters(fn)
 p = fn["parameters"]
 check("dict -> object", p.get("type") == "object", p)
 check("int -> integer", p["properties"]["a"].get("type") == "integer", p)
@@ -79,7 +80,7 @@ fn = {"name": "deep", "parameters": {
     },
     "definitions": {"row": {"type": "obj"}},
 }}
-P._normalize_tool_parameters(fn)
+S._normalize_tool_parameters(fn)
 check("anyOf 内类型被规整",
       fn["parameters"]["properties"]["choice"]["anyOf"][0]["type"] == "string"
       and fn["parameters"]["properties"]["choice"]["anyOf"][1]["type"] == "integer",
@@ -125,7 +126,7 @@ calls = [
     {"id": "3", "type": "function", "function": {"name": "c", "arguments": [1, 2]}},
     {"id": "4", "type": "function", "function": {"name": "d", "arguments": True}},
 ]
-res = P.sanitize_tool_calls(calls)
+res = S.sanitize_tool_calls(calls)
 check("对象转 JSON 字符串", res[0]["function"]["arguments"] == '{"x": 1}', res[0])
 check("None 转 {}", res[1]["function"]["arguments"] == "{}", res[1])
 check("数组转 JSON 字符串", res[2]["function"]["arguments"] == "[1, 2]", res[2])

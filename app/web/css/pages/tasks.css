@@ -7,8 +7,6 @@
 }
 .log-line { white-space: pre-wrap; word-break: break-word; }
 
-.sched-logs-title { font-size: 11px; color: var(--muted-foreground); }
-
 /* 头部操作在标题右侧；窄屏换行时仍靠右，窄手机恢复左对齐。 */
 .card-actions { margin-left: auto; }
 @media (max-width: 640px) { .card-actions { margin-left: 0; justify-content: flex-start; } }

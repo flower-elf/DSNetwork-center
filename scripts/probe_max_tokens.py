@@ -11,7 +11,7 @@ accounts/output_probes.json，/v1/models 会标注 output_clamp。
   python scripts/probe_max_tokens.py --model m1 m2 --base-url http://127.0.0.1:8788
   python scripts/probe_max_tokens.py --model m1 --dry-run
 
-金钥预设读 accounts/settings.json 的 launcher key；也可用 --api-key 指定。
+密钥默认读 accounts/settings.json 的 launcher key，也可用 --api-key 指定。
 纯标准库。
 """
 

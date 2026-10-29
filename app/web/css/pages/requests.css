@@ -7,13 +7,3 @@
 @media (min-width: 768px) { .req-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (min-width: 1100px) { .req-filters { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
 .req-filters .select { width: 100%; }
-
-/* 单元格里的长文本：昵称、模型名、密钥名都可能很长，超出就截断并保留 title。 */
-.req-table th:nth-child(2), .req-table td:nth-child(2) { max-width: 180px; }
-.req-table th:nth-child(4), .req-table td:nth-child(4) { max-width: 140px; }
-.req-table th:nth-child(5), .req-table td:nth-child(5) { max-width: 200px; }
-.req-table tbody tr { cursor: pointer; }
-
-.req-mobile .mobile-item { cursor: pointer; }
-
-.pager .pager-gap { color: var(--muted-foreground); padding: 0 2px; }

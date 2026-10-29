@@ -1,8 +1,7 @@
-"""One-click agent integration: hermetic unit tests (no network access).
+"""一键接入智能体的集成测试：密封单测（不访问网络）。
 
-Covers the text-level editors in wb_agents.py (YAML / TOML / dotenv / JSON
-deep-merge) and the full integrate()/restore() round trip against a temporary
-home directory, plus the client registry itself.
+覆盖 wb_agents.py 的文本级编辑器（YAML / TOML / dotenv / JSON 深合并）以及
+对临时 home 目录的完整 integrate()/restore() 往返，还有客户端注册表本身。
 
     python tests/_test_agents.py
 """
@@ -12,6 +11,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -33,7 +33,7 @@ def check(label, cond, extra=""):
 
 
 # ---------------------------------------------------------------------------
-# YAML editor
+# YAML 编辑器
 # ---------------------------------------------------------------------------
 
 print("[1] yaml_upsert_inline creates a nested chain from empty text")
@@ -132,7 +132,7 @@ check("inline flow parent expanded",
       "providers:\n  a: 1\n" in t and 'wb-proxy: {"x": 1}' in t, repr(t))
 
 # ---------------------------------------------------------------------------
-# TOML editor
+# TOML 编辑器
 # ---------------------------------------------------------------------------
 
 print()
@@ -192,7 +192,7 @@ check("single key replaced, sibling kept",
       'name = "DS2"' in t and "x = 1" in t, repr(t))
 
 # ---------------------------------------------------------------------------
-# dotenv editor
+# dotenv 编辑器
 # ---------------------------------------------------------------------------
 
 print()
@@ -208,7 +208,7 @@ check("comment and unrelated key preserved",
 check("no duplicate key lines", e.count("WB_PROXY_API_KEY=") == 1, repr(e))
 
 # ---------------------------------------------------------------------------
-# JSON deep merge
+# JSON 深合并
 # ---------------------------------------------------------------------------
 
 print()
@@ -226,7 +226,7 @@ A.deep_merge(base, {"env": {"A": 2}})
 check("inputs are not mutated", base["env"]["A"] == 1, base)
 
 # ---------------------------------------------------------------------------
-# Client registry
+# 客户端注册表
 # ---------------------------------------------------------------------------
 
 print()
@@ -258,7 +258,7 @@ check("files(home) returns absolute paths under the injected home",
       ok_paths, seen)
 
 # ---------------------------------------------------------------------------
-# integrate / restore round trips
+# integrate / restore 往返
 # ---------------------------------------------------------------------------
 
 print()
@@ -591,11 +591,10 @@ print("[23] transactional rollback on write failure leaves no orphan state")
 
 home9 = tempfile.mkdtemp(prefix="wb-agents-home9-")
 acct9 = tempfile.mkdtemp(prefix="wb-agents-acct9-")
-# For DSH, if credentials path is unwritable, settings.yaml must not be left behind
-# and no integration state must be saved.
+# DSH 的凭据路径不可写时，settings.yaml 不能残留在磁盘上，接入状态也不能保存。
 dsh_creds = os.path.join(home9, ".dsh", ".credentials.yaml")
 os.makedirs(os.path.dirname(dsh_creds), exist_ok=True)
-# Make a directory where .credentials.yaml should be, causing write to fail
+# 把 .credentials.yaml 应该在的位置占成目录，让写文件失败
 os.makedirs(dsh_creds, exist_ok=True)
 try:
     A.integrate(acct9, "dsh", "http://127.0.0.1:8788/v1", "key", home=home9)
@@ -665,7 +664,7 @@ class MockHandler:
         self.response = (code, {"error": msg, "type": typ})
         return (code, {"error": msg})
 
-# Patch integrate and restore targets to use our isolated home10
+# 替换 integrate 与 restore 的目标，指向隔离的 home10
 orig_integrate = A.integrate
 orig_restore = A.restore
 A.integrate = lambda acct, cid, base_url, key, model=None, models=None, home=None: \
@@ -675,7 +674,7 @@ A.restore = lambda acct, cid, home=None: \
 
 try:
     handler = MockHandler(acct10, home10)
-    # Test 1: Frontend payload format (sends client_id, omits models)
+    # 用例 1：前端载荷格式（带 client_id，不带 models）
     apply_payload_frontend = {
         "client_id": "opencode",
         "base_url": "http://127.0.0.1:8788/v1",
@@ -684,7 +683,7 @@ try:
     }
     code, res = wb_proxy.Handler._handle_agents_apply(handler, apply_payload_frontend)
     check("apply with client_id returns HTTP 200", code == 200, (code, res))
-    # Verify OpenCode received the fallback models catalog
+    # 确认 OpenCode 收到了回退的模型目录
     opencode_cfg = os.path.join(home10, ".config", "opencode", "opencode.json")
     with open(opencode_cfg, "r", encoding="utf-8") as fh:
         cfg_data = json.load(fh)
@@ -692,13 +691,13 @@ try:
     check("opencode models populated from catalog fallback",
           "model-fallback-1" in (wb_prov.get("models") or {}), wb_prov)
 
-    # Test 2: Frontend restore format (sends client_id)
+    # 用例 2：前端恢复格式（带 client_id）
     restore_payload_frontend = {"client_id": "opencode"}
     code_r, res_r = wb_proxy.Handler._handle_agents_restore(handler, restore_payload_frontend)
     check("restore with client_id returns HTTP 200", code_r == 200, (code_r, res_r))
     check("restore cleaned up the opencode config file", not os.path.exists(opencode_cfg))
 
-    # Test 3: Backend payload format (sends client) also returns 200
+    # 用例 3：后端载荷格式（带 client）同样返回 200
     apply_payload_backend = {
         "client": "claude-code",
         "base_url": "http://127.0.0.1:8788",
@@ -802,7 +801,7 @@ finally:
 
 
 class RemotePanel:
-    """A panel opened from another machine: the answer must be enabled:false."""
+    """从别的机器打开的面板：回答必须是 enabled:false。"""
 
     client_address = ("192.168.1.20", 40000)
     _agents_client_allowed = wb_proxy.Handler._agents_client_allowed
@@ -819,13 +818,16 @@ check("a remote panel gets enabled:false from GET /agents",
 check("the remote answer carries no client list and no model list",
       "clients" not in body_r and "models" not in body_r, body_r)
 
-proxy_src = open(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "app", "wb_proxy.py"), encoding="utf-8").read()
-check("wb_proxy no longer imports wb_agents at module level",
-      not re.search(r"(?m)^import wb_agents\s*$", proxy_src))
-check("wb_agents is imported lazily inside agents_module()",
-      "def agents_module()" in proxy_src and "        import wb_agents" in proxy_src)
+eager = subprocess.run(
+    [sys.executable, "-c", "import sys, wb_proxy; print('wb_agents' in sys.modules)"],
+    cwd=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app"),
+    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+check("wb_proxy does not import wb_agents eagerly",
+      eager.stdout.decode("utf-8", "replace").strip() == "False",
+      eager.stdout.decode("utf-8", "replace"))
+loaded = wb_proxy.agents_module()
+check("agents_module() loads wb_agents on demand",
+      sys.modules.get("wb_agents") is loaded)
 
 print()
 print("[29] credential files land owner-only (issue #345)")
@@ -893,8 +895,8 @@ if os.name == "posix":
     check("restore writes the file back owner-only",
           mode_of(os.path.join(crush_dir, "crush.json")) == 0o600)
 else:
-    # Windows has no POSIX mode bits, so assert the mode we *ask for* is 0600
-    # rather than open()'s 0666 & ~umask.
+    # Windows 没有 POSIX 权限位，所以断言申请的模式是 0600，而不是 open()
+    # 的 0666 与 umask 相与的结果。
     seen16 = []
     real_chmod = os.chmod
     os.chmod = lambda p, m, *a, **k: seen16.append((p, m))
@@ -908,7 +910,7 @@ else:
           (auth16 + ".tmp", 0o600) in seen16, seen16)
 
 # ---------------------------------------------------------------------------
-# cleanup
+# 清理
 # ---------------------------------------------------------------------------
 
 for d in (home, accounts, home2, acct2, home3, acct3, home4, acct4,

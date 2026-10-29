@@ -1,18 +1,17 @@
-"""Update discovery: what the gateway may ask GitHub, and what it may keep.
+"""更新发现：网关可以问 GitHub 什么、可以留什么。
 
-Phase A of the update feature is discovery only - it reports that a newer stable
-release exists and stops there. What this suite pins is the contract around it:
+更新功能的第一阶段只做发现：报告存在更新的稳定版就停住。本套件钉住的是
+它周围的契约：
 
-  * the daily check is opt-in and off for an install that never set the key;
-  * off means no request at all, on means roughly once per 24h, and the manual
-    path answers even with the switch off and the window closed;
-  * drafts, prereleases, malformed tags and unexpected documents are skipped
-    rather than crashing the gateway;
-  * a failed check is non-fatal, keeps the last known answer, and reports one
-    short line that carries no URL and no response body;
-  * the background thread cannot hold the process open.
+  * 每日检查显式开启，从没设置过该键的安装默认关闭；
+  * 关闭时一个请求都不发，开启时约 24 小时一次；手动检查不受开关和窗口
+    限制；
+  * 草稿、预发布、畸形 tag 与意料之外的文档一律跳过，不能让网关崩溃；
+  * 检查失败不致命：保留上一次已知答案，报一行短消息，不带 URL 与响应
+    正文；
+  * 后台线程不能拖住进程退出。
 
-No network access: every check runs against an injected fetcher.
+不访问网络：每次检查都跑在注入的 fetcher 上。
 
     python tests/_test_update_check.py
 """
@@ -45,7 +44,7 @@ def release(tag, **overrides):
         "tag_name": tag,
         "draft": False,
         "prerelease": False,
-        "html_url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub/releases/tag/" + tag,
+        "html_url": "https://github.com/flower-elf/DSNetwork-center/releases/tag/" + tag,
         "published_at": "2026-10-08T00:00:00Z",
     }
     entry.update(overrides)
@@ -53,7 +52,7 @@ def release(tag, **overrides):
 
 
 class FakeFetcher(object):
-    """Stands in for the GitHub call and counts how often it was made."""
+    """顶替 GitHub 请求，并统计调用次数。"""
 
     def __init__(self, payload=None, error=None):
         self.payload = payload
@@ -70,12 +69,12 @@ class FakeFetcher(object):
 
 
 def tag_url(tag):
-    return ("https://github.com/ardeyouxipianyi/workbuddy2api-hub"
+    return ("https://github.com/flower-elf/DSNetwork-center"
             "/releases/tag/" + tag)
 
 
 class Redirected(object):
-    """A followed redirect: urlopen reports the final URL and nothing else."""
+    """跟随过重定向的应答：urlopen 只报最终 URL，别的什么都没有。"""
 
     def __init__(self, url):
         self._url = url
@@ -117,7 +116,7 @@ class SettingsContractTests(unittest.TestCase):
                 self.assertFalse(proxy.runtime_settings_view()["update_check_enabled"])
 
     def test_only_a_real_true_enables_it(self):
-        # A hand-edited "yes" or 1 must not start a daily outbound request.
+        # 手改的 "yes" 或 1 不能开启每日外发请求。
         for value in ("yes", 1, "true", [1], {"on": True}):
             with tempfile.TemporaryDirectory(prefix="upd-set-") as d:
                 wb_settings.save(d, {"update_check_enabled": value})
@@ -277,9 +276,9 @@ class CheckBehaviourTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="upd-run-") as d:
             fetcher = FakeFetcher([release("v1.6.18")])
             checker_ = checker(d, fetcher)
-            checker_.check()                      # disabled: nothing sent
+            checker_.check()                      # 关闭：不发请求
             self.assertEqual(fetcher.calls, [])
-            status = checker_.check(manual=True)  # the operator asked anyway
+            status = checker_.check(manual=True)  # 操作者明确要求
             self.assertEqual(len(fetcher.calls), 1)
             self.assertTrue(status["update_available"])
             checker_.check(manual=True)
@@ -300,12 +299,69 @@ class CheckBehaviourTests(unittest.TestCase):
             wb_settings.set_update_check_enabled(d, True)
             fetcher = FakeFetcher([release("v1.6.18")])
             checker(d, fetcher).check()
-            # A new process reads the stored attempt time, so a restart is not
-            # an excuse to check again.
+            # 新进程会读回已存的尝试时刻，重启不能当成立刻再查的理由。
             revived = checker(d, FakeFetcher([release("v1.6.18")]))
             self.assertFalse(revived.due())
-            self.assertEqual(revived.status()["latest_version"], "1.6.18")
-            self.assertTrue(revived.status()["update_available"])
+            status = revived.status()
+            self.assertEqual(status["latest_version"], "1.6.18")
+            self.assertTrue(status["update_available"])
+            # 重启后还没重新检查时，弹窗照样要有可点的发布页。
+            self.assertEqual(status["release_url"], tag_url("v1.6.18"))
+            self.assertEqual(status["published_at"], "2026-10-08T00:00:00Z")
+
+    def test_a_result_from_another_repo_is_dropped_on_load(self):
+        """换了检查目标后，旧仓库的版本号不能继续当结果，也不能占着节流窗口。"""
+        for stored_repo in ("ardeyouxipianyi/workbuddy2api-hub", None):
+            with tempfile.TemporaryDirectory(prefix="upd-migrate-") as d:
+                wb_settings.set_update_check_enabled(d, True)
+                now = time.time()
+                entry = {
+                    "last_attempt": now,
+                    "last_success": now,
+                    "latest_version": "1.9.0",
+                    "latest_url": "https://github.com/ardeyouxipianyi/workbuddy2api-hub"
+                                  "/releases/tag/v1.9.0",
+                }
+                if stored_repo:
+                    entry["repo"] = stored_repo
+                with open(wb_settings.settings_path(d), "w", encoding="utf-8") as fh:
+                    json.dump({"update_check_enabled": True,
+                               wb_settings.UPDATE_CHECK_STATE_KEY: entry}, fh)
+                revived = checker(d, FakeFetcher([release("v1.6.18")]))
+                status = revived.status()
+                self.assertIsNone(status["latest_version"], stored_repo)
+                self.assertFalse(status["update_available"], stored_repo)
+                self.assertTrue(revived.due(), "旧记录不该占着 24 小时窗口")
+                # 新目标的一次检查会写回自己的来源标记。
+                revived.check(manual=True)
+                self.assertEqual(wb_settings.update_check_state(d)["repo"],
+                                 wb_updates.REPO)
+
+    def test_a_failed_check_after_the_repo_change_also_settles(self):
+        """迁移后首检失败也要写新来源并作废旧结果，不能每次重启都再查一次。"""
+        with tempfile.TemporaryDirectory(prefix="upd-migrate-fail-") as d:
+            wb_settings.set_update_check_enabled(d, True)
+            now = time.time()
+            with open(wb_settings.settings_path(d), "w", encoding="utf-8") as fh:
+                json.dump({"update_check_enabled": True,
+                           wb_settings.UPDATE_CHECK_STATE_KEY: {
+                               "repo": "ardeyouxipianyi/workbuddy2api-hub",
+                               "last_attempt": now,
+                               "last_success": now,
+                               "latest_version": "1.9.0",
+                           }}, fh)
+            failed = checker(d, FakeFetcher(error=urllib.error.URLError("down")))
+            failed.check(manual=True)
+            state = wb_settings.update_check_state(d)
+            self.assertEqual(state["repo"], wb_updates.REPO)
+            self.assertEqual(state["latest_version"], "")
+            self.assertEqual(state["latest_url"], "")
+            self.assertEqual(state["last_success"], 0.0,
+                             "旧仓库的成功时间不能算到新目标头上")
+            # 之后的进程读到的是同一个来源：节流窗口恢复了。
+            revived = checker(d, FakeFetcher([release("v1.6.18")]))
+            self.assertFalse(revived.due())
+            self.assertIsNone(revived.status()["latest_version"])
 
 
 class FailureHandlingTests(unittest.TestCase):
@@ -373,8 +429,11 @@ class FailureHandlingTests(unittest.TestCase):
             with open(wb_settings.settings_path(d), encoding="utf-8") as fh:
                 stored = json.load(fh)
         self.assertEqual(sorted(stored["update_check"]),
-                         ["last_attempt", "last_success", "latest_version"])
+                         ["last_attempt", "last_success", "latest_url",
+                          "latest_version", "published_at", "repo"])
         self.assertEqual(stored["update_check"]["latest_version"], "1.6.18")
+        self.assertEqual(stored["update_check"]["latest_url"], tag_url("v1.6.18"))
+        self.assertEqual(stored["update_check"]["repo"], wb_updates.REPO)
 
     def test_a_failed_attempt_is_not_recorded_as_a_success(self):
         with tempfile.TemporaryDirectory(prefix="upd-fail-") as d:
@@ -386,13 +445,12 @@ class FailureHandlingTests(unittest.TestCase):
 
 
 class QuotaFallbackTests(unittest.TestCase):
-    """The API's anonymous quota is 60/h **per egress IP**, so a shared exit can be
-    spent by somebody else and every check from that exit then fails. These run the
-    real fetcher with the socket layer stubbed: the injected fetcher the other
-    suites use sits above the fallback and cannot see it."""
+    """API 的匿名配额是每出口 IP 每小时 60 次，共享出口的额度可能被别人用光，
+    之后从这个出口发起的检查都会失败。这里跑真实 fetcher、只替身 socket 层：
+    别的套件注入的 fetcher 在回退逻辑之上，看不到回退。"""
 
     def _stub(self, web, api_error=None):
-        """urlopen stand-in: the API refuses, the web endpoint answers `web`."""
+        """urlopen 替身：API 拒绝，网页端点返回 `web`。"""
         calls = []
 
         def urlopen(request, timeout=None):
@@ -418,8 +476,7 @@ class QuotaFallbackTests(unittest.TestCase):
             self.assertEqual(status["release_url"], tag_url("v1.6.20"))
 
     def test_a_transport_error_on_the_api_path_also_falls_back(self):
-        # A proxy can reset one host and serve the other, so the fallback must
-        # not care *why* the API call failed.
+        # 代理可能掐掉一个主机、放行另一个，所以回退不关心 API 调用失败的原因。
         with tempfile.TemporaryDirectory(prefix="upd-quota-") as d:
             urlopen, _calls = self._stub(Redirected(tag_url("v1.6.20")),
                                          api_error=urllib.error.URLError("reset"))
@@ -488,6 +545,21 @@ class BackgroundWorkerTests(unittest.TestCase):
             worker.stop()
             worker.join(timeout=5)
         self.assertGreaterEqual(len(fetcher.calls), 1)
+        self.assertFalse(worker.is_alive())
+
+    def test_an_enabled_worker_checks_before_the_first_delay(self):
+        """开关打开时启动即查一次：首个延迟只约束之后的轮询。"""
+        with tempfile.TemporaryDirectory(prefix="upd-bg-") as d:
+            wb_settings.set_update_check_enabled(d, True)
+            fetcher = FakeFetcher([release("v1.6.18")])
+            worker = checker(d, fetcher, first_delay=3600, poll_seconds=3600)
+            worker.start()
+            deadline = time.time() + 5
+            while not fetcher.calls and time.time() < deadline:
+                time.sleep(0.02)
+            worker.stop()
+            worker.join(timeout=5)
+        self.assertEqual(len(fetcher.calls), 1, "启动时就该查一次，不等首个延迟")
         self.assertFalse(worker.is_alive())
 
 
@@ -595,11 +667,10 @@ class RouteTests(unittest.TestCase):
 
 
 class DispatchRequest(proxy.Handler):
-    """A real Handler driven over an in-memory socket.
+    """由内存套接字驱动的真实 Handler。
 
-    The update status is management state, so which boundary refuses it is a
-    property of the dispatcher, not of the endpoint method - the request has to
-    go through the real do_GET/do_POST for the test to mean anything.
+    更新状态属于管理状态，拒绝发生在哪一层是分发器的属性而不是端点方法的
+    属性，所以请求必须走真实的 do_GET/do_POST，测试才有意义。
     """
 
     def __init__(self, path, headers=None, command="GET"):
@@ -627,14 +698,14 @@ class DispatchRequest(proxy.Handler):
         pass
 
     def dispatch(self):
-        """Run the real dispatcher and decode the reply it wrote."""
+        """跑真实分发器并解码它写出的应答。"""
         getattr(self, "do_" + self.command)()
         raw = self.wfile.getvalue()
         return self.status, (json.loads(raw.decode("utf-8")) if raw else None)
 
 
 class UpdateRouteAccessTests(unittest.TestCase):
-    """`/updates` is management state: a panel session, not just an API key."""
+    """`/updates` 属于管理状态：要面板会话，只有 API Key 不够。"""
 
     KEY = "panel-secret-key"
 
@@ -648,7 +719,7 @@ class UpdateRouteAccessTests(unittest.TestCase):
         self._accounts(directory, with_key)
         if updates is None:
             updates = checker(directory, FakeFetcher([release("v1.6.18")]))
-            updates.check(manual=True)   # so the status has an answer to report
+            updates.check(manual=True)   # 先跑一次，状态里才有答案可报
         request = DispatchRequest(path, headers=headers, command=command)
         with mock.patch.multiple(proxy, ACCOUNTS_DIR=directory, UPDATES=updates,
                                  API_KEY=None):
